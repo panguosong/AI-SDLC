@@ -1,0 +1,145 @@
+"""Project Bootstrap Router — detect project state and initialize."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from ai_sdlc.core.config import (
+    load_project_state,
+    persist_preferred_shell,
+    save_project_state,
+)
+from ai_sdlc.models.project import ProjectState, ProjectStatus
+from ai_sdlc.utils.helpers import AI_SDLC_DIR, has_project_markers, now_iso
+
+logger = logging.getLogger(__name__)
+
+GREENFIELD = "greenfield"
+EXISTING_INITIALIZED = "existing_project_initialized"
+EXISTING_UNINITIALIZED = "existing_project_uninitialized"
+
+
+def detect_project_state(root: Path) -> str:
+    """Detect the current project state.
+
+    Returns:
+        One of: "greenfield", "existing_project_initialized",
+        "existing_project_uninitialized".
+    """
+    ai_sdlc_dir = root / AI_SDLC_DIR
+    if ai_sdlc_dir.is_dir():
+        state = load_project_state(root)
+        if state.status == ProjectStatus.INITIALIZED:
+            return EXISTING_INITIALIZED
+    if has_project_markers(root):
+        return EXISTING_UNINITIALIZED
+    return GREENFIELD
+
+
+def init_project(
+    root: Path,
+    project_name: str = "",
+    *,
+    agent_target: str | None = None,
+    preferred_shell: str | None = None,
+) -> ProjectState:
+    """Initialize AI-SDLC in a project directory.
+
+    Creates the .ai-sdlc/ directory structure and writes initial project-state.yaml.
+    For existing projects (has code but no .ai-sdlc/), also runs deep scanning
+    and generates the engineering knowledge baseline.
+    Idempotent: if already initialized, returns existing state without overwriting.
+
+    Args:
+        root: The project root directory.
+        project_name: Optional project name. Defaults to directory name.
+
+    Returns:
+        The resulting ProjectState.
+    """
+    existing = detect_project_state(root)
+    if existing == EXISTING_INITIALIZED:
+        logger.info("Project already initialized at %s", root)
+        return load_project_state(root)
+
+    is_existing = existing == EXISTING_UNINITIALIZED
+
+    if not project_name:
+        project_name = root.resolve().name
+
+    dirs_to_create = [
+        root / AI_SDLC_DIR / "project" / "config",
+        root / AI_SDLC_DIR / "project" / "memory",
+        root / AI_SDLC_DIR / "project" / "generated",
+        root / AI_SDLC_DIR / "project" / "bootstrap",
+        root / AI_SDLC_DIR / "memory",
+        root / AI_SDLC_DIR / "profiles",
+        root / AI_SDLC_DIR / "state",
+        root / AI_SDLC_DIR / "work-items",
+    ]
+    for d in dirs_to_create:
+        d.mkdir(parents=True, exist_ok=True)
+
+    now = now_iso()
+    state = ProjectState(
+        status=ProjectStatus.INITIALIZED,
+        project_name=project_name,
+        initialized_at=now,
+        last_updated=now,
+        next_work_item_seq=1,
+    )
+    save_project_state(root, state)
+    _bootstrap_governance_files(root)
+
+    if is_existing:
+        from ai_sdlc.routers.existing_project_init import init_existing_project
+
+        logger.info(
+            "Detected existing project — running deep scan for '%s'", project_name
+        )
+        _scan, _generated = init_existing_project(root)
+        logger.info("Generated %d knowledge baseline files", len(_generated))
+
+    if preferred_shell:
+        persist_preferred_shell(root, preferred_shell)
+    from ai_sdlc.integrations.ide_adapter import ensure_ide_adaptation
+
+    ensure_ide_adaptation(root, agent_target=agent_target)
+
+    logger.info("Initialized AI-SDLC project '%s' at %s", project_name, root)
+    return state
+
+
+def _bootstrap_governance_files(root: Path) -> None:
+    """Create minimal governance assets required by INIT gate when absent."""
+    constitution = root / AI_SDLC_DIR / "memory" / "constitution.md"
+    if not constitution.exists():
+        constitution.write_text(
+            "# Constitution\n"
+            "- Principle 1: Persist decisions to the repository.\n"
+            "- Principle 2: Prefer contract-level verification before closure.\n"
+            "- Principle 3: Keep docs and code traceable.\n",
+            encoding="utf-8",
+        )
+
+    tech_stack = root / AI_SDLC_DIR / "profiles" / "tech-stack.yml"
+    if not tech_stack.exists():
+        tech_stack.write_text(
+            "backend:\n"
+            "  name: python\n"
+            "  version: '3.11+'\n"
+            "  source: bootstrap-default\n",
+            encoding="utf-8",
+        )
+
+    decisions = root / AI_SDLC_DIR / "profiles" / "decisions.yml"
+    if not decisions.exists():
+        decisions.write_text(
+            "decisions:\n"
+            "  - id: INIT-001\n"
+            "    question: default_execution_mode\n"
+            "    choice: auto\n"
+            "    rationale: bootstrap default\n",
+            encoding="utf-8",
+        )

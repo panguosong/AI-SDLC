@@ -1,0 +1,483 @@
+name: Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag that will receive the platform assets.
+        required: true
+        default: v3.1.0
+      upload_to_release:
+        description: Upload smoke-passed assets to the existing GitHub Release.
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-smoke:
+    name: ${{ matrix.asset_os }} ${{ matrix.archive }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_os: windows
+            asset_machine: amd64
+            runner: windows-latest
+            archive: zip
+          - asset_os: macos
+            asset_machine: arm64
+            runner: macos-latest
+            archive: tar.gz
+          - asset_os: linux
+            asset_machine: amd64
+            runner: ubuntu-latest
+            archive: tar.gz
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      ALLOWED_RELEASE_TAG: v3.1.0
+      DISPATCH_REF: ${{ github.ref }}
+      DISPATCH_SHA: ${{ github.sha }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact release tag source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_TAG}" != "${ALLOWED_RELEASE_TAG}" ]]; then
+            echo "Only ${ALLOWED_RELEASE_TAG} may be built by this release workflow; refusing ${RELEASE_TAG}." >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_REF}" != "refs/heads/main" ]]; then
+            echo "Release builds must be dispatched from refs/heads/main, not ${DISPATCH_REF}." >&2
+            exit 1
+          fi
+          package_version="$(awk -F'"' '/^version =/ {print $2; exit}' pyproject.toml)"
+          if [[ "${RELEASE_TAG}" != "v${package_version}" ]]; then
+            echo "Release tag ${RELEASE_TAG} does not match package version ${package_version}." >&2
+            exit 1
+          fi
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          if [[ "${head_commit}" != "${tag_commit}" ]]; then
+            echo "Checked-out source ${head_commit} does not match ${RELEASE_TAG} commit ${tag_commit}." >&2
+            exit 1
+          fi
+          if [[ "${tag_commit}" != "${DISPATCH_SHA}" ]]; then
+            echo "Release tag commit ${tag_commit} does not match dispatched main commit ${DISPATCH_SHA}." >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Compute platform asset suffix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          case "${os}" in
+            darwin) os="macos" ;;
+            linux) os="linux" ;;
+          esac
+          machine="$(uname -m | tr '[:upper:]' '[:lower:]')"
+          case "${machine}" in
+            x86_64|amd64) machine="amd64" ;;
+            arm64|aarch64) machine="arm64" ;;
+          esac
+          echo "AI_SDLC_OFFLINE_ASSET_SUFFIX=-${os}-${machine}" >> "${GITHUB_ENV}"
+          echo "AI_SDLC_RELEASE_ASSET_OS=${os}" >> "${GITHUB_ENV}"
+          echo "AI_SDLC_RELEASE_ASSET_MACHINE=${machine}" >> "${GITHUB_ENV}"
+
+      - name: Compute Windows asset suffix
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+          if ($arch -eq "x64" -or $arch -eq "x86_64") {
+            $arch = "amd64"
+          } elseif ($arch -eq "aarch64") {
+            $arch = "arm64"
+          }
+          "AI_SDLC_OFFLINE_ASSET_SUFFIX=-windows-$arch" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "AI_SDLC_RELEASE_ASSET_OS=windows" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "AI_SDLC_RELEASE_ASSET_MACHINE=$arch" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "AI_SDLC_OFFLINE_PYTHON_VERSIONS=3.11,3.12" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "AI_SDLC_OFFLINE_TARGET_PLATFORM=win_$arch" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build offline bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${AI_SDLC_RELEASE_ASSET_OS}" != "${{ matrix.asset_os }}" || "${AI_SDLC_RELEASE_ASSET_MACHINE}" != "${{ matrix.asset_machine }}" ]]; then
+            echo "Runner identity ${AI_SDLC_RELEASE_ASSET_OS}-${AI_SDLC_RELEASE_ASSET_MACHINE} does not match required release asset ${{ matrix.asset_os }}-${{ matrix.asset_machine }}." >&2
+            exit 1
+          fi
+          uv python install 3.11
+          runtime_python="$(uv python find --managed-python 3.11)"
+          if command -v cygpath >/dev/null 2>&1; then
+            runtime_python="$(cygpath -u "${runtime_python}")"
+          fi
+          runtime_dir="$(dirname "${runtime_python}")"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            runtime_root="${runtime_dir}"
+          else
+            runtime_root="$(cd "${runtime_dir}/.." && pwd)"
+          fi
+          PYTHON="${runtime_python}" \
+            AI_SDLC_OFFLINE_PYTHON_RUNTIME="${runtime_root}" \
+            AI_SDLC_OFFLINE_ASSET_SUFFIX="${AI_SDLC_OFFLINE_ASSET_SUFFIX}" \
+            AI_SDLC_OFFLINE_PYTHON_VERSIONS="${AI_SDLC_OFFLINE_PYTHON_VERSIONS:-}" \
+            AI_SDLC_OFFLINE_TARGET_PLATFORM="${AI_SDLC_OFFLINE_TARGET_PLATFORM:-}" \
+            bash packaging/offline/build_offline_bundle.sh
+
+      - name: Smoke Windows zip
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [Console]::InputEncoding = $utf8
+          [Console]::OutputEncoding = $utf8
+          $OutputEncoding = $utf8
+
+          $releaseVersion = $env:RELEASE_TAG.Substring(1)
+          $archivePath = Join-Path "dist-offline" "ai-sdlc-offline-$releaseVersion-$env:AI_SDLC_RELEASE_ASSET_OS-$env:AI_SDLC_RELEASE_ASSET_MACHINE.zip"
+          $archive = Get-Item -LiteralPath $archivePath -ErrorAction SilentlyContinue
+          $checksumPath = "$($archive.FullName).sha256"
+          if (-not $archive -or -not (Test-Path -LiteralPath $checksumPath)) {
+            throw "Expected exact platform zip archive and SHA256 sidecar were not produced: $archivePath"
+          }
+          $checksumParts = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
+          $actualArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
+          if (
+            $checksumParts.Count -ne 2 -or
+            $checksumParts[1] -ne $archive.Name -or
+            $checksumParts[0].ToLowerInvariant() -ne $actualArchiveHash
+          ) {
+            throw "Archive SHA256 verification failed before extraction: $($archive.Name)"
+          }
+
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "ai-sdlc-release-build-smoke"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "ai-sdlc-release-build-evidence"
+          Remove-Item -Recurse -Force $smokeRoot, $evidenceRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $smokeRoot, $evidenceRoot | Out-Null
+
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $smokeRoot -Force
+          $bundleDir = Get-ChildItem -Path $smokeRoot -Directory | Select-Object -First 1
+          if (-not $bundleDir) {
+            throw "Expanded archive did not contain a bundle directory."
+          }
+
+          python packaging/offline/verify_offline_bundle.py $bundleDir.FullName `
+            --require-bundled-runtime `
+            --require-checksums `
+            --expected-package-version $releaseVersion `
+            --archive-checksum $archive.FullName $checksumPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pre-install verify_offline_bundle.py failed with exit code $LASTEXITCODE"
+          }
+
+          $digest = (Get-FileHash -Algorithm SHA256 "AGENTS.md").Hash.ToLowerInvariant()
+          $env:OPENAI_CODEX = "1"
+          $env:AI_SDLC_ADAPTER_CANONICAL_SHA256 = "sha256:$digest"
+          $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+          if (-not (Test-Path $windowsPowerShell)) {
+            throw "Expected Windows PowerShell 5.1 at $windowsPowerShell"
+          }
+
+          Push-Location $bundleDir.FullName
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File .\install_offline.ps1 -AddToPath *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "install.log")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell install_offline.ps1 failed with exit code $LASTEXITCODE"
+          }
+          Pop-Location
+
+          python packaging/offline/verify_offline_bundle.py $bundleDir.FullName `
+            --require-bundled-runtime `
+            --expected-package-version $releaseVersion `
+            --install-log (Join-Path $evidenceRoot "install.log")
+          if ($LASTEXITCODE -ne 0) {
+            throw "verify_offline_bundle.py failed with exit code $LASTEXITCODE"
+          }
+
+          $cliDir = Join-Path $bundleDir.FullName ".venv\Scripts"
+          $env:Path = $cliDir + [IO.Path]::PathSeparator + $env:Path
+          if (-not (Get-Command ai-sdlc -ErrorAction SilentlyContinue)) {
+            throw "Expected ai-sdlc to resolve on PATH after -AddToPath install."
+          }
+          ai-sdlc --help *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "help.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "ai-sdlc --help failed with exit code $LASTEXITCODE"
+          }
+          $actualVersion = (ai-sdlc --version).Trim()
+          $expectedVersion = $env:RELEASE_TAG.Substring(1)
+          if ($actualVersion -ne $expectedVersion) {
+            throw "Installed CLI version $actualVersion does not match release tag $env:RELEASE_TAG."
+          }
+          $actualVersion | Out-File -FilePath (Join-Path $evidenceRoot "version.txt") -Encoding utf8
+          Push-Location $env:GITHUB_WORKSPACE
+          ai-sdlc adapter status *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "adapter-status.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "ai-sdlc adapter status failed with exit code $LASTEXITCODE"
+          }
+          ai-sdlc run --dry-run *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "run-dry-run.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "ai-sdlc run --dry-run failed with exit code $LASTEXITCODE"
+          }
+          Pop-Location
+          Copy-Item -LiteralPath (Join-Path $bundleDir.FullName "bundle-manifest.json") -Destination $evidenceRoot
+
+      - name: Smoke POSIX tar
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          archive="dist-offline/ai-sdlc-offline-${release_version}-${AI_SDLC_RELEASE_ASSET_OS}-${AI_SDLC_RELEASE_ASSET_MACHINE}.tar.gz"
+          checksum_path="${archive}.sha256"
+          if [[ ! -f "${archive}" || ! -f "${checksum_path}" ]]; then
+            echo "Expected exact platform tar archive and SHA256 sidecar were not produced: ${archive}" >&2
+            exit 1
+          fi
+          checksum_line="$(tr -d '\r' < "${checksum_path}")"
+          expected_archive_hash="${checksum_line%%  *}"
+          sidecar_archive_name="${checksum_line#*  }"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual_archive_hash="$(sha256sum "${archive}" | awk '{print $1}')"
+          else
+            actual_archive_hash="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          fi
+          expected_archive_hash_lower="$(printf '%s' "${expected_archive_hash}" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "${expected_archive_hash}" =~ ^[0-9a-fA-F]{64}$ || "${sidecar_archive_name}" != "$(basename "${archive}")" || "${actual_archive_hash}" != "${expected_archive_hash_lower}" ]]; then
+            echo "Archive SHA256 verification failed before extraction: ${archive}" >&2
+            exit 1
+          fi
+
+          smoke_root="${RUNNER_TEMP}/ai-sdlc-release-build-smoke"
+          evidence_root="${RUNNER_TEMP}/ai-sdlc-release-build-evidence"
+          rm -rf "${smoke_root}" "${evidence_root}"
+          mkdir -p "${smoke_root}" "${evidence_root}"
+
+          tar xzf "${archive}" -C "${smoke_root}"
+          bundle_dir="$(find "${smoke_root}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          if [[ -z "${bundle_dir}" ]]; then
+            echo "Expanded archive did not contain a bundle directory." >&2
+            exit 1
+          fi
+
+          python packaging/offline/verify_offline_bundle.py "${bundle_dir}" \
+            --require-bundled-runtime \
+            --require-checksums \
+            --expected-package-version "${release_version}" \
+            --archive-checksum "${archive}" "${checksum_path}"
+
+          digest="$(python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          print(hashlib.sha256(Path("AGENTS.md").read_bytes()).hexdigest())
+          PY
+          )"
+          export OPENAI_CODEX=1
+          export AI_SDLC_ADAPTER_CANONICAL_SHA256="sha256:${digest}"
+
+          (
+            cd "${bundle_dir}"
+            ./install_offline.sh --add-to-path 2>&1 | tee "${evidence_root}/install.log"
+          )
+
+          python packaging/offline/verify_offline_bundle.py "${bundle_dir}" \
+            --require-bundled-runtime \
+            --expected-package-version "${release_version}" \
+            --install-log "${evidence_root}/install.log"
+
+          export PATH="${HOME}/.local/bin:${PATH}"
+          command -v ai-sdlc >/dev/null
+          ai-sdlc --help 2>&1 | tee "${evidence_root}/help.txt"
+          actual_version="$(ai-sdlc --version)"
+          if [[ "${actual_version}" != "${release_version}" ]]; then
+            echo "Installed CLI version ${actual_version} does not match release tag ${RELEASE_TAG}." >&2
+            exit 1
+          fi
+          printf '%s\n' "${actual_version}" > "${evidence_root}/version.txt"
+          ai-sdlc adapter status 2>&1 | tee "${evidence_root}/adapter-status.txt"
+          ai-sdlc run --dry-run 2>&1 | tee "${evidence_root}/run-dry-run.txt"
+          cp "${bundle_dir}/bundle-manifest.json" "${evidence_root}/"
+
+      - name: Upload build smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-build-${{ matrix.asset_os }}-${{ matrix.archive }}-evidence
+          path: ${{ runner.temp }}/ai-sdlc-release-build-evidence
+          if-no-files-found: error
+
+      - name: Stage smoke-passed release assets
+        if: inputs.upload_to_release == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ matrix.asset_os }}-${{ matrix.archive }}
+          path: |
+            dist-offline/ai-sdlc-offline-*-${{ matrix.asset_os }}-${{ matrix.asset_machine }}.${{ matrix.archive }}
+            dist-offline/ai-sdlc-offline-*-${{ matrix.asset_os }}-${{ matrix.asset_machine }}.${{ matrix.archive }}.sha256
+          if-no-files-found: error
+
+  upload-release-assets:
+    name: Upload smoke-passed release assets
+    if: inputs.upload_to_release == 'true'
+    needs: build-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      ALLOWED_RELEASE_TAG: v3.1.0
+      DISPATCH_REF: ${{ github.ref }}
+      DISPATCH_SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download smoke-passed release assets
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-assets-*
+          path: dist-offline
+          merge-multiple: true
+
+      - name: Upload smoke-passed assets to release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_TAG}" != "${ALLOWED_RELEASE_TAG}" ]]; then
+            echo "Only ${ALLOWED_RELEASE_TAG} may receive release assets; refusing ${RELEASE_TAG}." >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_REF}" != "refs/heads/main" || ! "${DISPATCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release assets require an exact main-branch dispatch commit." >&2
+            exit 1
+          fi
+          require_exact_remote_release_tag() {
+            remote_tag_ref="$(
+              gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+                --jq '.object.type + " " + .object.sha'
+            )"
+            read -r remote_tag_type remote_tag_object_sha <<< "${remote_tag_ref}"
+            if [[ "${remote_tag_type}" != "tag" || ! "${remote_tag_object_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Release tag ${RELEASE_TAG} must resolve to one annotated tag object." >&2
+              exit 1
+            fi
+            remote_tag_commit="$(
+              gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_tag_object_sha}" \
+                --jq 'select(.object.type == "commit") | .object.sha'
+            )"
+            if [[ "${remote_tag_commit}" != "${DISPATCH_SHA}" ]]; then
+              echo "Release tag ${RELEASE_TAG} now resolves to ${remote_tag_commit}, not ${DISPATCH_SHA}." >&2
+              exit 1
+            fi
+          }
+          require_exact_remote_release_tag
+          local_paths=()
+          while IFS= read -r local_path; do
+            local_paths+=("${local_path}")
+          done < <(find dist-offline -maxdepth 1 -type f -name 'ai-sdlc-offline-*' -print | sort)
+          if [[ "${#local_paths[@]}" -ne 6 ]]; then
+            printf 'Expected exactly six release files, found %s.\n' "${#local_paths[@]}" >&2
+            exit 1
+          fi
+          expected_asset_names=()
+          for local_path in "${local_paths[@]}"; do
+            expected_asset_names+=("$(basename "${local_path}")")
+          done
+          release_is_draft="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
+          if [[ "${release_is_draft}" != "true" ]]; then
+            echo "Release ${RELEASE_TAG} is not a draft; refusing to upload or replace assets." >&2
+            exit 1
+          fi
+          existing_asset_names="$(
+            gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'
+          )"
+          while IFS= read -r existing_name; do
+            [[ -z "${existing_name}" ]] && continue
+            expected="false"
+            for expected_name in "${expected_asset_names[@]}"; do
+              if [[ "${existing_name}" == "${expected_name}" ]]; then
+                expected="true"
+                break
+              fi
+            done
+            if [[ "${expected}" != "true" ]]; then
+              echo "Release ${RELEASE_TAG} contains an unexpected asset: ${existing_name}" >&2
+              exit 1
+            fi
+          done <<< "${existing_asset_names}"
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "${download_dir}"' EXIT
+          upload_paths=()
+          for local_path in "${local_paths[@]}"; do
+            local_name="$(basename "${local_path}")"
+            exists="false"
+            while IFS= read -r existing_name; do
+              if [[ "${existing_name}" == "${local_name}" ]]; then
+                exists="true"
+                break
+              fi
+            done <<< "${existing_asset_names}"
+            if [[ "${exists}" == "true" ]]; then
+              gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --pattern "${local_name}" --dir "${download_dir}"
+              if ! cmp -s "${local_path}" "${download_dir}/${local_name}"; then
+                echo "Existing release asset does not match the smoke-tested file: ${local_name}" >&2
+                exit 1
+              fi
+            else
+              upload_paths+=("${local_path}")
+            fi
+          done
+          if (( ${#upload_paths[@]} > 0 )); then
+            release_is_draft="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "Release ${RELEASE_TAG} is no longer a draft; refusing to upload assets." >&2
+              exit 1
+            fi
+            require_exact_remote_release_tag
+            gh release upload "${RELEASE_TAG}" "${upload_paths[@]}" --repo "${GITHUB_REPOSITORY}"
+          fi
+          final_asset_names="$(
+            gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'
+          )"
+          expected_asset_set="$(printf '%s\n' "${expected_asset_names[@]}" | LC_ALL=C sort)"
+          final_asset_set="$(printf '%s\n' "${final_asset_names}" | sed '/^$/d' | LC_ALL=C sort)"
+          if [[ "${final_asset_set}" != "${expected_asset_set}" ]]; then
+            echo "Release ${RELEASE_TAG} assets do not exactly match the six smoke-tested files." >&2
+            exit 1
+          fi

@@ -1,0 +1,655 @@
+name: Windows User Guide E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to verify against the user guide.
+        required: true
+        default: v3.1.0
+  pull_request:
+    paths:
+      - ".github/workflows/windows-user-guide-e2e.yml"
+      - "src/**"
+      - "pyproject.toml"
+      - "packaging_backend.py"
+      - "README.md"
+      - "USER_GUIDE.zh-CN.md"
+      - "templates/**"
+      - "scripts/frontend_browser_gate_probe_runner.mjs"
+      - "packaging/install_online.ps1"
+      - "packaging/offline/**"
+      - "scripts/windows_clean_user_e2e.py"
+      - "scripts/windows_clean_user_e2e_support.py"
+      - "scripts/windows_python_bootstrap_e2e.ps1"
+      - "tests/integration/test_github_workflows.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-user-guide-e2e-${{ github.event.pull_request.number || inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  existing-project-online-install:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - name: Checkout repository truth
+        uses: actions/checkout@v6
+
+      - name: Set up package build Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build Windows offline bundle for pull request replay
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install 3.11
+          runtime_python="$(uv python find --managed-python 3.11)"
+          runtime_python="$(cygpath -u "$runtime_python")"
+          runtime_root="$(dirname "$runtime_python")"
+          PYTHON="$runtime_python" \
+            PYTHONUTF8="1" \
+            PYTHONIOENCODING="utf-8" \
+            AI_SDLC_OFFLINE_PYTHON_RUNTIME="$runtime_root" \
+            AI_SDLC_OFFLINE_PYTHON_VERSIONS="3.11,3.12" \
+            AI_SDLC_OFFLINE_ASSET_SUFFIX="-windows-amd64" \
+            AI_SDLC_OFFLINE_TARGET_PLATFORM="win_amd64" \
+            bash packaging/offline/build_offline_bundle.sh
+
+      - name: Install ConPTY interaction driver dependency
+        shell: pwsh
+        run: |
+          py -3.11 -m pip install --disable-pip-version-check "pywinpty==3.0.5"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to install the ConPTY-only offline E2E dependency."
+          }
+
+      - name: Replay Windows existing-project guide path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [Console]::InputEncoding = $utf8
+          [Console]::OutputEncoding = $utf8
+          $OutputEncoding = $utf8
+
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "ai-sdlc-windows-user-guide-e2e"
+          $workRoot = Join-Path $env:RUNNER_TEMP "work"
+          $projectRoot = Join-Path $workRoot "my-existing-project"
+          Remove-Item -Recurse -Force $evidenceRoot, $workRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $evidenceRoot, $projectRoot | Out-Null
+
+          $packageSourceMode = if ($env:GITHUB_EVENT_NAME -eq "pull_request") { "pull_request_local_bundle" } else { "published_release" }
+          "release_tag=$env:RELEASE_TAG; package_source=$packageSourceMode" |
+            Out-File -FilePath (Join-Path $evidenceRoot "scenario.txt") -Encoding utf8
+
+          @"
+          {
+            "scripts": {
+              "build": "node -e \"console.log('existing project build placeholder')\""
+            },
+            "dependencies": {}
+          }
+          "@ | Out-File -FilePath (Join-Path $projectRoot "package.json") -Encoding utf8
+          New-Item -ItemType Directory -Force -Path (Join-Path $projectRoot "src") | Out-Null
+          "console.log('existing project source file');" | Out-File -FilePath (Join-Path $projectRoot "src\main.js") -Encoding utf8
+          "# Existing Project" | Out-File -FilePath (Join-Path $projectRoot "README.md") -Encoding utf8
+          "- [ ] Existing imported task" | Out-File -FilePath (Join-Path $projectRoot "TODO.md") -Encoding utf8
+          $businessFiles = @(
+            (Join-Path $projectRoot "package.json"),
+            (Join-Path $projectRoot "src\main.js"),
+            (Join-Path $projectRoot "README.md"),
+            (Join-Path $projectRoot "TODO.md")
+          )
+          Get-ChildItem -LiteralPath $projectRoot -Recurse |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize |
+            Out-String |
+            Out-File -FilePath (Join-Path $evidenceRoot "existing-project-before.txt") -Encoding utf8
+          $businessFileHashesBefore = Get-FileHash -Algorithm SHA256 -LiteralPath $businessFiles | Sort-Object Path
+          $businessFileHashesBefore |
+            Format-Table -AutoSize |
+            Out-String |
+            Out-File -FilePath (Join-Path $evidenceRoot "business-file-hashes-before.txt") -Encoding utf8
+
+          # USER_GUIDE.zh-CN.md Chapter 2: existing project online download from Release.
+          Push-Location $projectRoot
+          cd ..
+          $releaseVersion = $env:RELEASE_TAG.TrimStart("v")
+          $BundleName = "ai-sdlc-offline-$releaseVersion-windows-amd64"
+          $PackageName = "$BundleName.zip"
+          $ChecksumName = "$PackageName.sha256"
+          $PackageDir = (Get-Location).Path
+          $ExtractRoot = Join-Path $PackageDir ".ai-sdlc-install"
+          $expectedTag = if ($env:GITHUB_EVENT_NAME -eq "pull_request") { "v3.1.0" } else { "v3.1.0" }
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "Guide replay tag $env:RELEASE_TAG differs from the expected candidate/published split $expectedTag."
+          }
+          $packagePath = Join-Path $PackageDir $PackageName
+          $checksumPath = Join-Path $PackageDir $ChecksumName
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            $localPackage = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "dist-offline") -Filter $PackageName -File |
+              Select-Object -First 1
+            if (-not $localPackage) {
+              throw "Pull request guide replay expected local package from dist-offline: $PackageName"
+            }
+            Copy-Item -LiteralPath $localPackage.FullName -Destination $packagePath -Force
+            $localChecksum = Get-Item -LiteralPath "$($localPackage.FullName).sha256" -ErrorAction SilentlyContinue
+            if (-not $localChecksum) {
+              throw "Pull request guide replay expected local SHA256 sidecar: $ChecksumName"
+            }
+            Copy-Item -LiteralPath $localChecksum.FullName -Destination $checksumPath -Force
+          } else {
+            Invoke-WebRequest -Uri "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$PackageName" -OutFile $packagePath
+            Invoke-WebRequest -Uri "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$ChecksumName" -OutFile $checksumPath
+          }
+          $checksumParts = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
+          if ($checksumParts.Count -ne 2 -or $checksumParts[1] -ne $PackageName) {
+            throw "SHA256 sidecar does not bind to $PackageName"
+          }
+          $actualPackageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $packagePath).Hash.ToLowerInvariant()
+          if ($actualPackageHash -ne $checksumParts[0].ToLowerInvariant()) {
+            throw "SHA256 verification failed for $PackageName"
+          }
+          New-Item -ItemType Directory -Path $ExtractRoot -Force | Out-Null
+          Write-Host "正在解压安装包；如果已经解压过，会安静覆盖同名文件。"
+          Write-Host "Extracting package; existing installer files will be overwritten quietly."
+          Expand-Archive -LiteralPath (Join-Path $PackageDir $PackageName) -DestinationPath $ExtractRoot -Force
+          Set-Location (Join-Path $ExtractRoot $BundleName)
+          powershell -ExecutionPolicy Bypass -File .\install_offline.ps1 -AddToPath *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "install.log")
+          if ($LASTEXITCODE -ne 0) {
+            throw "install_offline.ps1 -AddToPath failed with exit code $LASTEXITCODE"
+          }
+          .\.venv\Scripts\python.exe -m ai_sdlc --help *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "help-via-bundle-python.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "bundle python -m ai_sdlc --help failed with exit code $LASTEXITCODE"
+          }
+          $stableShimDir = Join-Path $env:LOCALAPPDATA "AI-SDLC\bin"
+          $stableShim = Join-Path $stableShimDir "ai-sdlc.exe"
+          if (-not (Test-Path $stableShim)) {
+            throw "installer did not create stable user command shim: $stableShim"
+          }
+          $stalePathDir = Join-Path $workRoot "old-python\Scripts"
+          New-Item -ItemType Directory -Force -Path $stalePathDir | Out-Null
+          @"
+          #!/usr/bin/env sh
+          echo stale ai-sdlc should not run >&2
+          exit 127
+          "@ | Out-File -FilePath (Join-Path $stalePathDir "ai-sdlc") -Encoding ascii
+          $bashCandidates = @(
+            "C:\Program Files\Git\bin\bash.exe",
+            "C:\Program Files\Git\usr\bin\bash.exe"
+          )
+          $bashExe = $bashCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $bashExe) {
+            throw "Git Bash was not found on the Windows runner"
+          }
+          $originalPath = $env:Path
+          $env:Path = "$stalePathDir;$originalPath"
+          try {
+            $gitBashOutput = & $bashExe -lc 'type -a ai-sdlc; ai-sdlc --version' 2>&1
+            $gitBashExit = $LASTEXITCODE
+          } finally {
+            $env:Path = $originalPath
+          }
+          $gitBashOutput |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "git-bash-bare-version.txt")
+          if ($gitBashExit -ne 0) {
+            throw "Git Bash bare ai-sdlc --version failed with exit code $gitBashExit"
+          }
+          $expectedVersion = $env:RELEASE_TAG -replace '^v', ''
+          $gitBashText = ($gitBashOutput | Out-String)
+          if ($gitBashText -notmatch [regex]::Escape($expectedVersion)) {
+            throw "Git Bash bare ai-sdlc --version did not report $expectedVersion"
+          }
+          if ($gitBashText -match "stale ai-sdlc should not run") {
+            throw "Git Bash resolved the stale PATH entry instead of the stable AI-SDLC shim"
+          }
+          Pop-Location
+
+          $installOutput = Get-Content -LiteralPath (Join-Path $evidenceRoot "install.log") -Raw
+          if ($installOutput -notmatch "Direct shim") {
+            throw "installer output did not include Direct shim guidance required by USER_GUIDE.zh-CN.md"
+          }
+          if ($installOutput -notmatch "Codex \+ PowerShell project init") {
+            "installer_printed_codex_powershell_init=false" |
+              Out-File -FilePath (Join-Path $evidenceRoot "released-package-guide-gap.txt") -Encoding utf8
+            Write-Warning "Published package did not print Codex + PowerShell project init; continuing with the explicit command documented by USER_GUIDE.zh-CN.md."
+          } else {
+            "installer_printed_codex_powershell_init=true" |
+              Out-File -FilePath (Join-Path $evidenceRoot "released-package-guide-gap.txt") -Encoding utf8
+          }
+
+          $directShim = Join-Path $ExtractRoot "$BundleName\.venv\Scripts\ai-sdlc.exe"
+          if (-not (Test-Path $directShim)) {
+            throw "expected Direct shim executable was missing: $directShim"
+          }
+
+          # USER_GUIDE.zh-CN.md Chapter 2: return to the existing project root,
+          # then exercise the documented argument-free interactive init.
+          Set-Location $projectRoot
+          $existingInteractiveEvidence = Join-Path $evidenceRoot "existing-interactive"
+          py -3.11 "$env:GITHUB_WORKSPACE\scripts\windows_clean_user_e2e.py" `
+            --cli $directShim `
+            --project-root $projectRoot `
+            --evidence-root $existingInteractiveEvidence `
+            --init-only `
+            --allow-existing-project
+          if ($LASTEXITCODE -ne 0) {
+            throw "Offline existing-project ConPTY init failed with exit code $LASTEXITCODE"
+          }
+          $initOutput = Get-Content -LiteralPath (Join-Path $existingInteractiveEvidence "interactive-init.txt") -Raw
+          if (($initOutput -notmatch "当前结果 / Result") -or ($initOutput -notmatch "下一步 / Next")) {
+            throw "init output did not include the guide's bilingual Result/Next surface"
+          }
+          if ($initOutput -match "adapter ingress|materialized|unverified|host ingress|governance activation") {
+            throw "init output exposed internal adapter diagnostic terminology"
+          }
+          if (-not (Test-Path (Join-Path $projectRoot ".ai-sdlc"))) {
+            throw "init did not create .ai-sdlc in the existing project"
+          }
+          if (-not (Test-Path (Join-Path $projectRoot "AGENTS.md"))) {
+            throw "init did not create the selected Codex adapter guidance file"
+          }
+
+          & $directShim adopt . *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "adopt-existing-project.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "adopt . failed with exit code $LASTEXITCODE"
+          }
+          $adoptOutput = Get-Content -LiteralPath (Join-Path $evidenceRoot "adopt-existing-project.txt") -Raw
+          if ($adoptOutput -notmatch "接入已有项目") {
+            throw "adopt output did not include the guide's existing-project adoption wording"
+          }
+
+          $businessFileHashesAfter = Get-FileHash -Algorithm SHA256 -LiteralPath $businessFiles | Sort-Object Path
+          $businessFileHashesAfter |
+            Format-Table -AutoSize |
+            Out-String |
+            Out-File -FilePath (Join-Path $evidenceRoot "business-file-hashes-after.txt") -Encoding utf8
+          $businessFileHashDiff = Compare-Object `
+            -ReferenceObject $businessFileHashesBefore `
+            -DifferenceObject $businessFileHashesAfter `
+            -Property Path, Hash
+          if ($businessFileHashDiff) {
+            $businessFileHashDiff |
+              Format-Table -AutoSize |
+              Out-String |
+              Out-File -FilePath (Join-Path $evidenceRoot "business-file-hash-diff.txt") -Encoding utf8
+            throw "init/adopt modified existing business files"
+          }
+          Get-ChildItem -LiteralPath $projectRoot -Recurse |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize |
+            Out-String |
+            Out-File -FilePath (Join-Path $evidenceRoot "existing-project-after.txt") -Encoding utf8
+
+          # USER_GUIDE.zh-CN.md Chapter 1: an empty Windows project uses the
+          # same installed Direct shim through the documented interactive prompts.
+          $emptyProjectRoot = Join-Path $workRoot "my-new-project"
+          New-Item -ItemType Directory -Force -Path $emptyProjectRoot | Out-Null
+          Set-Location $emptyProjectRoot
+          $emptyInteractiveEvidence = Join-Path $evidenceRoot "empty-interactive"
+          py -3.11 "$env:GITHUB_WORKSPACE\scripts\windows_clean_user_e2e.py" `
+            --cli $directShim `
+            --project-root $emptyProjectRoot `
+            --evidence-root $emptyInteractiveEvidence `
+            --init-only
+          if ($LASTEXITCODE -ne 0) {
+            throw "Offline empty-project ConPTY init failed with exit code $LASTEXITCODE"
+          }
+          $emptyInitOutput = Get-Content -LiteralPath (Join-Path $emptyInteractiveEvidence "interactive-init.txt") -Raw
+          if (
+            ($emptyInitOutput -notmatch "Initialized AI-SDLC project") -or
+            ($emptyInitOutput -notmatch "当前结果 / Result") -or
+            ($emptyInitOutput -notmatch "下一步 / Next")
+          ) {
+            throw "empty-project init output did not match the user-guide Result/Next contract"
+          }
+          if (-not (Test-Path (Join-Path $emptyProjectRoot "AGENTS.md"))) {
+            throw "empty-project init did not create the selected Codex adapter guidance file"
+          }
+
+      - name: Upload guide replay evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-user-guide-existing-project-evidence
+          path: ${{ runner.temp }}/ai-sdlc-windows-user-guide-e2e
+          if-no-files-found: error
+
+  clean-online-interactive-user-journey:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
+    steps:
+      - name: Checkout E2E keyboard and screen driver only
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Replay installer without a preinstalled Python
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/windows_python_bootstrap_e2e.ps1 -PackageManager winget
+
+      - name: Replay installer after a Chocolatey Python install
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/windows_python_bootstrap_e2e.ps1 -PackageManager choco
+
+      - name: Replay expected Windows Python bootstrap failure
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/windows_python_bootstrap_e2e.ps1 -PackageManager winget -ExpectInstallFailure
+
+      - name: Verify isolated Python bootstrap receipts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence"
+          foreach ($name in @(
+            "python-bootstrap-winget-success.json",
+            "python-bootstrap-winget-success-output.txt",
+            "python-bootstrap-winget-success-events.txt",
+            "python-bootstrap-choco-success.json",
+            "python-bootstrap-choco-success-output.txt",
+            "python-bootstrap-choco-success-events.txt",
+            "python-bootstrap-winget-expected-failure.json",
+            "python-bootstrap-winget-expected-failure-output.txt",
+            "python-bootstrap-winget-expected-failure-events.txt"
+          )) {
+            $path = Join-Path $evidenceRoot $name
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing isolated bootstrap evidence: $path"
+            }
+          }
+          foreach ($scenario in @("winget-success", "choco-success", "winget-expected-failure")) {
+            $receiptPath = Join-Path $evidenceRoot "python-bootstrap-$scenario.json"
+            $outputPath = Join-Path $evidenceRoot "python-bootstrap-$scenario-output.txt"
+            $eventsPath = Join-Path $evidenceRoot "python-bootstrap-$scenario-events.txt"
+            foreach ($path in @($receiptPath, $outputPath, $eventsPath)) {
+              if (-not (Test-Path -LiteralPath $path)) {
+                throw "Missing isolated bootstrap evidence: $path"
+              }
+            }
+            $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+            if ($receipt.scenario -ne $scenario -or $receipt.manager_transition_count -ne 1) {
+              throw "Invalid scenario identity or manager transition count in $receiptPath"
+            }
+            foreach ($field in @(
+              "machine_path_restored",
+              "user_path_restored",
+              "process_path_restored",
+              "local_app_data_restored",
+              "program_files_restored"
+            )) {
+              if ($receipt.$field -ne $true) {
+                throw "Restoration marker $field was not true in $receiptPath"
+              }
+            }
+            if ($scenario -eq "winget-expected-failure") {
+              if (
+                $receipt.installer_exit -eq 0 -or
+                $receipt.runtime_absent -ne $true -or
+                $receipt.venv_absent -ne $true
+              ) {
+                throw "Expected-failure receipt did not prove failure before runtime creation."
+              }
+            } elseif (
+              $receipt.installer_exit -ne 0 -or
+              $receipt.distribution_version -ne "3.1.0" -or
+              $receipt.distribution_version_exit -ne 0 -or
+              $receipt.cli_version -ne "3.1.0" -or
+              $receipt.cli_version_exit -ne 0
+            ) {
+              throw "Successful bootstrap receipt did not prove exact distribution and CLI 3.1.0."
+            }
+          }
+
+      - name: Set up Node.js for the real Codex CLI
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Assert fresh runner prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [Console]::InputEncoding = $utf8
+          [Console]::OutputEncoding = $utf8
+          $OutputEncoding = $utf8
+
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence"
+          New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+          if (Get-Command ai-sdlc -ErrorAction SilentlyContinue) {
+            throw "Fresh Windows runner unexpectedly already exposes ai-sdlc on PATH."
+          }
+          py -3.11 --version *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "python-version.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "The ordinary online installer prerequisite Python 3.11 is unavailable."
+          }
+          git --version *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "git-version.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "The ordinary online installer prerequisite Git is unavailable."
+          }
+          "ai_sdlc_preinstalled=false" |
+            Out-File -FilePath (Join-Path $evidenceRoot "fresh-runner.txt") -Encoding utf8
+
+      - name: Install and verify the real Codex CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence"
+          $codexPrefix = Join-Path $env:RUNNER_TEMP "codex-cli"
+          npm install --prefix $codexPrefix "@openai/codex@0.138.0" *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "codex-cli-install.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "The official Codex CLI package installation failed."
+          }
+          $codexBin = Join-Path $codexPrefix "node_modules\.bin"
+          $codexShim = Join-Path $codexBin "codex.cmd"
+          if (-not (Test-Path $codexShim)) {
+            throw "The official Codex CLI shim is missing: $codexShim"
+          }
+          $env:Path = "$codexBin;$env:Path"
+          $resolvedCodex = Get-Command codex -ErrorAction Stop
+          $resolvedCodexDirectory = Split-Path -Parent $resolvedCodex.Source
+          if ($resolvedCodexDirectory -ne $codexBin) {
+            throw "Windows did not resolve the pinned Codex CLI shim: $($resolvedCodex.Source)"
+          }
+          codex --version *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "codex-cli-version-install-step.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "The installed Codex CLI version command failed."
+          }
+          $codexVersion = Get-Content `
+            -LiteralPath (Join-Path $evidenceRoot "codex-cli-version-install-step.txt") `
+            -Raw
+          if ($codexVersion -notmatch "codex-cli 0\.138\.0") {
+            throw "The installed Codex CLI version was unexpected: $($codexVersion.Trim())"
+          }
+          $codexBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CODEX_CLI_E2E_EXPECTED_VERSION=0.138.0" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install AI-SDLC through the public remote online path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence"
+          $installerPath = Join-Path $env:RUNNER_TEMP "install_online.ps1"
+          $installVenv = Join-Path $env:RUNNER_TEMP "ai-sdlc-online"
+          $sourceKind = "remote-release-tag"
+          $sourceRepository = "SinclairPan/Ai_AutoSDLC"
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            if (-not $env:PR_HEAD_REPOSITORY -or -not $env:PR_HEAD_SHA) {
+              throw "Pull request source repository or revision is unavailable."
+            }
+            $sourceKind = "remote-pull-request-head"
+            $sourceRepository = $env:PR_HEAD_REPOSITORY
+            $remoteSha = $env:PR_HEAD_SHA
+          } else {
+            $tagLines = @(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}")
+            $peeledTag = $tagLines | Where-Object { $_ -match '\^\{\}$' } | Select-Object -First 1
+            $resolvedTag = if ($peeledTag) { $peeledTag } else { $tagLines | Select-Object -First 1 }
+            $remoteSha = ($resolvedTag -split "`t")[0]
+            if ($LASTEXITCODE -ne 0 -or -not $remoteSha) {
+              throw "Unable to resolve the public release tag $env:RELEASE_TAG."
+            }
+          }
+          $installerUri = "https://raw.githubusercontent.com/$sourceRepository/$remoteSha/packaging/install_online.ps1"
+          $packageSpec = "git+https://github.com/$sourceRepository.git@$remoteSha"
+
+          Invoke-WebRequest -Uri $installerUri -OutFile $installerPath
+          Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath |
+            Format-List |
+            Out-File -FilePath (Join-Path $evidenceRoot "installer-sha256.txt") -Encoding utf8
+          powershell -NoProfile -ExecutionPolicy Bypass -File $installerPath `
+            -VenvPath $installVenv `
+            -PackageSpec $packageSpec `
+            -AddToPath *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "install-online.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Public online installer failed with exit code $LASTEXITCODE."
+          }
+
+          $stableShimDir = Join-Path $env:LOCALAPPDATA "AI-SDLC\bin"
+          $stableShim = Join-Path $stableShimDir "ai-sdlc.exe"
+          if (-not (Test-Path $stableShim)) {
+            throw "Public online installer did not create the stable user shim: $stableShim"
+          }
+          $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          $env:Path = "$userPath;$machinePath"
+          $resolvedCommand = Get-Command ai-sdlc -ErrorAction Stop
+          if ($resolvedCommand.Source -ne $stableShim) {
+            throw "A fresh terminal did not resolve the public stable shim: $($resolvedCommand.Source)"
+          }
+          ai-sdlc --version *>&1 |
+            Tee-Object -FilePath (Join-Path $evidenceRoot "ai-sdlc-version.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "The newly opened ordinary-user command failed."
+          }
+          $versionText = Get-Content -LiteralPath (Join-Path $evidenceRoot "ai-sdlc-version.txt") -Raw
+          $expectedVersion = $env:RELEASE_TAG.TrimStart("v")
+          if ($versionText.Trim() -ne $expectedVersion) {
+            throw "Remote online install produced version '$($versionText.Trim())', expected $expectedVersion."
+          }
+
+          $directUrlPath = Get-ChildItem `
+            -Path (Join-Path $installVenv "Lib\site-packages\ai_sdlc-*.dist-info\direct_url.json") `
+            -File |
+            Select-Object -First 1
+          if (-not $directUrlPath) {
+            throw "Remote Git install did not record direct_url.json provenance."
+          }
+          Copy-Item -LiteralPath $directUrlPath.FullName -Destination (Join-Path $evidenceRoot "direct_url.json")
+          $directUrl = Get-Content -LiteralPath $directUrlPath.FullName -Raw | ConvertFrom-Json
+          if ($directUrl.vcs_info.requested_revision -ne $remoteSha) {
+            throw "Installed package did not record the pinned public revision $remoteSha."
+          }
+          if ($directUrl.vcs_info.commit_id -ne $remoteSha) {
+            throw "Installed package commit $($directUrl.vcs_info.commit_id) does not match source revision $remoteSha."
+          }
+          "source_kind=$sourceKind`nsource_repository=$sourceRepository`nsource_revision=$remoteSha" |
+            Out-File -FilePath (Join-Path $evidenceRoot "remote-source.txt") -Encoding utf8
+          "AI_SDLC_E2E_CLI=$stableShim" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AI_SDLC_E2E_INSTALL_SOURCE=$sourceKind" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AI_SDLC_E2E_SOURCE_REVISION=$remoteSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install ConPTY keyboard and screen automation dependency
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          py -3.11 -m pip install --disable-pip-version-check "pywinpty==3.0.5"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to install the ConPTY-only E2E driver dependency."
+          }
+          py -3.11 -c "from winpty import PtyProcess; from winpty.enums import Backend; print('ConPTY backend:', Backend.ConPTY)" *>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence\conpty-driver.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "ConPTY driver import failed."
+          }
+
+      - name: Replay the complete ordinary-user journey in ConPTY
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $projectRoot = Join-Path $env:RUNNER_TEMP "existing-customer-portal"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence"
+          py -3.11 "$env:GITHUB_WORKSPACE\scripts\windows_clean_user_e2e.py" `
+            --cli $env:AI_SDLC_E2E_CLI `
+            --project-root $projectRoot `
+            --evidence-root $evidenceRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "The ConPTY ordinary-user journey failed with exit code $LASTEXITCODE."
+          }
+          "online_installer=true; project_state=existing" |
+            Out-File -FilePath (Join-Path $evidenceRoot "windows-online-existing-project.txt") -Encoding utf8
+
+      - name: Replay the empty-project online route
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $projectRoot = Join-Path $env:RUNNER_TEMP "windows-online-empty-project"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "windows-clean-online-user-e2e-evidence"
+          $emptyEvidenceRoot = Join-Path $evidenceRoot "empty-project"
+          Remove-Item -Recurse -Force $projectRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          if ((Get-ChildItem -LiteralPath $projectRoot -Force).Count -ne 0) {
+            throw "The online empty-project route did not start from an empty directory."
+          }
+          py -3.11 "$env:GITHUB_WORKSPACE\scripts\windows_clean_user_e2e.py" `
+            --cli $env:AI_SDLC_E2E_CLI `
+            --project-root $projectRoot `
+            --evidence-root $emptyEvidenceRoot `
+            --init-only
+          if ($LASTEXITCODE -ne 0) {
+            throw "The ConPTY online empty-project init failed with exit code $LASTEXITCODE."
+          }
+          $initOutput = Get-Content -LiteralPath (Join-Path $emptyEvidenceRoot "interactive-init.txt") -Raw
+          if (($initOutput -notmatch "当前结果 / Result") -or ($initOutput -notmatch "下一步 / Next")) {
+            throw "The online empty-project init did not expose the guide Result/Next contract."
+          }
+          if (-not (Test-Path (Join-Path $projectRoot ".ai-sdlc"))) {
+            throw "The online empty-project route did not create .ai-sdlc."
+          }
+          if (-not (Test-Path (Join-Path $projectRoot "AGENTS.md"))) {
+            throw "The online empty-project route did not create Codex AGENTS.md."
+          }
+          if ((Test-Path (Join-Path $projectRoot "src")) -or (Test-Path (Join-Path $projectRoot "package.json"))) {
+            throw "The online empty-project route created unexpected example business files."
+          }
+
+      - name: Upload clean online ordinary-user evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-clean-online-user-e2e-evidence
+          path: ${{ runner.temp }}/windows-clean-online-user-e2e-evidence
+          if-no-files-found: error
+          include-hidden-files: true

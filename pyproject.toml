@@ -1,0 +1,62 @@
+[project]
+name = "ai-sdlc"
+version = "3.1.0"
+description = "AI-native SDLC automation framework"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "typer>=0.9.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.12",
+    "jinja2>=3.1",
+    "rich>=13.0",
+]
+
+[project.scripts]
+ai-sdlc = "ai_sdlc.cli.main:app"
+
+[build-system]
+requires = []
+build-backend = "packaging_backend"
+backend-path = ["."]
+
+[tool.ai_sdlc.packaging.force-include]
+"templates/spec-template.md" = "ai_sdlc/templates/spec-template.md"
+"templates/plan-template.md" = "ai_sdlc/templates/plan-template.md"
+"templates/tasks-template.md" = "ai_sdlc/templates/tasks-template.md"
+"templates/execution-log-template.md" = "ai_sdlc/templates/execution-log-template.md"
+"scripts/frontend_browser_gate_probe_runner.mjs" = "ai_sdlc/runtime_assets/frontend_browser_gate_probe_runner.mjs"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "real_ide_hook: run the real CLI IDE hook instead of patching it out",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
+ignore = ["E501", "UP042", "SIM115", "B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]

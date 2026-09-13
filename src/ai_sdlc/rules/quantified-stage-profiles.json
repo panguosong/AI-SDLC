@@ -1,0 +1,247 @@
+{
+  "schema_version": "quantified-stage-profiles-v1",
+  "supported_capabilities": {
+    "requirement": ["stage-simulation-v1"],
+    "design-contract": ["stage-simulation-v1"],
+    "implementation": ["implementation-simulation-v1", "stage-simulation-v1"],
+    "frontend-evidence": ["stage-simulation-v1"],
+    "local-pr-review": ["stage-simulation-v1"]
+  },
+  "profile_bundles": {
+    "requirement": ["requirement-analysis-v1"],
+    "design-contract": ["design-contract-v1"],
+    "implementation": ["implementation-plan-v1", "code-result-v1"],
+    "frontend-evidence": ["frontend-evidence-v1"],
+    "local-pr-review": ["delivery-readiness-v1"]
+  },
+  "defaults": {
+    "goal_weighting": "equal",
+    "target_level": 3,
+    "assessment_origin": "forecast",
+    "anchors": {
+      "0": "缺失或明确与原目标冲突。",
+      "1": "存在重大缺口，主要场景难以成立。",
+      "2": "部分满足，仍有明确且可处理的目标差距。",
+      "3": "满足该项原目标；必需行为不能留到加分档。",
+      "4": "满足目标之外有原范围内可指认的实质改善；不靠扩功能、文字或组件刷分。"
+    },
+    "simulation_policy": {
+      "max_batches": 2,
+      "max_candidates": 3,
+      "max_judges": 1
+    },
+    "max_criteria_per_profile": 16,
+    "max_candidate_sketch_bytes": 65536,
+    "instantiation_guidance": [
+      "宿主依据用户目标、项目事实和上游产物实例化合同；用户不填写分数、权重或预算。",
+      "全部目标经 goal_shares 映射到适用分项，每个目标跨分项的份额之和为1；不同视角不能相加比较。",
+      "首批前冻结共同覆盖集合；候选自己的组件清单在该批封存，仅作绝对数量诊断，不改变共同分母。",
+      "每个计数ID恰有supported、contradicted或unknown一个状态并附依据；拒绝遗漏、重复和额外ID。",
+      "空集合在冻结前标为不适用，不生成空集合满分；未知为区间，不能取中点伪造确定结论。",
+      "时间包含实现、评审、验证、已知返工及直接下游交接；先检查完整时间准入，再比较模拟偏好。",
+      "模拟不要求真实探针；预测S不替代实际H/Q、真实命令、浏览器证据或正式Close。",
+      "模板存在不代表该阶段已接入；可执行能力只取supported_capabilities和当前CLI支持集合。"
+    ]
+  },
+  "profiles": {
+    "requirement-analysis-v1": {
+      "profile_version": "1",
+      "loop_type": "requirement",
+      "view": "requirement-analysis",
+      "availability": "supported",
+      "criterion_templates": [
+        {
+          "id": "goal-placement",
+          "statement": "已知目标是否落入候选需求及验收命题。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "去重的已知目标和对应验收命题。",
+          "target_anchor": "原要求均可定位和判定，无需下游猜测必需行为。"
+        },
+        {
+          "id": "boundary-unknowns",
+          "statement": "角色、范围及失败边界是否有必需未决项。",
+          "kind": "unknown-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "目标涉及的角色、范围和失败边界。",
+          "target_anchor": "必需边界均有来源和明确解释，不把未知假装确定。"
+        },
+        {
+          "id": "requirement-conflicts",
+          "statement": "候选解释是否存在互斥要求。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "已冻结要求及兼容约束。",
+          "target_anchor": "不存在未处理的强制要求冲突。"
+        }
+      ],
+      "downstream_boundary": "不把目标遗漏或关键未知无说明地转移给设计。"
+    },
+    "design-contract-v1": {
+      "profile_version": "1",
+      "loop_type": "design-contract",
+      "view": "design-contract",
+      "availability": "supported",
+      "criterion_templates": [
+        {
+          "id": "obligation-design-mapping",
+          "statement": "义务是否映射到接口、数据及行为规则。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "上游冻结义务。",
+          "target_anchor": "必需义务均有可定位设计，不用额外架构替代遗漏行为。"
+        },
+        {
+          "id": "scenario-closure",
+          "statement": "代表场景及失败路径的输入、行为、结果是否闭合。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结代表场景和失败路径。",
+          "target_anchor": "每条必需路径有一致且可实现的结果。"
+        },
+        {
+          "id": "invariant-conflicts",
+          "statement": "数据与状态不变量是否存在矛盾。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结不变量和兼容约束。",
+          "target_anchor": "无未处理的强制不变量冲突。"
+        }
+      ],
+      "downstream_boundary": "交代实现依赖、不可实现假设与返工，不隐藏下游成本。"
+    },
+    "implementation-plan-v1": {
+      "profile_version": "1",
+      "loop_type": "implementation",
+      "view": "implementation-plan",
+      "availability": "supported",
+      "criterion_templates": [
+        {
+          "id": "obligation-task-mapping",
+          "statement": "冻结义务是否落到当前路线的任务和验证。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "全部冻结实现义务，不因拆任务重复计分。",
+          "target_anchor": "每条必需义务有具体实现和验收路径。"
+        },
+        {
+          "id": "dependency-unknowns",
+          "statement": "关键依赖、执行前提及交接成本是否仍未决。",
+          "kind": "unknown-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "当前任务的关键依赖和执行前提。",
+          "target_anchor": "必需依赖有依据；未知执行权限不能由设计假设授予。"
+        },
+        {
+          "id": "redundant-components",
+          "statement": "新增组件是否均服务原目标或必要约束。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-candidate-inventory",
+          "counted_items": "本批候选封存的新增组件清单及逐项用途。",
+          "target_anchor": "无无关扩展；精简建议仍为advisory，不按行数否决交付。"
+        }
+      ],
+      "downstream_boundary": "完整时间包括实施、实际评审、验证、返工、关闭和直接下游交接；只执行选中一路。"
+    },
+    "code-result-v1": {
+      "profile_version": "1",
+      "loop_type": "implementation",
+      "view": "code-result",
+      "availability": "supported",
+      "criterion_templates": [
+        {
+          "id": "behavior-mapping",
+          "statement": "当前代码或改善草案是否映射全部行为义务。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结行为义务。",
+          "target_anchor": "必需行为都有对应实现；静态推演不报告测试已通过。"
+        },
+        {
+          "id": "boundary-closure",
+          "statement": "边界和错误场景是否有闭合行为。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结边界、异常和兼容场景。",
+          "target_anchor": "原要求的边界均有一致结果及可执行验证。"
+        },
+        {
+          "id": "regression-conflicts",
+          "statement": "是否有已知回归或强制行为冲突。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "既有行为、兼容约束及已产生发现。",
+          "target_anchor": "无未处理的必达冲突；不能用旧评分关闭当前坏文件。"
+        }
+      ],
+      "downstream_boundary": "implementation-simulation-v1仅冻结该视角；stage-simulation-v1可在原R1前按当前代码比较有限改善，保留消费者、维护和验证成本，不跨计划/代码视角比较分数。"
+    },
+    "frontend-evidence-v1": {
+      "profile_version": "1",
+      "loop_type": "frontend-evidence",
+      "view": "frontend-evidence",
+      "availability": "supported",
+      "criterion_templates": [
+        {
+          "id": "interaction-closure",
+          "statement": "关键操作链是否到达约定结果。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结关键操作路径。",
+          "target_anchor": "每条必需操作链闭合，不以截图美观代替可用性。"
+        },
+        {
+          "id": "state-coverage",
+          "statement": "适用页面状态是否覆盖。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "适用loading、empty、error、success和权限状态。",
+          "target_anchor": "所需状态均有明确操作与反馈。"
+        },
+        {
+          "id": "interaction-barriers",
+          "statement": "是否存在已知交互或可访问性障碍。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结交互约束及已知障碍。",
+          "target_anchor": "必需路径没有未处理障碍。"
+        }
+      ],
+      "downstream_boundary": "交互推演不替代当前真实浏览器和视觉证据，也不绕过前端方案确认。"
+    },
+    "delivery-readiness-v1": {
+      "profile_version": "1",
+      "loop_type": "local-pr-review",
+      "view": "delivery-readiness",
+      "availability": "supported",
+      "execution_policy": "evaluate-current-staged-tree-only",
+      "criterion_templates": [
+        {
+          "id": "required-evidence-matching",
+          "statement": "当前暂存树的必达证据是否匹配。",
+          "kind": "coverage",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "当前暂存树和冻结必达义务。",
+          "target_anchor": "必达证据对应精确当前树，不预测会通过。"
+        },
+        {
+          "id": "unresolved-findings",
+          "statement": "重要发现是否仍未解决。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "已产生的重要发现。",
+          "target_anchor": "无未解决的重要发现，代码精简仍为advisory。"
+        },
+        {
+          "id": "cross-stage-inconsistency",
+          "statement": "交付物与上游目标和合同是否一致。",
+          "kind": "conflict-count",
+          "count_basis": "frozen-contract-set",
+          "counted_items": "冻结上游目标、合同及当前交付物映射。",
+          "target_anchor": "没有未经决定的跨阶段目标漂移。"
+        }
+      ],
+      "downstream_boundary": "只评价当前树的风险和反例，不选路改代码，不创建新的实现生命周期，不以模拟分触发提交。"
+    }
+  }
+}

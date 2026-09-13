@@ -1,0 +1,176 @@
+name: Windows Offline Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-offline-smoke.yml"
+      - ".github/workflows/pr-checks.yml"
+      - "AGENTS.md"
+      - "pyproject.toml"
+      - "README.md"
+      - "packaging/**"
+      - "src/**"
+      - "tests/integration/test_github_workflows.py"
+      - "tests/integration/test_offline_bundle_scripts.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-offline-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build Windows offline bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install 3.11
+          runtime_python="$(uv python find --managed-python 3.11)"
+          runtime_python="$(cygpath -u "$runtime_python")"
+          runtime_root="$(dirname "$runtime_python")"
+          PYTHON="$runtime_python" \
+            PYTHONUTF8="1" \
+            PYTHONIOENCODING="utf-8" \
+            AI_SDLC_OFFLINE_PYTHON_RUNTIME="$runtime_root" \
+            AI_SDLC_OFFLINE_PYTHON_VERSIONS="3.11,3.12" \
+            AI_SDLC_OFFLINE_TARGET_PLATFORM="win_amd64" \
+            bash packaging/offline/build_offline_bundle.sh
+
+      - name: Install bundle and run CLI smoke
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          $ErrorActionPreference = "Stop"
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [Console]::InputEncoding = $utf8
+          [Console]::OutputEncoding = $utf8
+          $OutputEncoding = $utf8
+          $archive = Get-ChildItem -Path "dist-offline" -Filter "ai-sdlc-offline-*.zip" -File | Select-Object -First 1
+          if (-not $archive) {
+            throw "Expected dist-offline zip archive was not produced."
+          }
+
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "ai-sdlc-windows-smoke"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "ai-sdlc-windows-smoke-evidence"
+          Remove-Item -Recurse -Force $smokeRoot, $evidenceRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $smokeRoot, $evidenceRoot | Out-Null
+
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $smokeRoot -Force
+          $bundleDir = Get-ChildItem -Path $smokeRoot -Directory | Select-Object -First 1
+          if (-not $bundleDir) {
+            throw "Expanded archive did not contain a bundle directory."
+          }
+
+          $digest = (Get-FileHash -Algorithm SHA256 "AGENTS.md").Hash.ToLowerInvariant()
+          $env:OPENAI_CODEX = "1"
+          $env:AI_SDLC_ADAPTER_CANONICAL_SHA256 = "sha256:$digest"
+          $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+          if (-not (Test-Path $windowsPowerShell)) {
+            throw "Expected Windows PowerShell 5.1 at $windowsPowerShell"
+          }
+
+          $installLog = Join-Path $evidenceRoot "install.log"
+          $helpLog = Join-Path $evidenceRoot "help.txt"
+          $statusLog = Join-Path $evidenceRoot "adapter-status.txt"
+          $dryRunLog = Join-Path $evidenceRoot "run-dry-run.txt"
+
+          Push-Location $bundleDir.FullName
+          & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File .\install_offline.ps1 -AddToPath *>&1 | Tee-Object -FilePath $installLog
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell install_offline.ps1 failed with exit code $LASTEXITCODE"
+          }
+          Pop-Location
+
+          python packaging/offline/verify_offline_bundle.py $bundleDir.FullName `
+            --require-bundled-runtime `
+            --install-log $installLog
+          if ($LASTEXITCODE -ne 0) {
+            throw "verify_offline_bundle.py failed with exit code $LASTEXITCODE"
+          }
+
+          $cliDir = Join-Path $bundleDir.FullName ".venv\Scripts"
+          $env:Path = $cliDir + [IO.Path]::PathSeparator + $env:Path
+          if (-not (Get-Command ai-sdlc -ErrorAction SilentlyContinue)) {
+            throw "Expected ai-sdlc to resolve on PATH after -AddToPath install."
+          }
+
+          ai-sdlc --help *>&1 | Tee-Object -FilePath $helpLog
+          if ($LASTEXITCODE -ne 0) {
+            throw "ai-sdlc --help failed with exit code $LASTEXITCODE"
+          }
+
+          $projectRoot = Join-Path $smokeRoot "clean-project"
+          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
+          Push-Location $projectRoot
+          ai-sdlc init . --agent-target codex --shell powershell *>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot "init-codex-powershell.txt")
+          if ($LASTEXITCODE -ne 0) {
+            throw "ai-sdlc init . --agent-target codex --shell powershell failed with exit code $LASTEXITCODE"
+          }
+          $initOutput = Get-Content -LiteralPath (Join-Path $evidenceRoot "init-codex-powershell.txt") -Raw
+          if (($initOutput -notmatch "当前结果 / Result") -or ($initOutput -notmatch "下一步 / Next")) {
+            throw "init output did not include required bilingual Result/Next guidance."
+          }
+          Pop-Location
+
+          Push-Location $env:GITHUB_WORKSPACE
+          if (-not (Test-Path "AGENTS.md")) {
+            throw "Expected AGENTS.md in GITHUB_WORKSPACE before adapter verification."
+          }
+          if (-not (Test-Path ".ai-sdlc")) {
+            throw "Expected .ai-sdlc directory in GITHUB_WORKSPACE before dry-run."
+          }
+
+          ai-sdlc adapter status *>&1 | Tee-Object -FilePath $statusLog
+          if ($LASTEXITCODE -ne 0) {
+            throw "ai-sdlc adapter status failed with exit code $LASTEXITCODE"
+          }
+
+          ai-sdlc run --dry-run *>&1 | Tee-Object -FilePath $dryRunLog
+          $dryRunExit = $LASTEXITCODE
+          if ($dryRunExit -ne 0) {
+            $dryRunOutput = Get-Content -LiteralPath $dryRunLog -Raw
+            $knownRepoStateStop = (
+              ($dryRunOutput -match "Existing Artifact Probe") -and
+              ($dryRunOutput -match "recover --reconcile")
+            )
+            if (-not $knownRepoStateStop) {
+              throw "ai-sdlc run --dry-run failed with exit code $dryRunExit"
+            }
+            Write-Host "ai-sdlc run --dry-run reported repo-state reconciliation diagnostics; treating this as smoke pass."
+            $global:LASTEXITCODE = 0
+          }
+          Pop-Location
+
+          Copy-Item -LiteralPath (Join-Path $bundleDir.FullName "bundle-manifest.json") -Destination $evidenceRoot
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-offline-smoke-evidence
+          path: ${{ runner.temp }}/ai-sdlc-windows-smoke-evidence
+          if-no-files-found: error

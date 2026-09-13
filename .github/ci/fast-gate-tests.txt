@@ -1,0 +1,11 @@
+# 固定快速门禁：只放高信号、无外部服务、稳定且快速的框架合同测试。
+tests/unit/test_ci_static_assurance.py
+tests/unit/test_command_names.py
+tests/unit/test_workitem_scaffold.py
+tests/unit/test_packaging_config.py
+tests/unit/test_user_guide_release_standard.py
+tests/integration/test_cli_init.py
+tests/integration/test_frontend_delivery_normal_path.py
+tests/integration/test_cli_root_surface.py
+tests/integration/test_cli_workitem_init.py
+tests/integration/test_github_workflows.py

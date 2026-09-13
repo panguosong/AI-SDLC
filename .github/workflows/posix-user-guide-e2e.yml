@@ -1,0 +1,1126 @@
+name: POSIX User Guide E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag described by the user guide.
+        required: true
+        default: "v3.1.0"
+  pull_request:
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - "packaging_backend.py"
+      - "README.md"
+      - "USER_GUIDE.zh-CN.md"
+      - "templates/**"
+      - "packaging/install_online.sh"
+      - "packaging/offline/**"
+      - ".github/workflows/posix-user-guide-e2e.yml"
+      - "scripts/posix_clean_user_e2e.py"
+      - "scripts/macos_stock_host_prerequisite_e2e.py"
+      - "scripts/posix_python_bootstrap_e2e.py"
+      - "tests/integration/test_github_workflows.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: posix-user-guide-e2e-${{ github.event.pull_request.number || inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  online-install:
+    name: ${{ matrix.asset_os }} online guide
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_os: macos
+            runner: macos-latest
+            project_shell: zsh
+          - asset_os: linux
+            runner: ubuntu-latest
+            project_shell: bash
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+      PROJECT_SHELL: ${{ matrix.project_shell }}
+      AI_SDLC_DISABLE_UPDATE_CHECK: "1"
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - name: Check out online guide driver inputs
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Replay stock macOS route prerequisites
+        if: matrix.asset_os == 'macos'
+        shell: bash
+        run: python3 scripts/macos_stock_host_prerequisite_e2e.py
+
+      - name: Replay installer without a preinstalled Python
+        if: matrix.asset_os == 'macos'
+        shell: bash
+        run: python3 scripts/posix_python_bootstrap_e2e.py
+
+      - name: Install from the pinned online source and replay both project states
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          evidence_root="${RUNNER_TEMP}/posix-online-user-guide-e2e-evidence"
+          export HOME="${RUNNER_TEMP}/online-guide-home"
+          install_root="${RUNNER_TEMP}/ai-sdlc-online"
+          new_project_root="${HOME}/projects/posix-online-empty-project"
+          existing_project_root="${HOME}/projects/posix-online-existing-project"
+          source_kind="remote-release-tag"
+          source_repository="SinclairPan/Ai_AutoSDLC"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
+            source_kind="remote-pull-request-head"
+            source_repository="${PR_HEAD_REPOSITORY}"
+            remote_sha="${PR_HEAD_SHA}"
+          else
+            tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            if [[ -z "${tag_line}" ]]; then
+              tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+            fi
+            remote_sha="${tag_line%%[[:space:]]*}"
+            test -n "${remote_sha}"
+          fi
+
+          mkdir -p "${evidence_root}" "${new_project_root}" "${existing_project_root}/src"
+          installer_url="https://raw.githubusercontent.com/${source_repository}/${remote_sha}/packaging/install_online.sh"
+          installer_path="${RUNNER_TEMP}/install_online.sh"
+          package_spec="git+https://github.com/${source_repository}.git@${remote_sha}"
+          curl --fail --location --retry 3 --output "${installer_path}" "${installer_url}"
+          chmod +x "${installer_path}"
+          AI_SDLC_PACKAGE_SPEC="${package_spec}" \
+            bash "${installer_path}" "${install_root}" --add-to-path 2>&1 |
+            tee "${evidence_root}/install-online.txt"
+
+          online_cli="${HOME}/.local/bin/ai-sdlc"
+          test -x "${online_cli}"
+          expected_version="${RELEASE_TAG#v}"
+          test "$("${online_cli}" --version)" = "${expected_version}"
+          printf 'source_kind=%s\nsource_repository=%s\nsource_revision=%s\n' \
+            "${source_kind}" "${source_repository}" "${remote_sha}" > \
+            "${evidence_root}/remote-source.txt"
+
+          test -z "$(ls -A "${new_project_root}")"
+          python3 scripts/posix_clean_user_e2e.py \
+            --cli "${online_cli}" \
+            --project "${new_project_root}" 2>&1 |
+            tee "${evidence_root}/posix-online-empty-project.txt"
+          test -d "${new_project_root}/.ai-sdlc"
+          test -f "${new_project_root}/.cursor/rules/ai-sdlc.mdc"
+          test ! -e "${new_project_root}/src"
+          test ! -e "${new_project_root}/package.json"
+          grep -F "POSIX_INTERACTIVE_SELECTION_COMPLETED" "${evidence_root}/posix-online-empty-project.txt"
+          grep -F "AI 代理入口: Cursor" "${evidence_root}/posix-online-empty-project.txt"
+          grep -F "Project shell: ${PROJECT_SHELL}" "${evidence_root}/posix-online-empty-project.txt"
+          grep -F "当前结果 / Result" "${evidence_root}/posix-online-empty-project.txt"
+          grep -F "下一步 / Next" "${evidence_root}/posix-online-empty-project.txt"
+
+          printf '%s\n' '{"scripts":{"build":"echo build"}}' > "${existing_project_root}/package.json"
+          printf '%s\n' "console.log('existing');" > "${existing_project_root}/src/main.js"
+          printf '%s\n' "- [ ] Existing imported task" > "${existing_project_root}/TODO.md"
+          if [[ "$(uname -s)" == "Darwin" ]]; then
+            shasum -a 256 \
+              "${existing_project_root}/package.json" \
+              "${existing_project_root}/src/main.js" \
+              "${existing_project_root}/TODO.md" | sort > "${evidence_root}/business-before.sha256"
+          else
+            sha256sum \
+              "${existing_project_root}/package.json" \
+              "${existing_project_root}/src/main.js" \
+              "${existing_project_root}/TODO.md" | sort > "${evidence_root}/business-before.sha256"
+          fi
+          python3 scripts/posix_clean_user_e2e.py \
+            --cli "${online_cli}" \
+            --project "${existing_project_root}" 2>&1 |
+            tee "${evidence_root}/posix-online-existing-project.txt"
+          (
+            cd "${existing_project_root}"
+            "${online_cli}" adopt .
+          ) 2>&1 | tee -a "${evidence_root}/posix-online-existing-project.txt"
+          if [[ "$(uname -s)" == "Darwin" ]]; then
+            shasum -a 256 \
+              "${existing_project_root}/package.json" \
+              "${existing_project_root}/src/main.js" \
+              "${existing_project_root}/TODO.md" | sort > "${evidence_root}/business-after.sha256"
+          else
+            sha256sum \
+              "${existing_project_root}/package.json" \
+              "${existing_project_root}/src/main.js" \
+              "${existing_project_root}/TODO.md" | sort > "${evidence_root}/business-after.sha256"
+          fi
+          diff -u "${evidence_root}/business-before.sha256" "${evidence_root}/business-after.sha256"
+          grep -F "POSIX_INTERACTIVE_SELECTION_COMPLETED" "${evidence_root}/posix-online-existing-project.txt"
+          grep -F "AI 代理入口: Cursor" "${evidence_root}/posix-online-existing-project.txt"
+          grep -F "Project shell: ${PROJECT_SHELL}" "${evidence_root}/posix-online-existing-project.txt"
+          grep -F "Detected existing project" "${evidence_root}/posix-online-existing-project.txt"
+
+      - name: Upload online guide evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: posix-online-user-guide-e2e-evidence-${{ matrix.asset_os }}
+          path: ${{ runner.temp }}/posix-online-user-guide-e2e-evidence
+          if-no-files-found: error
+          include-hidden-files: true
+
+  linux-python-bootstrap:
+    name: ${{ matrix.project_state }} linux real prerequisites and Python bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        project_state: [new, existing]
+    container:
+      image: debian:12-slim
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+      PROJECT_STATE: ${{ matrix.project_state }}
+      AI_SDLC_DISABLE_UPDATE_CHECK: "1"
+
+    steps:
+      - name: Check out exact guide inputs
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Replay exact Linux route prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(command -v git || true)"
+          test -z "$(command -v curl || true)"
+          test ! -s /etc/ssl/certs/ca-certificates.crt
+          test ! -s /etc/pki/tls/certs/ca-bundle.crt
+          test -z "$(command -v python3.11 || true)"
+          test -z "$(command -v python3 || true)"
+          test -z "$(command -v python || true)"
+          route_marker="<!-- AI-SDLC-USER-GUIDE-ROUTE: ${PROJECT_STATE}|online|linux-amd64 -->"
+          prerequisite_script="${RUNNER_TEMP}/linux-${PROJECT_STATE}-prerequisites.sh"
+          awk -v marker="${route_marker}" '
+            $0 == marker { in_route = 1; next }
+            in_route && /AI-SDLC-USER-GUIDE-STEP: prerequisites/ { in_step = 1; next }
+            in_step && /^```bash$/ { in_code = 1; next }
+            in_code && /^```$/ { exit }
+            in_code { print }
+          ' USER_GUIDE.zh-CN.md > "${prerequisite_script}"
+          test -s "${prerequisite_script}"
+          bash "${prerequisite_script}"
+          command -v git
+          command -v curl
+          test -s /etc/ssl/certs/ca-certificates.crt || \
+            test -s /etc/pki/tls/certs/ca-bundle.crt
+
+      - name: Install Python through the exact online installer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          evidence_root="${RUNNER_TEMP}/linux-real-python-bootstrap-evidence-${PROJECT_STATE}"
+          install_root="${RUNNER_TEMP}/ai-sdlc-linux-bootstrap-${PROJECT_STATE}"
+          export HOME="${RUNNER_TEMP}/linux-bootstrap-home-${PROJECT_STATE}"
+          export SHELL="/bin/bash"
+          mkdir -p "${evidence_root}" "${HOME}"
+          : > "${HOME}/.bashrc"
+          source_repository="SinclairPan/Ai_AutoSDLC"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
+            source_repository="${PR_HEAD_REPOSITORY}"
+            remote_sha="${PR_HEAD_SHA}"
+          else
+            tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            if [[ -z "${tag_line}" ]]; then
+              tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+            fi
+            remote_sha="${tag_line%%[[:space:]]*}"
+            test -n "${remote_sha}"
+          fi
+
+          installer_path="${RUNNER_TEMP}/install_online.sh"
+          installer_url="https://raw.githubusercontent.com/${source_repository}/${remote_sha}/packaging/install_online.sh"
+          package_spec="git+https://github.com/${source_repository}.git@${remote_sha}"
+          curl --fail --location --retry 3 --output "${installer_path}" "${installer_url}"
+          chmod +x "${installer_path}"
+          test -z "$(command -v python3.11 || true)"
+          test -z "$(command -v python3 || true)"
+          test -z "$(command -v python || true)"
+          . /etc/os-release
+          test "${ID}" = "debian"
+          test "${VERSION_ID}" = "12"
+          linux_arch="$(uname -m)"
+          case "${linux_arch}" in
+            x86_64|amd64) ;;
+            *) echo "Unexpected Debian architecture: ${linux_arch}" >&2; exit 1 ;;
+          esac
+          linux_libc="$(getconf GNU_LIBC_VERSION)"
+          case "${linux_libc}" in
+            glibc*) ;;
+            *) echo "Unexpected Debian libc: ${linux_libc}" >&2; exit 1 ;;
+          esac
+          printf 'distro=%s\nversion=%s\narch=%s\nlibc=%s\n' \
+            "${ID}" "${VERSION_ID}" "${linux_arch}" "${linux_libc}" > \
+            "${evidence_root}/host-identity.txt"
+          AI_SDLC_PACKAGE_SPEC="${package_spec}" \
+            bash "${installer_path}" "${install_root}" --add-to-path 2>&1 | \
+            tee "${evidence_root}/install-online.txt"
+
+          dpkg-query -W python3.11 python3.11-venv python3-pip | \
+            tee "${evidence_root}/installed-packages.txt"
+          test -x "${install_root}/bin/python"
+          test -x "${install_root}/bin/ai-sdlc"
+          test "$("${install_root}/bin/ai-sdlc" --version)" = "${RELEASE_TAG#v}"
+          stable_cli="${HOME}/.local/bin/ai-sdlc"
+          test -L "${stable_cli}"
+          test "$(readlink -f "${stable_cli}")" = \
+            "$(readlink -f "${install_root}/bin/ai-sdlc")"
+          expected_path_export="export PATH=\"${HOME}/.local/bin:\$PATH\""
+          profile_export_count="$(grep -Fxc "${expected_path_export}" "${HOME}/.bashrc" || true)"
+          test "${profile_export_count}" -eq 1
+          printf '%s\n' "${profile_export_count}" > \
+            "${evidence_root}/profile-export-count.txt"
+          cp "${HOME}/.bashrc" "${evidence_root}/bashrc.txt"
+          fresh_shell_cli="$(
+            env -i HOME="${HOME}" SHELL="/bin/bash" \
+              PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              bash --noprofile --rcfile "${HOME}/.bashrc" -ic 'command -v ai-sdlc'
+          )"
+          test "${fresh_shell_cli}" = "${stable_cli}"
+          fresh_shell_version="$(
+            env -i HOME="${HOME}" SHELL="/bin/bash" \
+              PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              bash --noprofile --rcfile "${HOME}/.bashrc" -ic 'ai-sdlc --version'
+          )"
+          test "${fresh_shell_version}" = "${RELEASE_TAG#v}"
+          printf 'cli=%s\nversion=%s\n' "${fresh_shell_cli}" "${fresh_shell_version}" > \
+            "${evidence_root}/fresh-shell.txt"
+          grep -F "No Python 3.11+ detected. Attempting online installation" \
+            "${evidence_root}/install-online.txt"
+          grep -F "Using Python runtime: python3.11" \
+            "${evidence_root}/install-online.txt"
+          grep -F "Online installation completed" \
+            "${evidence_root}/install-online.txt"
+          printf '{"platform":"debian-12","project_state":"%s","real_prerequisite_apt":true,"real_python_apt":true,"source_revision":"%s","installed_cli_version":"%s"}\n' \
+            "${PROJECT_STATE}" "${remote_sha}" "${RELEASE_TAG#v}" > "${evidence_root}/python-bootstrap.json"
+
+      - name: Complete the exact Linux route after bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          evidence_root="${RUNNER_TEMP}/linux-real-python-bootstrap-evidence-${PROJECT_STATE}"
+          install_root="${RUNNER_TEMP}/ai-sdlc-linux-bootstrap-${PROJECT_STATE}"
+          module_python="${install_root}/bin/python"
+          project_root="${RUNNER_TEMP}/linux-clean-host-${PROJECT_STATE}-project"
+          route_marker="<!-- AI-SDLC-USER-GUIDE-ROUTE: ${PROJECT_STATE}|online|linux-amd64 -->"
+          mkdir -p "${project_root}"
+
+          extract_route_step() {
+            local step_name="$1"
+            local output_path="$2"
+            awk -v marker="${route_marker}" -v step="${step_name}" '
+              $0 == marker { in_route = 1; next }
+              in_route && $0 ~ "AI-SDLC-USER-GUIDE-STEP: " step { in_step = 1; next }
+              in_step && /^```bash$/ { in_code = 1; next }
+              in_code && /^```$/ { exit }
+              in_code { print }
+            ' USER_GUIDE.zh-CN.md > "${output_path}"
+            test -s "${output_path}"
+          }
+
+          if [[ "${PROJECT_STATE}" == "new" ]]; then
+            test -z "$(ls -A "${project_root}")"
+          else
+            mkdir -p "${project_root}/src"
+            printf '%s\n' '{"scripts":{"build":"echo build"}}' > "${project_root}/package.json"
+            printf '%s\n' "console.log('existing');" > "${project_root}/src/main.js"
+            printf '%s\n' "- [ ] Existing imported task" > "${project_root}/TODO.md"
+            git -C "${project_root}" init --initial-branch=main
+            git -C "${project_root}" config user.name "AI-SDLC Route E2E"
+            git -C "${project_root}" config user.email "route-e2e@example.invalid"
+            git -C "${project_root}" add package.json src/main.js TODO.md
+            git -C "${project_root}" commit -m "seed existing project"
+            sha256sum \
+              "${project_root}/package.json" \
+              "${project_root}/src/main.js" \
+              "${project_root}/TODO.md" | sort > "${evidence_root}/business-before.sha256"
+          fi
+
+          python3 scripts/posix_clean_user_e2e.py \
+            --cli "${install_root}/bin/ai-sdlc" \
+            --project "${project_root}" 2>&1 | \
+            tee "${evidence_root}/initialize-and-adopt.txt"
+          grep -F "POSIX_INTERACTIVE_SELECTION_COMPLETED" \
+            "${evidence_root}/initialize-and-adopt.txt"
+          grep -F "AI 代理入口: Cursor" \
+            "${evidence_root}/initialize-and-adopt.txt"
+          grep -F "Project shell: bash" \
+            "${evidence_root}/initialize-and-adopt.txt"
+          if [[ "${PROJECT_STATE}" == "existing" ]]; then
+            (
+              cd "${project_root}"
+              "${module_python}" -m ai_sdlc adopt .
+            ) 2>&1 | tee -a "${evidence_root}/initialize-and-adopt.txt"
+          fi
+
+          test -d "${project_root}/.ai-sdlc"
+          test -f "${project_root}/.cursor/rules/ai-sdlc.mdc"
+          grep -F "Initialized AI-SDLC project" "${evidence_root}/initialize-and-adopt.txt"
+          if [[ "${PROJECT_STATE}" == "new" ]]; then
+            test ! -e "${project_root}/src"
+            test ! -e "${project_root}/package.json"
+          else
+            grep -F "Detected existing project" "${evidence_root}/initialize-and-adopt.txt"
+            grep -F "接入已有项目：已生成桥接结果" "${evidence_root}/initialize-and-adopt.txt"
+            grep -F "原任务文件不会被修改" "${evidence_root}/initialize-and-adopt.txt"
+            sha256sum \
+              "${project_root}/package.json" \
+              "${project_root}/src/main.js" \
+              "${project_root}/TODO.md" | sort > "${evidence_root}/business-after.sha256"
+            diff -u "${evidence_root}/business-before.sha256" "${evidence_root}/business-after.sha256"
+          fi
+
+          success_script="${RUNNER_TEMP}/linux-${PROJECT_STATE}-success.sh"
+          recover_script="${RUNNER_TEMP}/linux-${PROJECT_STATE}-recover.sh"
+          # AI-SDLC-USER-GUIDE-STEP: success
+          extract_route_step success "${success_script}"
+          # AI-SDLC-USER-GUIDE-STEP: recover
+          extract_route_step recover "${recover_script}"
+          (
+            cd "${project_root}"
+            export MODULE_PYTHON="${module_python}"
+            bash "${success_script}"
+            if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+              git status --short --untracked-files=all
+            fi
+          ) 2>&1 | tee "${evidence_root}/success.txt"
+          grep -F "${RELEASE_TAG#v}" "${evidence_root}/success.txt"
+          grep -F "当前结果 / Result" "${evidence_root}/success.txt"
+          grep -F "下一步 / Next" "${evidence_root}/success.txt"
+          if [[ "${PROJECT_STATE}" == "existing" ]]; then
+            grep -F ".ai-sdlc" "${evidence_root}/success.txt"
+          fi
+
+          bash "${recover_script}" 2>&1 | tee "${evidence_root}/recover.txt"
+          command -v git
+          command -v curl
+          test -s /etc/ssl/certs/ca-certificates.crt || \
+            test -s /etc/pki/tls/certs/ca-bundle.crt
+          adopted=false
+          if [[ "${PROJECT_STATE}" == "existing" ]]; then adopted=true; fi
+          printf '{"platform":"debian-12","project_state":"%s","initialized":true,"adopted":%s,"success_checked":true,"recovery_replayed":true}\n' \
+            "${PROJECT_STATE}" "${adopted}" > \
+            "${evidence_root}/route-completion.json"
+
+      - name: Upload real Linux bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-real-python-bootstrap-evidence-${{ matrix.project_state }}
+          path: ${{ runner.temp }}/linux-real-python-bootstrap-evidence-${{ matrix.project_state }}
+          if-no-files-found: error
+
+  linux-unsupported-python-bootstrap:
+    name: ${{ matrix.project_state }} Ubuntu unsupported Python bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project_state: [new, existing]
+    container:
+      image: ubuntu:22.04
+    env:
+      PROJECT_STATE: ${{ matrix.project_state }}
+      AI_SDLC_DISABLE_UPDATE_CHECK: "1"
+
+    steps:
+      - name: Check out the exact unsupported-host installer
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.tag }}
+          persist-credentials: false
+
+      - name: Require unsupported Ubuntu to fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          evidence_root="${RUNNER_TEMP}/ubuntu-unsupported-python-bootstrap-evidence-${PROJECT_STATE}"
+          project_root="${RUNNER_TEMP}/ubuntu-unsupported-${PROJECT_STATE}-project"
+          install_root="${RUNNER_TEMP}/ubuntu-unsupported-${PROJECT_STATE}-venv"
+          shadow_bin="${RUNNER_TEMP}/ubuntu-unsupported-${PROJECT_STATE}-bin"
+          apt_sentinel_log="${evidence_root}/apt-get-calls.log"
+          installer_path="${GITHUB_WORKSPACE}/packaging/install_online.sh"
+          export HOME="${RUNNER_TEMP}/ubuntu-unsupported-home-${PROJECT_STATE}"
+          export SHELL="/bin/bash"
+          stable_cli="${HOME}/.local/bin/ai-sdlc"
+
+          mkdir -p "${evidence_root}" "${project_root}" "${shadow_bin}" "${HOME}"
+          : > "${apt_sentinel_log}"
+          printf '%s\n' '# isolated bash profile' > "${HOME}/.bashrc"
+          printf '%s\n' '# isolated login profile' > "${HOME}/.profile"
+          sha256sum "${HOME}/.bashrc" "${HOME}/.profile" > \
+            "${evidence_root}/profile-before.sha256"
+
+          if [[ "${PROJECT_STATE}" == "existing" ]]; then
+            mkdir -p "${project_root}/src"
+            printf '%s\n' '{"scripts":{"build":"echo build"}}' > \
+              "${project_root}/package.json"
+            printf '%s\n' "console.log('existing');" > "${project_root}/src/main.js"
+            printf '%s\n' "- [ ] Existing imported task" > "${project_root}/TODO.md"
+          else
+            test -z "$(ls -A "${project_root}")"
+          fi
+
+          tree_hash() {
+            local root="$1"
+            tar --sort=name --mtime='UTC 1970-01-01' \
+              --owner=0 --group=0 --numeric-owner -cf - -C "${root}" . | \
+              sha256sum | awk '{print $1}'
+          }
+          project_before="$(tree_hash "${project_root}")"
+          printf '%s\n' "${project_before}" > \
+            "${evidence_root}/project-before.sha256"
+
+          for candidate in python3.11 python3 python; do
+            printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "${shadow_bin}/${candidate}"
+          done
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'printf "apt-get %s\n" "$*" >> "${APT_SENTINEL_LOG}"' \
+            'exit 97' > "${shadow_bin}/apt-get"
+          chmod +x \
+            "${shadow_bin}/python3.11" \
+            "${shadow_bin}/python3" \
+            "${shadow_bin}/python" \
+            "${shadow_bin}/apt-get"
+          export APT_SENTINEL_LOG="${apt_sentinel_log}"
+          export PATH="${shadow_bin}:${PATH}"
+
+          test -f "${installer_path}"
+          set +e
+          (
+            cd "${project_root}"
+            AI_SDLC_PACKAGE_SPEC="${GITHUB_WORKSPACE}" \
+              bash "${installer_path}" "${install_root}" --add-to-path
+          ) > "${evidence_root}/install-online.txt" 2>&1
+          installer_exit=$?
+          set -e
+          cat "${evidence_root}/install-online.txt"
+
+          python_package_install_calls="$(wc -l < "${apt_sentinel_log}" | tr -d '[:space:]')"
+          venv_created="false"
+          if [[ -e "${install_root}" || -L "${install_root}" ]]; then
+            venv_created="true"
+          fi
+          stable_link_created="false"
+          if [[ -e "${stable_cli}" || -L "${stable_cli}" ]]; then
+            stable_link_created="true"
+          fi
+          sha256sum "${HOME}/.bashrc" "${HOME}/.profile" > \
+            "${evidence_root}/profile-after.sha256"
+          profile_mutated="false"
+          if ! cmp -s \
+            "${evidence_root}/profile-before.sha256" \
+            "${evidence_root}/profile-after.sha256"; then
+            profile_mutated="true"
+          fi
+          project_after="$(tree_hash "${project_root}")"
+          printf '%s\n' "${project_after}" > \
+            "${evidence_root}/project-after.sha256"
+          project_mutated="false"
+          if [[ "${project_before}" != "${project_after}" ]]; then
+            project_mutated="true"
+          fi
+          installer_failed_closed="false"
+          if [[ "${installer_exit}" -ne 0 ]]; then
+            installer_failed_closed="true"
+          fi
+
+          test "${installer_exit}" -ne 0
+          grep -E \
+            'Unsupported Linux Python bootstrap host: distro=ubuntu version=22\.04 arch=(x86_64|amd64) libc=glibc\.' \
+            "${evidence_root}/install-online.txt"
+          grep -F \
+            'Missing-Python online bootstrap is certified only for Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc' \
+            "${evidence_root}/install-online.txt"
+          grep -F 'ai-sdlc-offline-3.1.0-linux-amd64.tar.gz' \
+            "${evidence_root}/install-online.txt"
+          grep -F 'route 6/12' "${evidence_root}/install-online.txt"
+          test "${python_package_install_calls}" -eq 0
+          test ! -e "${install_root}"
+          test ! -L "${install_root}"
+          test ! -e "${stable_cli}"
+          test ! -L "${stable_cli}"
+          test "${stable_link_created}" = "false"
+          test "${profile_mutated}" = "false"
+          diff -u \
+            "${evidence_root}/profile-before.sha256" \
+            "${evidence_root}/profile-after.sha256"
+          test "${project_mutated}" = "false"
+          diff -u \
+            "${evidence_root}/project-before.sha256" \
+            "${evidence_root}/project-after.sha256"
+          test "${installer_failed_closed}" = "true"
+          test "${venv_created}" = "false"
+
+          printf '{"platform":"ubuntu-22.04","project_state":"%s","installer_failed_closed":%s,"python_package_install_calls":%s,"venv_created":%s,"project_mutated":%s,"offline_recovery_asset":"ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"}\n' \
+            "${PROJECT_STATE}" \
+            "${installer_failed_closed}" \
+            "${python_package_install_calls}" \
+            "${venv_created}" \
+            "${project_mutated}" > "${evidence_root}/fail-closed.json"
+
+      - name: Upload unsupported Linux bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubuntu-unsupported-python-bootstrap-evidence-${{ matrix.project_state }}
+          path: ${{ runner.temp }}/ubuntu-unsupported-python-bootstrap-evidence-${{ matrix.project_state }}
+          if-no-files-found: error
+
+  replay-published-guide:
+    name: ${{ matrix.asset_os }} published guide
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_os: macos
+            asset_machine: arm64
+            runner: macos-latest
+            project_shell: zsh
+          - asset_os: linux
+            asset_machine: amd64
+            runner: ubuntu-latest
+            project_shell: bash
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      ASSET_OS: ${{ matrix.asset_os }}
+      ASSET_MACHINE: ${{ matrix.asset_machine }}
+      PROJECT_SHELL: ${{ matrix.project_shell }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - name: Check out the PTY user-flow driver
+        uses: actions/checkout@v6
+
+      - name: Set up package build Python
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build POSIX offline bundle for pull request replay
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          actual_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          case "${actual_os}" in
+            darwin) actual_os="macos" ;;
+            linux) actual_os="linux" ;;
+          esac
+          actual_machine="$(uname -m | tr '[:upper:]' '[:lower:]')"
+          case "${actual_machine}" in
+            x86_64|amd64) actual_machine="amd64" ;;
+            arm64|aarch64) actual_machine="arm64" ;;
+          esac
+          if [[ "${actual_os}" != "${ASSET_OS}" || "${actual_machine}" != "${ASSET_MACHINE}" ]]; then
+            echo "Runner identity ${actual_os}-${actual_machine} does not match required PR asset ${ASSET_OS}-${ASSET_MACHINE}." >&2
+            exit 1
+          fi
+
+          uv python install 3.11
+          runtime_python="$(uv python find --managed-python 3.11)"
+          runtime_dir="$(dirname "${runtime_python}")"
+          runtime_root="$(cd "${runtime_dir}/.." && pwd)"
+          PYTHON="${runtime_python}" \
+            AI_SDLC_OFFLINE_PYTHON_RUNTIME="${runtime_root}" \
+            AI_SDLC_OFFLINE_ASSET_SUFFIX="-${ASSET_OS}-${ASSET_MACHINE}" \
+            bash packaging/offline/build_offline_bundle.sh
+
+      - name: Replay both new-user guide scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          evidence_root="${RUNNER_TEMP}/posix-user-guide-e2e-evidence"
+          export HOME="${RUNNER_TEMP}/guide-home"
+          release_version="${RELEASE_TAG#v}"
+          download_root="${RUNNER_TEMP}/ai-sdlc-${RELEASE_TAG}-download"
+          if [[ "${ASSET_OS}" == "macos" ]]; then
+            install_root="${HOME}/Applications/AI-SDLC"
+          else
+            install_root="${HOME}/.local/share/AI-SDLC"
+          fi
+          new_project_root="${HOME}/projects/my-new-project"
+          existing_project_root="${HOME}/projects/my-existing-project"
+          bundle_name="ai-sdlc-offline-${release_version}-${ASSET_OS}-${ASSET_MACHINE}"
+          PACKAGE_NAME="${bundle_name}.tar.gz"
+          package_source="published_release"
+
+          mkdir -p \
+            "${evidence_root}" \
+            "${download_root}" \
+            "${install_root}" \
+            "${new_project_root}" \
+            "${existing_project_root}/src"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            package_source="pull_request_local_bundle"
+            cp "dist-offline/${PACKAGE_NAME}" "${download_root}/${PACKAGE_NAME}"
+            cp "dist-offline/${PACKAGE_NAME}.sha256" "${download_root}/${PACKAGE_NAME}.sha256"
+          else
+            curl --fail --location --retry 3 \
+              --output "${download_root}/${PACKAGE_NAME}" \
+              "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME"
+            curl --fail --location --retry 3 \
+              --output "${download_root}/${PACKAGE_NAME}.sha256" \
+              "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME.sha256"
+          fi
+          printf 'release_tag=%s; package_source=%s\n' "${RELEASE_TAG}" "${package_source}" \
+            > "${evidence_root}/scenario.txt"
+
+          if [[ "${ASSET_OS}" == "macos" ]]; then
+            (cd "${download_root}" && shasum -a 256 -c "${PACKAGE_NAME}.sha256") |
+              tee "${evidence_root}/checksum.txt"
+          else
+            (cd "${download_root}" && sha256sum -c "${PACKAGE_NAME}.sha256") |
+              tee "${evidence_root}/checksum.txt"
+          fi
+
+          tar xzf "${download_root}/${PACKAGE_NAME}" -C "${install_root}"
+          bundle_root="${install_root}/${bundle_name}"
+          (
+            cd "${bundle_root}"
+            ./install_offline.sh --add-to-path
+          ) 2>&1 | tee "${evidence_root}/install.txt"
+
+          DIRECT_CLI="${bundle_root}/.venv/bin/ai-sdlc"
+          "$DIRECT_CLI" --version | tee "${evidence_root}/version.txt"
+          grep -Fx "${release_version}" "${evidence_root}/version.txt"
+          grep -F "Offline installation completed" "${evidence_root}/install.txt"
+
+          python3 scripts/posix_clean_user_e2e.py \
+            --cli "$DIRECT_CLI" \
+            --project "${new_project_root}" \
+            2>&1 | tee "${evidence_root}/empty-init.txt"
+          grep -F "POSIX_INTERACTIVE_SELECTION_COMPLETED" \
+            "${evidence_root}/empty-init.txt"
+          grep -F "AI 代理入口: Cursor" "${evidence_root}/empty-init.txt"
+          grep -F "Project shell: ${PROJECT_SHELL}" "${evidence_root}/empty-init.txt"
+          grep -F "Initialized AI-SDLC project" "${evidence_root}/empty-init.txt"
+          grep -F "当前结果 / Result" "${evidence_root}/empty-init.txt"
+          grep -F "下一步 / Next" "${evidence_root}/empty-init.txt"
+
+          printf '%s\n' '{"scripts":{"build":"echo build"}}' > "${existing_project_root}/package.json"
+          printf '%s\n' "console.log('existing');" > "${existing_project_root}/src/main.js"
+          printf '%s\n' "- [ ] Existing imported task" > "${existing_project_root}/TODO.md"
+          (
+            cd "${existing_project_root}"
+            git init --quiet
+            git add .
+            git -c user.name=E2E -c user.email=e2e@example.invalid \
+              commit --quiet -m baseline
+          )
+
+          business_files=(
+            "${existing_project_root}/package.json"
+            "${existing_project_root}/src/main.js"
+            "${existing_project_root}/TODO.md"
+          )
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${business_files[@]}" | sort > "${evidence_root}/business-before.sha256"
+          else
+            shasum -a 256 "${business_files[@]}" | sort > "${evidence_root}/business-before.sha256"
+          fi
+
+          python3 scripts/posix_clean_user_e2e.py \
+            --cli "$DIRECT_CLI" \
+            --project "${existing_project_root}" 2>&1 |
+            tee "${evidence_root}/existing-init-adopt.txt"
+          (
+            cd "${existing_project_root}"
+            "$DIRECT_CLI" adopt .
+          ) 2>&1 | tee -a "${evidence_root}/existing-init-adopt.txt"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${business_files[@]}" | sort > "${evidence_root}/business-after.sha256"
+          else
+            shasum -a 256 "${business_files[@]}" | sort > "${evidence_root}/business-after.sha256"
+          fi
+          diff -u \
+            "${evidence_root}/business-before.sha256" \
+            "${evidence_root}/business-after.sha256"
+
+          grep -F "Detected existing project" \
+            "${evidence_root}/existing-init-adopt.txt"
+          grep -F "POSIX_INTERACTIVE_SELECTION_COMPLETED" \
+            "${evidence_root}/existing-init-adopt.txt"
+          grep -F "AI 代理入口: Cursor" \
+            "${evidence_root}/existing-init-adopt.txt"
+          grep -F "Project shell: ${PROJECT_SHELL}" \
+            "${evidence_root}/existing-init-adopt.txt"
+          grep -F "接入已有项目：已生成桥接结果" \
+            "${evidence_root}/existing-init-adopt.txt"
+          grep -F "原任务文件不会被修改" \
+            "${evidence_root}/existing-init-adopt.txt"
+          grep -F "推荐继续点" \
+            "${evidence_root}/existing-init-adopt.txt"
+
+      - name: Upload POSIX user guide evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: posix-user-guide-e2e-evidence-${{ matrix.asset_os }}
+          path: ${{ runner.temp }}/posix-user-guide-e2e-evidence
+          if-no-files-found: error
+
+  linux-offline-acquisition-bootstrap:
+    name: ${{ matrix.project_state }} linux offline connected-host bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project_state: [new, existing]
+    container:
+      image: debian:12-slim
+
+    steps:
+      - name: Check out exact offline guide inputs
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Replay exact offline acquisition bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(command -v curl || true)"
+          test ! -s /etc/ssl/certs/ca-certificates.crt
+          test ! -s /etc/pki/tls/certs/ca-bundle.crt
+          route_marker="<!-- AI-SDLC-USER-GUIDE-ROUTE: ${{ matrix.project_state }}|offline|linux-amd64 -->"
+          acquire_script="${RUNNER_TEMP}/linux-offline-acquire.sh"
+          bootstrap_script="${RUNNER_TEMP}/linux-offline-bootstrap.sh"
+          evidence_root="${RUNNER_TEMP}/linux-offline-acquisition-${{ matrix.project_state }}"
+          mkdir -p "${evidence_root}"
+          awk -v marker="${route_marker}" '
+            $0 == marker { in_route = 1; next }
+            in_route && /AI-SDLC-USER-GUIDE-STEP: acquire/ { in_step = 1; next }
+            in_step && /^```bash$/ { in_code = 1; next }
+            in_code && /^```$/ { exit }
+            in_code { print }
+          ' USER_GUIDE.zh-CN.md > "${acquire_script}"
+          sed '/^PACKAGE_NAME=/,$d' "${acquire_script}" > "${bootstrap_script}"
+          test -s "${bootstrap_script}"
+          bash "${bootstrap_script}"
+          command -v curl
+          test -s /etc/ssl/certs/ca-certificates.crt || \
+            test -s /etc/pki/tls/certs/ca-bundle.crt
+          curl --fail --location --retry 3 \
+            --output "${evidence_root}/github-download-probe.txt" \
+            https://raw.githubusercontent.com/github/gitignore/main/Python.gitignore
+          test -s "${evidence_root}/github-download-probe.txt"
+
+      - name: Upload offline acquisition evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-offline-acquisition-${{ matrix.project_state }}
+          path: ${{ runner.temp }}/linux-offline-acquisition-${{ matrix.project_state }}
+          if-no-files-found: error
+
+  linux-offline-compatibility-gates:
+    name: linux offline compatibility gates (${{ matrix.host_kind }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host_kind: supported-glibc
+            container_image: debian:12-slim
+            expected_outcome: pass
+          - host_kind: rejected-musl
+            container_image: alpine:3.21
+            expected_outcome: fail
+          - host_kind: unknown-libc
+            container_image: alpine:3.21
+            expected_outcome: unknown
+
+    steps:
+      - name: Check out exact offline compatibility inputs
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Execute exact offline compatibility gates
+        shell: bash
+        env:
+          HOST_KIND: ${{ matrix.host_kind }}
+          CONTAINER_IMAGE: ${{ matrix.container_image }}
+          EXPECTED_OUTCOME: ${{ matrix.expected_outcome }}
+        run: |
+          set -euo pipefail
+          guard_root="${RUNNER_TEMP}/linux-offline-guards-${HOST_KIND}"
+          evidence_root="${RUNNER_TEMP}/linux-offline-compatibility-${HOST_KIND}"
+          mkdir -p "${guard_root}" "${evidence_root}"
+
+          for project_state in "new" "existing"; do
+            route_marker="<!-- AI-SDLC-USER-GUIDE-ROUTE: ${project_state}|offline|linux-amd64 -->"
+            for step_name in "prerequisites" "recover"; do
+              guard_script="${guard_root}/${project_state}-${step_name}.sh"
+              awk -v marker="${route_marker}" -v step_name="${step_name}" '
+                $0 == marker { in_route = 1; next }
+                in_route && index($0, "AI-SDLC-USER-GUIDE-STEP: " step_name) { in_step = 1; next }
+                in_step && /^```bash$/ { in_code = 1; next }
+                in_code && /^```$/ { exit }
+                in_code { print }
+              ' USER_GUIDE.zh-CN.md > "${guard_script}"
+              test -s "${guard_script}"
+            done
+          done
+
+          cat > "${guard_root}/driver.sh" <<'DRIVER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf 'host_kind=%s\ncontainer_image=%s\n' \
+            "${HOST_KIND}" "${CONTAINER_IMAGE}" > /evidence/metadata.txt
+          uname -m > /evidence/arch.txt
+          (getconf GNU_LIBC_VERSION 2>&1 || true) > /evidence/getconf.txt
+          : > /evidence/loader.txt
+          for loader in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+            if [[ -x "${loader}" ]]; then
+              LC_ALL=C "${loader}" --version > /evidence/loader.txt 2>&1 || true
+              break
+            fi
+          done
+          (LC_ALL=C ldd --version 2>&1 || true) > /evidence/ldd.txt
+          if [[ "${EXPECTED_OUTCOME}" == "pass" ]]; then
+            test -z "$(command -v getconf || true)"
+            head -n 1 /evidence/loader.txt | \
+              grep -Eq '^ld\.so \((GNU libc|[^)]+ GLIBC [0-9][^)]*)\) stable release version [0-9]+\.[0-9]+\.?$'
+          elif [[ "${EXPECTED_OUTCOME}" == "fail" ]]; then
+            head -n 1 /evidence/ldd.txt | grep -Eq '^musl libc \((x86_64|amd64)\)$'
+          else
+            test -z "$(command -v getconf || true)"
+            test "$(command -v ldd)" = "/guards/ldd"
+            test ! -s /evidence/loader.txt
+            head -n 1 /evidence/ldd.txt | \
+              grep -Fx 'diagnostic: glibc compatibility could not be determined'
+          fi
+
+          guard_count=0
+          for guard_script in \
+            /guards/new-prerequisites.sh \
+            /guards/new-recover.sh \
+            /guards/existing-prerequisites.sh \
+            /guards/existing-recover.sh; do
+            set +e
+            guard_output="$(bash "${guard_script}" 2>&1)"
+            guard_exit=$?
+            set -e
+            printf '%s exit=%s\n%s\n' \
+              "$(basename "${guard_script}")" "${guard_exit}" "${guard_output}" \
+              >> /evidence/guards.txt
+            if [[ "${EXPECTED_OUTCOME}" == "pass" ]]; then
+              test "${guard_exit}" -eq 0
+            elif [[ "${EXPECTED_OUTCOME}" == "fail" ]]; then
+              test "${guard_exit}" -ne 0
+              printf '%s\n' "${guard_output}" | \
+                grep -F "不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
+            else
+              test "${guard_exit}" -ne 0
+              printf '%s\n' "${guard_output}" | \
+                grep -F "无法确定此主机使用的 libc"
+            fi
+            guard_count=$((guard_count + 1))
+          done
+          test "${guard_count}" -eq 4
+          printf '{"host_kind":"%s","container_image":"%s","expected_outcome":"%s","guard_count":%s}\n' \
+            "${HOST_KIND}" "${CONTAINER_IMAGE}" "${EXPECTED_OUTCOME}" "${guard_count}" \
+            > /evidence/receipt.json
+          DRIVER
+          chmod +x "${guard_root}/driver.sh"
+
+          if [[ "${HOST_KIND}" == "unknown-libc" ]]; then
+            cat > "${guard_root}/ldd" <<'UNKNOWN_LDD'
+          #!/bin/sh
+          printf '%s\n' 'diagnostic: glibc compatibility could not be determined'
+          UNKNOWN_LDD
+            chmod +x "${guard_root}/ldd"
+          fi
+
+          if [[ "${HOST_KIND}" == "supported-glibc" ]]; then
+            bootstrap_command='apt-get update >/dev/null && apt-get install -y --no-install-recommends bash libc-bin coreutils grep >/dev/null && rm -f /usr/bin/getconf'
+          elif [[ "${HOST_KIND}" == "unknown-libc" ]]; then
+            bootstrap_command='apk add --no-cache bash coreutils grep >/dev/null && rm -f /usr/bin/getconf /usr/bin/ldd && export PATH="/guards:${PATH}"'
+          else
+            bootstrap_command='apk add --no-cache bash musl-utils coreutils grep >/dev/null'
+          fi
+          docker run --rm \
+            --env HOST_KIND \
+            --env CONTAINER_IMAGE \
+            --env EXPECTED_OUTCOME \
+            --env HOME=/tmp/ai-sdlc-home \
+            --volume "${guard_root}:/guards:ro" \
+            --volume "${evidence_root}:/evidence" \
+            "${CONTAINER_IMAGE}" \
+            /bin/sh -ec "${bootstrap_command}; exec bash /guards/driver.sh"
+          test -s "${evidence_root}/metadata.txt"
+          test -s "${evidence_root}/arch.txt"
+          test -s "${evidence_root}/guards.txt"
+          test -s "${evidence_root}/receipt.json"
+
+      - name: Upload offline compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-offline-compatibility-${{ matrix.host_kind }}
+          path: ${{ runner.temp }}/linux-offline-compatibility-${{ matrix.host_kind }}
+          if-no-files-found: error
+
+  linux-online-opensuse-existing-python:
+    name: Linux online openSUSE existing-Python compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - name: Check out exact online prerequisite inputs
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Replay exact openSUSE online prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          replay_root="${RUNNER_TEMP}/opensuse-online-route-replay"
+          evidence_root="${RUNNER_TEMP}/opensuse-online-route-evidence"
+          mkdir -p "${replay_root}" "${evidence_root}"
+          source_repository="SinclairPan/Ai_AutoSDLC"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
+            source_repository="${PR_HEAD_REPOSITORY}"
+            remote_sha="${PR_HEAD_SHA}"
+          else
+            tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            if [[ -z "${tag_line}" ]]; then
+              tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+            fi
+            remote_sha="${tag_line%%[[:space:]]*}"
+            test -n "${remote_sha}"
+          fi
+          guide_installer_url="https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+          candidate_installer_url="https://raw.githubusercontent.com/${source_repository}/${remote_sha}/packaging/install_online.sh"
+
+          for project_state in "new" "existing"; do
+            route_marker="<!-- AI-SDLC-USER-GUIDE-ROUTE: ${project_state}|online|linux-amd64 -->"
+            for step_name in "prerequisites" "acquire" "verify" "recover"; do
+              route_script="${replay_root}/${project_state}-${step_name}.sh"
+              awk -v marker="${route_marker}" -v step_name="${step_name}" '
+                $0 == marker { in_route = 1; next }
+                in_route && index($0, "AI-SDLC-USER-GUIDE-STEP: " step_name) { in_step = 1; next }
+                in_step && /^```bash$/ { in_code = 1; next }
+                in_code && /^```$/ { exit }
+                in_code { print }
+              ' USER_GUIDE.zh-CN.md > "${route_script}"
+              test -s "${route_script}"
+            done
+            if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+              sed -i "s#${guide_installer_url}#${candidate_installer_url}#" \
+                "${replay_root}/${project_state}-acquire.sh"
+              grep -F "${candidate_installer_url}" \
+                "${replay_root}/${project_state}-acquire.sh"
+            fi
+          done
+
+          cat > "${replay_root}/driver.sh" <<'DRIVER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test -x "$(command -v python3.11)"
+          test -x "$(command -v git)"
+          test -x "$(command -v curl)"
+          test -s /etc/ssl/ca-bundle.pem
+          mkdir -p /tmp/ai-sdlc-home /tmp/ai-sdlc-project /evidence
+          export HOME=/tmp/ai-sdlc-home
+          for project_state in new existing; do
+            (
+              cd /tmp/ai-sdlc-project
+              source "/replay/${project_state}-prerequisites.sh"
+              source "/replay/${project_state}-acquire.sh"
+              source "/replay/${project_state}-verify.sh"
+              test -s "${INSTALLER_PATH}"
+              cp "${INSTALLER_PATH}" "/evidence/${project_state}-install_online.sh"
+            ) >> /evidence/download.txt 2>&1
+            (
+              cd /tmp/ai-sdlc-project
+              bash "/replay/${project_state}-recover.sh"
+            ) >> /evidence/replay.txt 2>&1
+          done
+          cmp -s /evidence/new-install_online.sh /evidence/existing-install_online.sh
+          AI_SDLC_PACKAGE_SPEC=/workspace \
+            PYTHON="$(command -v python3.11)" \
+            bash /evidence/new-install_online.sh /tmp/ai-sdlc-venv \
+            >> /evidence/install.txt 2>&1
+          /tmp/ai-sdlc-venv/bin/python -m ai_sdlc --version \
+            > /evidence/version.txt
+          grep -F '3.1.0' /evidence/version.txt
+          printf '{"distro":"opensuse-leap","python":"%s","ca_bundle":"/etc/ssl/ca-bundle.pem","source_revision":"%s","replay_count":8}\n' \
+            "$(python3.11 --version 2>&1)" "${SOURCE_REVISION}" \
+            > /evidence/receipt.json
+          DRIVER
+          chmod +x "${replay_root}/driver.sh"
+
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --volume "${replay_root}:/replay:ro" \
+            --volume "${evidence_root}:/evidence" \
+            --env SOURCE_REVISION="${remote_sha}" \
+            opensuse/leap:15.6 \
+            /bin/sh -ec 'zypper --non-interactive install -y bash python311 git-core curl ca-certificates coreutils grep gawk >/dev/null; exec bash /replay/driver.sh'
+          test -s "${evidence_root}/replay.txt"
+          test -s "${evidence_root}/download.txt"
+          test -s "${evidence_root}/new-install_online.sh"
+          test -s "${evidence_root}/existing-install_online.sh"
+          test -s "${evidence_root}/version.txt"
+          test -s "${evidence_root}/receipt.json"
+
+      - name: Upload openSUSE prerequisite evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-online-opensuse-existing-python
+          path: ${{ runner.temp }}/opensuse-online-route-evidence
+          if-no-files-found: error

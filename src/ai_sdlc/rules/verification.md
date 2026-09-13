@@ -1,0 +1,217 @@
+# 完成前验证协议
+
+<!-- ai-sdlc:normal-path:start -->
+完成声明须有当前候选的新鲜命令、退出码、结果及主要回归证据；不以旧日志或局部通过代替完整验证。
+仅 Implementation B1：依 Next 调用 review，按 expert_roles 启动最多两位全新独立只读专家，用同摘要快照逐项评价并引用证据。作者不得代填 PASS；命令成功不等于业务达标。H=0且无重要发现则停止修改，进入原 Close；否则仅在授权、事实及验证路径通过时作一次必要修复，进入唯一 R2，不重选合同。
+新能力先 seal-for-review，review 只读消费当前实际工件；S 不替代实际 H/Q、浏览器或暂存树验证。implementation-simulation-v1不支持 begin-improvement；stage-simulation-v1依Next可作R1前有限改善，但原 R1/R2/Close不增轮。Local PR只评当前树、不选路；legacy/B1/D1按原身份继续。
+未知/拒绝、R2未达标或漂移即停，不得另建 Loop 刷轮；已记录专家失败仅可同输入重试一次。量化不扩大权限、不代替原关闭门禁。
+<!-- ai-sdlc:normal-path:end -->
+
+> 本规则在任何"声明完成"之前激活 —— 批次完成、阶段完成、流水线完成。
+> **没有验证证据就声称完成，不是效率，是不诚实。**
+
+## 铁律
+
+```
+没有新鲜的验证证据，就不能声称完成。
+```
+
+如果你没有在当前步骤运行过验证命令，你不能说它通过了。
+
+## 门函数
+
+每次声称任何状态或表达满意之前：
+
+```
+1. 识别：什么命令能证明这个声称？
+2. 运行：执行完整命令（新鲜的、完整的）
+3. 阅读：完整输出，检查退出码，数失败数
+4. 确认：输出是否支持声称？
+   - 不支持 → 陈述实际状态 + 证据
+   - 支持 → 陈述声称 + 证据
+5. 然后才能：做出声称
+
+跳过任何步骤 = 猜测，不是验证
+```
+
+## 验证矩阵
+
+| 声称 | 需要的证据 | 不够的证据 |
+|------|-----------|-----------|
+| 测试通过 | 测试命令输出：0 failures | 上一次运行、"应该通过" |
+| Lint 通过 | Lint 命令输出：0 errors | 部分检查、推断 |
+| 构建成功 | 构建命令：exit 0 | Lint 通过、"日志看着正常" |
+| Bug 已修 | 复现测试通过 | 代码改了、"应该修好了" |
+| 既有能力未退化 | 既有入口 / 既有选项 / 既有输出的回归测试或真实命令证据 | 只验证新功能 happy path |
+| 回归测试有效 | Red-Green 验证完成 | 测试通过一次 |
+| 需求已满足 | 逐条检查清单 | "测试通过了" |
+| 批次完成 | 所有任务标记 + V2 通过 + 审查通过 | 任务做完了 |
+| 阶段完成 | 门禁 PASS + 产物齐全 | "应该差不多了" |
+
+## 最小 fresh verification 画像
+
+当变更范围不同，允许的最小 fresh verification 集合也不同；但**必须显式选择画像**，不得再靠“这只是 docs 改动”口头豁免。
+
+- `docs-only`
+  - 适用范围：仅改 `docs/**`、`specs/**.md`、`task-execution-log.md`、`tasks.md` 等 Markdown/收口文档。
+  - 最小证据：`uv run ai-sdlc verify constraints`
+  - 收口要求：若进入 close 阶段，`task-execution-log.md` 最新批次必须显式写 `验证画像：docs-only`，并在最终 `git commit` 后再运行 `workitem close-check`。
+- `rules-only`
+  - 适用范围：仅改 `src/ai_sdlc/rules/**.md` 与相关文档，不含 `src/**/*.py`、`tests/**`。
+  - 最小证据：`uv run ai-sdlc verify constraints`
+  - 收口要求：latest batch 必须显式写 `验证画像：rules-only`；若实际混入代码/测试改动，不得继续沿用本画像。
+- `truth-only`
+  - 适用范围：仅改 `.ai-sdlc/**`、`specs/**.md`、`docs/**.md` 等项目真值与 formal carrier，不含 `src/**/*.py`、`tests/**`。
+  - 最小证据：`uv run ai-sdlc verify constraints`
+  - 收口要求：latest batch 必须显式写 `验证画像：truth-only`；若混入代码/测试变更，不得继续沿用本画像。
+- `code-change`
+  - 适用范围：任何涉及 `src/**/*.py`、`tests/**`、生成逻辑或运行时行为的变更。
+  - 最小证据：`uv run pytest`、`uv run ruff check`、`uv run ai-sdlc verify constraints`
+  - 退化防线：若变更触碰既有用户可见能力、CLI 输出、adapter 指引、配置字段、生成模板或文档主路径，必须补充既有入口 / 既有选项 / 既有输出的回归测试或真实命令证据；不得只验证新功能 happy path。
+  - 收口要求：latest batch 必须显式写 `验证画像：code-change`；不得用 `docs-only` / `rules-only` / `truth-only` 伪装代码改动。
+
+`close-check` 负责对 latest batch 的画像与 execution-log 中的 fresh evidence 做只读核验；普通用户项目使用默认的 `verify constraints`，AI-SDLC 仓库自身维护才显式使用 `verify constraints --profile self-development` 检查框架规则文档和 PR checklist 的一致性。
+
+## Reconcile Smoke Contract
+
+- `Existing Artifact Probe` 与 `ai-sdlc recover --reconcile` 属于仓库状态诊断输出契约；Windows offline smoke 依赖它们识别“安装成功，但当前仓库仍需 reconcile checkpoint”的已知停止场景。
+- 变更上述诊断输出契约时，必须同步维护 `.github/workflows/windows-offline-smoke.yml`、`tests/integration/test_github_workflows.py` 与 `verify constraints` 的 reconcile smoke contract markers。
+- CLI 若继续使用“已停止当前运行，避免基于过时 checkpoint 继续执行。”提示，也视为该契约的一部分；修改这条停止语义时，同样必须同步更新相关 smoke 判定。
+
+## 阶段化验证要求
+
+### 批次级验证（EXECUTE 阶段内）
+
+```
+每个批次声称完成前：
+  □ R1 验证完成（红灯 — 测试正确失败）
+  □ V1 验证完成（绿灯 — 目标测试通过）
+  □ V2 验证完成（回归 — 全量测试通过）
+  □ 构建验证通过（如适用）
+  □ 代码审查通过（见 rules/code-review.md）
+  □ tasks.md 中对应任务已勾选
+  □ execution-log 已记录
+  □ git commit 成功
+```
+
+### 阶段级验证（每个 Stage 门禁前）
+
+```
+每个阶段声称完成前：
+  □ 该阶段的所有产物已生成
+  □ 产物内容非空且格式正确
+  □ 门禁条件逐条检查（见 rules/quality-gate.md）
+  □ 产物之间交叉引用一致（无悬空引用）
+  □ checkpoint.yml 已更新
+  □ 若本轮发现框架缺陷 / 代理违约 / 门禁暴露的流程缺口，已写入 `docs/framework-defect-backlog.zh-CN.md`
+```
+
+### 流水线级验证（Stage 6 CLOSE）
+
+```
+流水线声称完成前：
+  □ 全量测试通过（最终运行，不是引用之前的结果）
+  □ 构建成功（最终运行）
+  □ tasks.md 中所有任务已勾选
+  □ spec 中所有 FR 和 SC 已覆盖（逐条对照）
+  □ execution-log 完整
+  □ development-summary 已生成
+  □ 最终 git commit 成功
+  □ checkpoint.yml 已删除
+```
+
+## Smoke Test 协议
+
+在以下时机执行 smoke test：
+
+```
+触发时机：
+  1. 每个批次的 V2 全量回归
+  2. Stage 5 全部批次完成后的最终验证
+  3. Stage 6 CLOSE 的最终确认
+
+Smoke Test 内容（根据项目类型）：
+
+Web 应用：
+  □ 服务能启动（不报错退出）
+  □ 健康检查端点返回 200
+  □ 核心 API 能响应（至少一个端点）
+
+CLI 工具：
+  □ --help 能正常输出
+  □ 基本命令能执行
+
+库/SDK：
+  □ 能被导入/引用（无编译错误）
+  □ 核心函数能调用
+
+如果项目类型不明确或无法运行：
+  → 退化为「构建 + 全量测试」作为 Smoke Test
+  → 不阻断，但在 execution-log 中记录"Smoke Test: 退化模式"
+
+## 框架缺陷落盘协议
+
+当你在当前变更中发现的不是“业务实现错误”，而是**框架缺陷、规则缺口、状态漂移、代理违约**时：
+
+```
+1. 先完成当前必要验证，不得凭印象声称“只是流程问题”
+2. 判断是否命中以下任一触发：
+   - 用户明确要求记录
+   - 门禁 / verify / close-check 被框架问题阻断
+   - 自检发现自己跳过了框架约束
+3. 命中后，在 docs/framework-defect-backlog.zh-CN.md 追加结构化条目
+4. 即使该问题已在当前轮次被及时拦截并修复，只要它曾真实出现并暴露框架缺口，也必须登记；不得因为“已经修好”而跳过 backlog
+5. 条目中除现象/根因外，还必须写出 `未来杜绝方案摘要`，并在 `rule / policy`、`middleware`、`workflow`、`tool`、`eval` 中的一项或多项展开成可执行的防复发方案
+6. 仅当本轮没有新增框架问题时，才允许不追加条目
+```
+
+不要把这类问题只留在对话里，也不要只写偏差登记而不进入主 backlog。
+```
+
+## 红旗 — 停下来做验证
+
+以下任何用词/想法出现时，必须触发门函数：
+
+- 使用"应该"、"大概"、"似乎"
+- 在验证前表达满意（"好了！"、"完美！"、"搞定！"）
+- 准备 commit/push 但没跑过验证
+- 信任上一次运行的结果（"之前通过了"）
+- 依赖部分验证推断全部通过
+- 想着"就这一次不验证"
+- 疲劳时想快点收工
+- **任何暗示成功/完成的措辞，但你没有运行过验证**
+
+## 自我合理化防御表
+
+| 借口 | 现实 |
+|------|------|
+| "应该现在能工作了" | 运行验证 |
+| "我很有信心" | 信心 ≠ 证据 |
+| "就这一次" | 没有例外 |
+| "Lint 过了" | Lint ≠ 编译 ≠ 测试 |
+| "代理报告成功" | 独立验证 |
+| "累了" | 疲劳 ≠ 借口 |
+| "部分检查够了" | 部分证明不了全部 |
+| "换个说法所以规则不适用" | 精神高于字面 |
+
+## 与流水线的集成
+
+本规则在以下位置强制检查：
+
+```
+batch-protocol.md Step 3（验证）→ 引用本规则的「批次级验证」
+batch-protocol.md Step 5（提交）→ 确认批次级验证已通过
+quality-gate.md 每个阶段门禁 → 引用本规则的「阶段级验证」
+autopilot.md Stage 6 CLOSE → 引用本规则的「流水线级验证」
+```
+
+## 最终规则
+
+```
+声称 → 证据在手
+否则 → 不是验证，是猜测
+```
+
+没有捷径。运行命令。阅读输出。然后声称结果。
+
+这不可协商。

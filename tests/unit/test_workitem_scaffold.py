@@ -1,0 +1,269 @@
+"""Unit tests for project-neutral work item scaffold generation."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+import ai_sdlc.core.workitem_scaffold as workitem_scaffold_module
+from ai_sdlc.core.config import load_project_state, save_project_state
+from ai_sdlc.core.plan_check import parse_markdown_frontmatter
+from ai_sdlc.core.workitem_scaffold import WorkitemScaffolder, WorkitemScaffoldError
+from ai_sdlc.models.project import ProjectState, ProjectStatus
+
+TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates"
+
+
+def _setup_project(root: Path, *, next_work_item_seq: int = 1) -> None:
+    (root / ".ai-sdlc" / "project" / "config").mkdir(parents=True, exist_ok=True)
+    save_project_state(
+        root,
+        ProjectState(
+            status=ProjectStatus.INITIALIZED,
+            project_name="demo",
+            next_work_item_seq=next_work_item_seq,
+        ),
+    )
+
+
+def _copy_scaffold_templates(dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "spec-template.md",
+        "plan-template.md",
+        "tasks-template.md",
+        "execution-log-template.md",
+    ):
+        (dest / name).write_text(
+            (TEMPLATE_DIR / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
+def test_scaffold_generates_parser_friendly_formal_docs_with_refs(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _setup_project(root, next_work_item_seq=8)
+
+    result = WorkitemScaffolder(template_dir=TEMPLATE_DIR).scaffold(
+        root=root,
+        title="Payment retry policy",
+        input_text="支付失败后按退避策略重试",
+        related_plan="docs/payment-retry-plan.md",
+        related_docs=(
+            "docs/payment-api.md",
+            "docs/service-slo.md",
+        ),
+    )
+
+    assert result.work_item_id == "008-payment-retry-policy"
+    assert result.spec_dir == root / "specs" / "008-payment-retry-policy"
+    assert tuple(path.name for path in result.created_paths) == (
+        "spec.md",
+        "plan.md",
+        "tasks.md",
+        "task-execution-log.md",
+    )
+    assert not (root / "docs" / "superpowers").exists()
+
+    for path in result.created_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "direct-formal" not in text
+        assert "作为框架维护者" not in text
+        assert "workitem_scaffold.py" not in text
+        assert "T11-T31 | direct-formal" not in text
+
+    spec_text = (result.spec_dir / "spec.md").read_text(encoding="utf-8")
+    assert spec_text.startswith("# 功能规格：Payment retry policy\n\n")
+    assert "**功能编号**：`008-payment-retry-policy`" in spec_text
+    assert "支付失败后按退避策略重试" in spec_text
+    assert "作为项目成员" in spec_text
+
+    plan_fm, plan_body = parse_markdown_frontmatter(result.spec_dir / "plan.md")
+    assert plan_fm == {
+        "related_plan": "docs/payment-retry-plan.md",
+        "related_doc": [
+            "docs/payment-api.md",
+            "docs/service-slo.md",
+        ],
+    }
+    assert plan_body.lstrip().startswith("# 实施计划：Payment retry policy")
+    assert "specs/008-payment-retry-policy/spec.md" in plan_body
+    assert "[原则 2]" not in plan_body
+    assert "specs/008-payment-retry-policy/" in plan_body
+    assert "├── spec.md" in plan_body
+    assert "├── tasks.md" in plan_body
+    assert "└── task-execution-log.md" in plan_body
+
+    tasks_fm, tasks_body = parse_markdown_frontmatter(result.spec_dir / "tasks.md")
+    assert tasks_fm == plan_fm
+    assert tasks_body.lstrip().startswith("# 任务分解：Payment retry policy")
+    assert "### Task 1.1 收敛需求与验收契约" in tasks_body
+    assert "### Task 2.1 确认实现与测试路径" in tasks_body
+    assert "### Task 3.1 完成验证与独立评审" in tasks_body
+    assert "进入 execute 前确认" in tasks_body
+
+    exec_log_text = (result.spec_dir / "task-execution-log.md").read_text(
+        encoding="utf-8"
+    )
+    assert "# 任务执行日志：Payment retry policy" in exec_log_text
+    assert f"**功能编号**：`{result.work_item_id}`" in exec_log_text
+    assert "统一验证命令" in exec_log_text
+    assert "代码审查结论" in exec_log_text
+    assert "任务/计划同步状态" in exec_log_text
+    assert "已完成 git 提交：待执行" in exec_log_text
+
+    task_headers = re.findall(r"^### Task (\d+)\.(\d+) ", tasks_body, re.MULTILINE)
+    assert [f"T{phase}{index}" for phase, index in task_headers] == [
+        "T11",
+        "T21",
+        "T31",
+    ]
+
+    state = load_project_state(root)
+    assert state.next_work_item_seq == 9
+
+
+def test_scaffold_explicit_wi_id_preserves_stable_shape_and_advances_seq(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _setup_project(root, next_work_item_seq=3)
+
+    result = WorkitemScaffolder(template_dir=TEMPLATE_DIR).scaffold(
+        root=root,
+        title="Branch Lifecycle Guard",
+        wi_id="012-branch-lifecycle-guard",
+        related_docs=("docs/reference.md",),
+    )
+
+    spec_text = (result.spec_dir / "spec.md").read_text(encoding="utf-8")
+    assert spec_text.splitlines()[:5] == [
+        "# 功能规格：Branch Lifecycle Guard",
+        "",
+        "**功能编号**：`012-branch-lifecycle-guard`",
+        f"**创建日期**：{result.created_date}",
+        "**状态**：草稿",
+    ]
+
+    tasks_text = (result.spec_dir / "tasks.md").read_text(encoding="utf-8")
+    assert tasks_text.splitlines()[:6] == [
+        "---",
+        "related_doc:",
+        '  - "docs/reference.md"',
+        "---",
+        "# 任务分解：Branch Lifecycle Guard",
+        "",
+    ]
+
+    state = load_project_state(root)
+    assert state.next_work_item_seq == 13
+
+
+def test_scaffold_rejects_duplicate_canonical_doc_set(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _setup_project(root, next_work_item_seq=4)
+    scaffolder = WorkitemScaffolder(template_dir=TEMPLATE_DIR)
+
+    scaffolder.scaffold(
+        root=root,
+        title="Duplicate Canonical Docs",
+        wi_id="004-duplicate-canonical-docs",
+    )
+
+    with pytest.raises(
+        WorkitemScaffoldError, match="canonical formal docs already exist"
+    ):
+        scaffolder.scaffold(
+            root=root,
+            title="Duplicate Canonical Docs",
+            wi_id="004-duplicate-canonical-docs",
+        )
+
+
+def test_scaffold_uses_next_free_sequence_when_project_state_lags(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _setup_project(root, next_work_item_seq=20)
+    existing = root / "specs" / "046-existing-formal-baseline"
+    existing.mkdir(parents=True)
+    (existing / "spec.md").write_text("# existing\n", encoding="utf-8")
+
+    result = WorkitemScaffolder(template_dir=TEMPLATE_DIR).scaffold(
+        root=root,
+        title="Frontend Delivery Review Baseline",
+    )
+
+    assert result.work_item_id == "047-frontend-delivery-review-baseline"
+    state = load_project_state(root)
+    assert state.next_work_item_seq == 48
+
+
+def test_scaffold_falls_back_to_packaged_templates_when_repo_templates_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _setup_project(root, next_work_item_seq=8)
+
+    package_root = (
+        tmp_path / "venv" / "lib" / "python3.11" / "site-packages" / "ai_sdlc"
+    )
+    _copy_scaffold_templates(package_root / "templates")
+    fake_module_path = package_root / "core" / "workitem_scaffold.py"
+    fake_module_path.parent.mkdir(parents=True, exist_ok=True)
+    fake_module_path.touch()
+    monkeypatch.setattr(workitem_scaffold_module, "__file__", str(fake_module_path))
+
+    result = WorkitemScaffolder().scaffold(
+        root=root,
+        title="Packaged Template Fallback",
+    )
+
+    assert result.work_item_id == "008-packaged-template-fallback"
+    assert (result.spec_dir / "spec.md").is_file()
+
+
+def test_scaffold_falls_back_to_importlib_template_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _setup_project(root, next_work_item_seq=8)
+
+    resource_templates = tmp_path / "resources"
+    _copy_scaffold_templates(resource_templates)
+    fake_module_path = (
+        tmp_path
+        / "python"
+        / "site-packages"
+        / "ai_sdlc"
+        / "core"
+        / "workitem_scaffold.py"
+    )
+    fake_module_path.parent.mkdir(parents=True, exist_ok=True)
+    fake_module_path.touch()
+
+    monkeypatch.setattr(workitem_scaffold_module, "__file__", str(fake_module_path))
+    monkeypatch.setattr(
+        workitem_scaffold_module.importlib_resources,
+        "files",
+        lambda package: resource_templates,
+    )
+
+    result = WorkitemScaffolder(template_dir=tmp_path / "missing-templates").scaffold(
+        root=root,
+        title="Importlib Resource Template Fallback",
+    )
+
+    assert result.work_item_id == "008-importlib-resource-template-fallback"
+    assert (result.spec_dir / "spec.md").is_file()

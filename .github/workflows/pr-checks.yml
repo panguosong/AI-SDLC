@@ -1,0 +1,63 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --dev --locked
+
+      - name: Validate public release identity
+        run: uv run python scripts/validate_public_release_identity.py .
+
+      - name: Ruff
+        run: uv run ruff check src tests scripts
+
+      - name: Pytest smoke
+        run: >-
+          uv run pytest
+          tests/unit/test_command_names.py
+          tests/unit/test_workitem_scaffold.py
+          tests/unit/test_packaging_config.py
+          tests/integration/test_cli_init.py
+          tests/integration/test_frontend_delivery_normal_path.py
+          tests/integration/test_cli_root_surface.py
+          tests/integration/test_github_workflows.py
+          tests/integration/test_cli_workitem_init.py
+          -q
+
+      - name: Verify constraints
+        run: |
+          git branch --force main HEAD^1
+          git switch --create "$GITHUB_HEAD_REF" HEAD^2
+          uv run ai-sdlc verify constraints --profile self-development

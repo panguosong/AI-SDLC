@@ -1,0 +1,923 @@
+"""Auto-detect IDE and materialize canonical adapter ingress files."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ai_sdlc.core.config import load_project_config, save_project_config
+from ai_sdlc.integrations.agent_target import (
+    IDEKind,
+    detect_agent_target,
+    preferred_shell_label,
+    recommended_shell_for_platform,
+)
+from ai_sdlc.models.project import (
+    ActivationState,
+    AdapterIngressState,
+    AdapterSupportTier,
+    AdapterVerificationResult,
+    PreferredShell,
+)
+from ai_sdlc.utils.helpers import AI_SDLC_DIR, PROJECT_CONFIG_PATH, now_iso
+
+logger = logging.getLogger(__name__)
+
+ADAPTER_VERSION = "1"
+_CANONICAL_DIGEST_ENV_KEY = "AI_SDLC_ADAPTER_CANONICAL_SHA256"
+_CANONICAL_PATH_ENV_KEY = "AI_SDLC_ADAPTER_CANONICAL_PATH"
+
+_VERIFICATION_ENV_KEYS: dict[IDEKind, tuple[str, ...]] = {
+    IDEKind.CURSOR: ("CURSOR_TRACE_ID", "CURSOR_AGENT"),
+    IDEKind.VSCODE: ("VSCODE_IPC_HOOK_CLI",),
+    IDEKind.CODEX: ("OPENAI_CODEX", "CODEX_CLI_READY"),
+    IDEKind.CLAUDE_CODE: ("CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE"),
+}
+_ALTERNATE_ADAPTER_PATHS: dict[IDEKind, tuple[str, ...]] = {
+    IDEKind.CURSOR: (".cursor/rules/ai-sdlc.md",),
+    IDEKind.VSCODE: (".vscode/AI-SDLC.md",),
+    IDEKind.CODEX: (".codex/AI-SDLC.md",),
+    IDEKind.CLAUDE_CODE: (".claude/AI-SDLC.md",),
+}
+_SHELL_GUIDANCE_MARKER = "<!-- AI-SDLC managed shell guidance -->"
+_REVIEW_GUIDANCE_START = "<!-- AI-SDLC managed review guidance start -->"
+_REVIEW_GUIDANCE_END = "<!-- AI-SDLC managed review guidance end -->"
+
+
+@dataclass
+class ApplyResult:
+    """Outcome of an adapter apply pass."""
+
+    ide: str
+    written: list[str] = field(default_factory=list)
+    skipped_existing: list[str] = field(default_factory=list)
+    skipped_user_modified: list[str] = field(default_factory=list)
+    alternate_migrated: list[str] = field(default_factory=list)
+    skipped_no_project: bool = False
+    message: str = ""
+
+    def __post_init__(self) -> None:
+        self.written = _dedupe_string_items(self.written)
+        self.skipped_existing = _dedupe_string_items(self.skipped_existing)
+        self.skipped_user_modified = _dedupe_string_items(self.skipped_user_modified)
+        self.alternate_migrated = _dedupe_string_items(self.alternate_migrated)
+
+
+@dataclass
+class CanonicalConsumptionState:
+    """Observed proof state for canonical adapter content consumption."""
+
+    content_digest: str = ""
+    result: str = AdapterVerificationResult.UNVERIFIED.value
+    evidence: str = ""
+    consumed_at: str = ""
+    detail: str = ""
+
+    def as_persisted_fields(self) -> dict[str, str]:
+        return {
+            "adapter_canonical_content_digest": self.content_digest,
+            "adapter_canonical_consumption_result": self.result,
+            "adapter_canonical_consumption_evidence": self.evidence,
+            "adapter_canonical_consumed_at": self.consumed_at,
+        }
+
+
+def _dedupe_string_items(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    for value in values:
+        normalized = str(value).strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
+def _render_shell_guidance(preferred_shell: str) -> str:
+    raw = str(preferred_shell or "").strip().lower()
+    if not raw:
+        recommended = recommended_shell_for_platform()
+        return (
+            f"{_SHELL_GUIDANCE_MARKER}\n"
+            "Project preferred shell is not configured yet.\n"
+            f"Recommended default for this host: {preferred_shell_label(recommended)}.\n"
+            "Run `ai-sdlc adapter shell-select` and persist one shell before executing commands.\n"
+            "Until then, do not guess shell syntax across PowerShell, cmd, and POSIX shells."
+        )
+
+    shell = PreferredShell(raw)
+    label = preferred_shell_label(shell)
+    if shell == PreferredShell.POWERSHELL:
+        shell_detail = (
+            "Use PowerShell syntax for commands, env vars, pipes, and filesystem operations. "
+            "Do not start with POSIX shell syntax and then retry in PowerShell."
+        )
+    elif shell == PreferredShell.CMD:
+        shell_detail = (
+            "Use cmd.exe syntax for commands and environment variables. "
+            "Do not start with PowerShell cmdlets or POSIX shell syntax."
+        )
+    elif shell == PreferredShell.AUTO:
+        shell_detail = (
+            "Shell is set to auto. Inspect the live terminal before executing commands, "
+            "then stay consistent with that shell for the rest of the session."
+        )
+    else:
+        shell_detail = (
+            f"Use {label} POSIX shell syntax for commands and environment variables. "
+            "Do not start with PowerShell or cmd.exe syntax."
+        )
+    return (
+        f"{_SHELL_GUIDANCE_MARKER}\n"
+        f"Project preferred shell: {label}.\n"
+        f"{shell_detail}"
+    )
+
+
+def _render_adapter_content(base_text: str, preferred_shell: str) -> str:
+    return base_text.rstrip() + "\n\n" + _render_shell_guidance(preferred_shell) + "\n"
+
+
+def _managed_adapter_variants(base_texts: tuple[str, ...]) -> set[str]:
+    variants: set[str] = set()
+    for text in base_texts:
+        for managed_text in _managed_adapter_base_texts(text):
+            variants.add(managed_text)
+            variants.add(_render_adapter_content(managed_text, ""))
+            for shell in PreferredShell:
+                variants.add(_render_adapter_content(managed_text, shell.value))
+    return variants
+
+
+def _managed_adapter_base_texts(text: str) -> tuple[str, ...]:
+    """返回当前模板与可精确还原的上一版托管模板。"""
+
+    before, start, remainder = text.partition(_REVIEW_GUIDANCE_START)
+    _managed, end, after = remainder.partition(_REVIEW_GUIDANCE_END)
+    if not start or not end:
+        return (text,)
+    return (text, before + after.lstrip("\n"))
+
+
+def _bundle_root() -> Path:
+    return Path(__file__).resolve().parent.parent / "adapters"
+
+
+def _install_pairs(ide: IDEKind) -> list[tuple[str, str]]:
+    """Map bundle-relative path -> project-relative canonical path."""
+    if ide == IDEKind.CURSOR:
+        return [("cursor/rules/ai-sdlc.md", ".cursor/rules/ai-sdlc.mdc")]
+    if ide == IDEKind.VSCODE:
+        return [("vscode/AI-SDLC.md", ".github/copilot-instructions.md")]
+    if ide == IDEKind.CODEX:
+        return [("codex/AI-SDLC.md", "AGENTS.md")]
+    if ide == IDEKind.CLAUDE_CODE:
+        return [("claude_code/AI-SDLC.md", ".claude/CLAUDE.md")]
+    return [("generic/ide-hint.md", f"{AI_SDLC_DIR}/memory/ide-adapter-hint.md")]
+
+
+def _canonical_path(ide: IDEKind) -> str:
+    return _install_pairs(ide)[0][1]
+
+
+def _alternate_paths(ide: IDEKind) -> tuple[str, ...]:
+    return _ALTERNATE_ADAPTER_PATHS.get(ide, ())
+
+
+def _digest_file(path: Path) -> str:
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+
+def _detect_alternate_adapter(root: Path, ide: IDEKind) -> str | None:
+    for rel in _alternate_paths(ide):
+        if (root / rel).is_file():
+            return rel
+    return None
+
+
+def detect_ide(root: Path) -> IDEKind:
+    """Detect IDE from project markers first, then environment hints."""
+    return detect_agent_target(root)
+
+
+def build_canonical_proof_env(
+    root: Path,
+    *,
+    target: IDEKind | str | None = None,
+) -> dict[str, str]:
+    """Build the canonical proof payload for a supported materialized adapter target."""
+    cfg = load_project_config(root)
+    resolved_target = _coerce_ide_kind(target) or _coerce_ide_kind(cfg.agent_target) or detect_ide(root)
+    if resolved_target == IDEKind.GENERIC:
+        raise ValueError("Generic adapter targets do not support canonical proof carrier.")
+
+    canonical_path = _canonical_path(resolved_target)
+    canonical_file = root / canonical_path
+    if not canonical_file.is_file():
+        raise FileNotFoundError(
+            "Canonical adapter content is not materialized at the expected path."
+        )
+
+    return {
+        _CANONICAL_DIGEST_ENV_KEY: _digest_file(canonical_file),
+        _CANONICAL_PATH_ENV_KEY: canonical_path,
+    }
+
+
+def _sync_file(
+    bundle: Path,
+    dest: Path,
+    result: ApplyResult,
+    *,
+    alternate_sources: tuple[Path, ...] = (),
+    preferred_shell: str = "",
+) -> None:
+    bundle_text = bundle.read_text(encoding="utf-8")
+    expected = _render_adapter_content(bundle_text, preferred_shell)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    variant_sources = [bundle_text]
+    variant_sources.extend(
+        path.read_text(encoding="utf-8")
+        for path in alternate_sources
+        if path.is_file()
+    )
+    managed_variants = _managed_adapter_variants(tuple(variant_sources))
+    if not dest.exists():
+        alternate_source = next(
+            (path for path in alternate_sources if path.is_file()), None
+        )
+        if alternate_source is not None:
+            dest.write_text(
+                alternate_source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            result.written.append(str(dest))
+            result.alternate_migrated.append(str(alternate_source))
+            return
+        dest.write_text(expected, encoding="utf-8")
+        result.written.append(str(dest))
+        return
+    existing = dest.read_text(encoding="utf-8")
+    if existing == expected:
+        result.skipped_existing.append(str(dest))
+        return
+    if existing in managed_variants:
+        dest.write_text(expected, encoding="utf-8")
+        result.written.append(str(dest))
+        return
+    result.skipped_user_modified.append(str(dest))
+
+
+def apply_adapter(root: Path, ide: IDEKind) -> ApplyResult:
+    """Copy bundled templates into the project without overwriting user edits."""
+    result = ApplyResult(ide=ide.value)
+    base = _bundle_root()
+    cfg = load_project_config(root)
+    for rel_bundle, rel_dest in _install_pairs(ide):
+        src = base / rel_bundle
+        if not src.is_file():
+            logger.warning("Missing adapter template: %s", src)
+            continue
+        dst = root / rel_dest
+        alternate_sources = tuple(root / rel for rel in _alternate_paths(ide))
+        _sync_file(
+            src,
+            dst,
+            result,
+            alternate_sources=alternate_sources,
+            preferred_shell=cfg.preferred_shell,
+        )
+    return result
+
+
+def _coerce_ide_kind(value: IDEKind | str | None) -> IDEKind | None:
+    """Normalize a persisted or CLI-provided target into ``IDEKind``."""
+    if value is None:
+        return None
+    if isinstance(value, IDEKind):
+        return value
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    return IDEKind(raw)
+
+
+def _coerce_persisted_ide_kind(value: IDEKind | str | None) -> IDEKind | None:
+    """Normalize persisted IDE values while tolerating alternate/custom strings."""
+    try:
+        return _coerce_ide_kind(value)
+    except ValueError:
+        return None
+
+
+def _resolve_agent_target(
+    root: Path,
+    cfg_agent_target: str,
+    explicit_target: IDEKind | str | None,
+) -> tuple[IDEKind, IDEKind]:
+    """Prefer explicit selection, then persisted non-generic choice, then detection."""
+    detected = detect_ide(root)
+    explicit = _coerce_ide_kind(explicit_target)
+    persisted = _coerce_ide_kind(cfg_agent_target)
+    if explicit is not None:
+        return detected, explicit
+    if persisted is not None and persisted != IDEKind.GENERIC:
+        return detected, persisted
+    return detected, detected
+
+
+def _next_activation_state(
+    cfg_agent_target: str,
+    cfg_activation_state: str,
+    target: IDEKind,
+) -> str:
+    """Preserve acknowledged/activated state only when the target stays unchanged."""
+    if (
+        cfg_agent_target == target.value
+        and cfg_activation_state
+        in {ActivationState.ACKNOWLEDGED.value, ActivationState.ACTIVATED.value}
+    ):
+        return cfg_activation_state
+    return ActivationState.INSTALLED.value
+
+
+def _default_support_tier(activation_state: str) -> str:
+    """Backfill a support tier when the config omits it."""
+    if activation_state == ActivationState.ACTIVATED.value:
+        return AdapterSupportTier.VERIFIED_ACTIVATION.value
+    if activation_state == ActivationState.ACKNOWLEDGED.value:
+        return AdapterSupportTier.ACKNOWLEDGED_ACTIVATION.value
+    return AdapterSupportTier.SOFT_INSTALLED.value
+
+
+def _activation_metadata(
+    cfg_agent_target: str,
+    cfg_activation_state: str,
+    cfg_support_tier: str,
+    cfg_activation_source: str,
+    cfg_activation_evidence: str,
+    cfg_activated_at: str,
+    target: IDEKind,
+) -> dict[str, str]:
+    """Preserve activation evidence only while the target stays unchanged."""
+    activation_state = _next_activation_state(
+        cfg_agent_target,
+        cfg_activation_state,
+        target,
+    )
+    if activation_state in {
+        ActivationState.ACKNOWLEDGED.value,
+        ActivationState.ACTIVATED.value,
+    }:
+        return {
+            "adapter_activation_state": activation_state,
+            "adapter_support_tier": cfg_support_tier
+            or _default_support_tier(activation_state),
+            "adapter_activation_source": cfg_activation_source,
+            "adapter_activation_evidence": cfg_activation_evidence,
+            "adapter_activated_at": cfg_activated_at,
+        }
+    return {
+        "adapter_activation_state": ActivationState.INSTALLED.value,
+        "adapter_support_tier": AdapterSupportTier.SOFT_INSTALLED.value,
+        "adapter_activation_source": "",
+        "adapter_activation_evidence": "",
+        "adapter_activated_at": "",
+    }
+
+
+def _preserved_verified_ingress(
+    cfg: Any,
+    target: IDEKind,
+    evidence: str,
+) -> dict[str, str] | None:
+    if cfg.agent_target != target.value:
+        return None
+    if cfg.adapter_ingress_state != AdapterIngressState.VERIFIED_LOADED.value:
+        return None
+    if cfg.adapter_verification_result != AdapterVerificationResult.VERIFIED.value:
+        return None
+    if cfg.adapter_verification_evidence != evidence:
+        return None
+    return {
+        "adapter_ingress_state": cfg.adapter_ingress_state,
+        "adapter_verification_result": cfg.adapter_verification_result,
+        "adapter_canonical_path": _canonical_path(target),
+        "adapter_degrade_reason": "",
+        "adapter_verification_evidence": cfg.adapter_verification_evidence,
+        "adapter_verified_at": cfg.adapter_verified_at,
+    }
+
+
+def _recorded_verified_ingress(
+    cfg: Any,
+    target: IDEKind,
+) -> dict[str, str] | None:
+    canonical_path = _canonical_path(target)
+    if cfg.agent_target != target.value:
+        return None
+    if cfg.adapter_ingress_state != AdapterIngressState.VERIFIED_LOADED.value:
+        return None
+    if cfg.adapter_verification_result != AdapterVerificationResult.VERIFIED.value:
+        return None
+    if not cfg.adapter_verification_evidence:
+        return None
+    if cfg.adapter_canonical_path and cfg.adapter_canonical_path != canonical_path:
+        return None
+    return {
+        "adapter_ingress_state": cfg.adapter_ingress_state,
+        "adapter_verification_result": cfg.adapter_verification_result,
+        "adapter_canonical_path": canonical_path,
+        "adapter_degrade_reason": "",
+        "adapter_verification_evidence": cfg.adapter_verification_evidence,
+        "adapter_verified_at": cfg.adapter_verified_at,
+    }
+
+
+def _evaluate_canonical_consumption(
+    root: Path,
+    cfg: Any,
+    *,
+    target: IDEKind,
+    environ: dict[str, str] | None = None,
+) -> CanonicalConsumptionState:
+    canonical_path = _canonical_path(target)
+    canonical_file = root / canonical_path
+    if not canonical_file.is_file():
+        return CanonicalConsumptionState(
+            detail="Canonical adapter content is not materialized at the expected path.",
+        )
+
+    current_digest = _digest_file(canonical_file)
+    if target == IDEKind.GENERIC:
+        return CanonicalConsumptionState(
+            content_digest=current_digest,
+            result="unverified",
+            detail=(
+                "Generic adapter targets do not provide a supported canonical "
+                "content consumption proof protocol."
+            ),
+        )
+
+    env = environ or dict(os.environ)
+    provided_digest = str(env.get(_CANONICAL_DIGEST_ENV_KEY, "")).strip()
+    provided_path = str(env.get(_CANONICAL_PATH_ENV_KEY, "")).strip()
+    has_explicit_proof = bool(provided_digest or provided_path)
+    path_matches = not provided_path or provided_path == canonical_path
+
+    if provided_digest and provided_digest == current_digest and path_matches:
+        return CanonicalConsumptionState(
+            content_digest=current_digest,
+            result="unverified",
+            evidence=f"transport:env:{_CANONICAL_DIGEST_ENV_KEY}",
+            detail=(
+                "Canonical adapter digest transport matched the current file; this does "
+                "not prove that the host or current session consumed the canonical content."
+            ),
+        )
+
+    if not has_explicit_proof:
+        return CanonicalConsumptionState(
+            content_digest=current_digest,
+            result="unverified",
+            detail=(
+                "Canonical adapter file digest is available, but machine-verifiable "
+                "host consumption proof is not recorded."
+            ),
+        )
+
+    return CanonicalConsumptionState(
+        content_digest=current_digest,
+        result="unverified",
+        detail=(
+            "Host-provided canonical consumption proof did not match the current "
+            "canonical digest and path."
+        ),
+    )
+
+
+def _ingress_metadata(
+    root: Path,
+    cfg: Any,
+    *,
+    target: IDEKind,
+    environ: dict[str, str] | None = None,
+) -> dict[str, str]:
+    canonical_path = _canonical_path(target)
+    if target == IDEKind.GENERIC:
+        return {
+            "adapter_ingress_state": AdapterIngressState.DEGRADED.value,
+            "adapter_verification_result": AdapterVerificationResult.DEGRADED.value,
+            "adapter_canonical_path": canonical_path,
+            **_evaluate_canonical_consumption(
+                root,
+                cfg,
+                target=target,
+                environ=environ,
+            ).as_persisted_fields(),
+            "adapter_degrade_reason": "generic_target_has_no_verify_protocol",
+            "adapter_verification_evidence": "",
+            "adapter_verified_at": "",
+        }
+
+    if not (root / canonical_path).is_file():
+        alternate_rel = _detect_alternate_adapter(root, target)
+        if alternate_rel is not None:
+            return {
+                "adapter_ingress_state": AdapterIngressState.UNSUPPORTED.value,
+                "adapter_verification_result": AdapterVerificationResult.UNSUPPORTED.value,
+                "adapter_canonical_path": canonical_path,
+                **_evaluate_canonical_consumption(
+                    root,
+                    cfg,
+                    target=target,
+                    environ=environ,
+                ).as_persisted_fields(),
+                "adapter_degrade_reason": (
+                    f"alternate_adapter_path_detected:{alternate_rel}"
+                ),
+                "adapter_verification_evidence": "",
+                "adapter_verified_at": "",
+            }
+        return {
+            "adapter_ingress_state": AdapterIngressState.UNSUPPORTED.value,
+            "adapter_verification_result": AdapterVerificationResult.UNSUPPORTED.value,
+            "adapter_canonical_path": canonical_path,
+            **_evaluate_canonical_consumption(
+                root,
+                cfg,
+                target=target,
+                environ=environ,
+            ).as_persisted_fields(),
+            "adapter_degrade_reason": "canonical_path_not_materialized",
+            "adapter_verification_evidence": "",
+            "adapter_verified_at": "",
+        }
+
+    env = environ or dict(os.environ)
+    for key in _VERIFICATION_ENV_KEYS.get(target, ()):
+        if env.get(key):
+            evidence = f"env:{key}"
+            canonical_consumption = _evaluate_canonical_consumption(
+                root,
+                cfg,
+                target=target,
+                environ=env,
+            ).as_persisted_fields()
+            preserved = _preserved_verified_ingress(cfg, target, evidence)
+            if preserved is not None:
+                return {**preserved, **canonical_consumption}
+            return {
+                "adapter_ingress_state": AdapterIngressState.VERIFIED_LOADED.value,
+                "adapter_verification_result": AdapterVerificationResult.VERIFIED.value,
+                "adapter_canonical_path": canonical_path,
+                **canonical_consumption,
+                "adapter_degrade_reason": "",
+                "adapter_verification_evidence": evidence,
+                "adapter_verified_at": now_iso(),
+            }
+
+    preserved = _recorded_verified_ingress(cfg, target)
+    if preserved is not None:
+        return {
+            **preserved,
+            **_evaluate_canonical_consumption(
+                root,
+                cfg,
+                target=target,
+                environ=env,
+            ).as_persisted_fields(),
+        }
+
+    return {
+        "adapter_ingress_state": AdapterIngressState.MATERIALIZED.value,
+        "adapter_verification_result": AdapterVerificationResult.UNVERIFIED.value,
+        "adapter_canonical_path": canonical_path,
+        **_evaluate_canonical_consumption(
+            root,
+            cfg,
+            target=target,
+            environ=env,
+        ).as_persisted_fields(),
+        "adapter_degrade_reason": "",
+        "adapter_verification_evidence": "",
+        "adapter_verified_at": "",
+    }
+
+
+def _ingress_fields_from_config(root: Path, cfg: Any, target: IDEKind) -> dict[str, str]:
+    canonical_consumption = _evaluate_canonical_consumption(root, cfg, target=target)
+    if cfg.adapter_ingress_state:
+        return {
+            "adapter_ingress_state": cfg.adapter_ingress_state,
+            "adapter_verification_result": cfg.adapter_verification_result,
+            "adapter_canonical_path": cfg.adapter_canonical_path or _canonical_path(target),
+            **canonical_consumption.as_persisted_fields(),
+            "adapter_canonical_consumption_detail": canonical_consumption.detail,
+            "adapter_degrade_reason": cfg.adapter_degrade_reason,
+            "adapter_verification_evidence": cfg.adapter_verification_evidence,
+            "adapter_verified_at": cfg.adapter_verified_at,
+        }
+    if target == IDEKind.GENERIC:
+        return {
+            "adapter_ingress_state": AdapterIngressState.DEGRADED.value,
+            "adapter_verification_result": AdapterVerificationResult.DEGRADED.value,
+            "adapter_canonical_path": _canonical_path(target),
+            **canonical_consumption.as_persisted_fields(),
+            "adapter_canonical_consumption_detail": canonical_consumption.detail,
+            "adapter_degrade_reason": "generic_target_has_no_verify_protocol",
+            "adapter_verification_evidence": "",
+            "adapter_verified_at": "",
+        }
+    return {
+        "adapter_ingress_state": AdapterIngressState.MATERIALIZED.value,
+        "adapter_verification_result": AdapterVerificationResult.UNVERIFIED.value,
+        "adapter_canonical_path": _canonical_path(target),
+        **canonical_consumption.as_persisted_fields(),
+        "adapter_canonical_consumption_detail": canonical_consumption.detail,
+        "adapter_degrade_reason": "",
+        "adapter_verification_evidence": "",
+        "adapter_verified_at": "",
+    }
+
+
+def _governance_detail(
+    *,
+    ingress_state: str,
+    canonical_path: str,
+    verification_evidence: str,
+    degrade_reason: str,
+    activation_state: str,
+    verification_hint: str = "",
+) -> str:
+    if ingress_state == AdapterIngressState.VERIFIED_LOADED.value:
+        if verification_evidence:
+            return (
+                "Verified host ingress recorded from machine-verifiable evidence: "
+                f"{verification_evidence}."
+            )
+        return "Verified host ingress recorded from machine-verifiable evidence."
+
+    if ingress_state == AdapterIngressState.MATERIALIZED.value:
+        detail = (
+            "Adapter instructions are materialized at the canonical path "
+            f"'{canonical_path}', but machine-verifiable evidence is not yet recorded."
+        )
+        if activation_state == ActivationState.ACKNOWLEDGED.value:
+            detail += (
+                " operator acknowledgement is stored separately and does not change "
+                "ingress verification."
+            )
+        if verification_hint:
+            detail += f" {verification_hint}"
+        return detail
+
+    if ingress_state == AdapterIngressState.DEGRADED.value:
+        reason = degrade_reason or "adapter_target_is_running_degraded"
+        detail = f"Adapter target is running in degraded mode: {reason}."
+        if activation_state == ActivationState.ACKNOWLEDGED.value:
+            detail += (
+                " operator acknowledgement is stored separately and does not change "
+                "ingress verification."
+            )
+        return detail
+
+    if ingress_state == AdapterIngressState.UNSUPPORTED.value and degrade_reason.startswith(
+        "alternate_adapter_path_detected:"
+    ):
+        alternate_path = degrade_reason.split(":", 1)[1]
+        return (
+            "Alternate adapter file detected at "
+            f"'{alternate_path}'. Rerun `ai-sdlc adapter select` to materialize "
+            f"the canonical path '{canonical_path}'. Until then governance "
+            "remains unsupported and runs stay advisory-only."
+        )
+
+    return "Adapter target is unsupported until canonical materialization succeeds."
+
+
+def _verification_env_hint(target: IDEKind) -> str:
+    keys = _VERIFICATION_ENV_KEYS.get(target, ())
+    if not keys:
+        return ""
+    joined = ", ".join(keys)
+    example = keys[0]
+    return (
+        "To verify host ingress, rerun the command from the IDE built-in terminal "
+        f"and reselect the adapter: `ai-sdlc adapter select --agent-target {target.value}`. "
+        f"If you must run from a generic shell, set {joined} (e.g., {example}=1) and rerun; "
+        "otherwise ingress remains unverified."
+    )
+
+
+def verification_env_hint(target: IDEKind | str | None) -> str:
+    kind = _coerce_ide_kind(target) or IDEKind.GENERIC
+    return _verification_env_hint(kind)
+
+
+def build_adapter_governance_surface(
+    root: Path,
+    *,
+    detected_ide: IDEKind | str | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return persisted adapter facts plus derived governance truth."""
+    cfg = load_project_config(root)
+    fallback = (
+        _coerce_ide_kind(detected_ide)
+        or _coerce_persisted_ide_kind(cfg.detected_ide)
+        or detect_ide(root)
+    )
+    resolved_detected_ide = fallback.value
+    agent_target = cfg.agent_target or resolved_detected_ide
+    target = _coerce_ide_kind(agent_target) or IDEKind.GENERIC
+    activation_state = cfg.adapter_activation_state or ActivationState.INSTALLED.value
+    support_tier = cfg.adapter_support_tier or _default_support_tier(activation_state)
+    env = environ or dict(os.environ)
+    ingress = _ingress_metadata(root, cfg, target=target, environ=env)
+    ingress_state = ingress["adapter_ingress_state"]
+
+    if ingress_state == AdapterIngressState.VERIFIED_LOADED.value:
+        governance_state = AdapterIngressState.VERIFIED_LOADED.value
+        governance_mode = AdapterIngressState.VERIFIED_LOADED.value
+        verifiable = True
+    elif ingress_state == AdapterIngressState.MATERIALIZED.value:
+        governance_state = "materialized_unverified"
+        governance_mode = "materialized_only"
+        verifiable = False
+    elif ingress_state == AdapterIngressState.DEGRADED.value:
+        governance_state = AdapterIngressState.DEGRADED.value
+        governance_mode = AdapterIngressState.DEGRADED.value
+        verifiable = False
+    else:
+        governance_state = AdapterIngressState.UNSUPPORTED.value
+        governance_mode = AdapterIngressState.UNSUPPORTED.value
+        verifiable = False
+
+    detail = _governance_detail(
+        ingress_state=ingress_state,
+        canonical_path=ingress["adapter_canonical_path"],
+        verification_evidence=ingress["adapter_verification_evidence"],
+        degrade_reason=ingress["adapter_degrade_reason"],
+        activation_state=activation_state,
+        verification_hint=_verification_env_hint(target),
+    )
+    preferred_shell = str(cfg.preferred_shell or "").strip()
+    preferred_shell_configured = bool(preferred_shell)
+    preferred_shell_recommended = recommended_shell_for_platform().value
+    preferred_shell_migration_hint = ""
+    if not preferred_shell_configured:
+        preferred_shell_migration_hint = (
+            "preferred shell not configured; run `ai-sdlc adapter shell-select` "
+            f"(recommended: {preferred_shell_label(recommended_shell_for_platform())})."
+        )
+    target_mismatch = (
+        bool(resolved_detected_ide)
+        and bool(agent_target)
+        and resolved_detected_ide != agent_target
+        and resolved_detected_ide != IDEKind.GENERIC.value
+    )
+    target_mismatch_hint = ""
+    if target_mismatch:
+        target_mismatch_hint = (
+            f"Detected host '{resolved_detected_ide}' differs from configured "
+            f"agent target '{agent_target}'. If '{resolved_detected_ide}' is the "
+            "current AI chat host, run "
+            f"`ai-sdlc adapter select --agent-target {resolved_detected_ide}` "
+            "and then rerun `ai-sdlc adapter status`."
+        )
+
+    return {
+        "detected_ide": resolved_detected_ide,
+        "agent_target": agent_target,
+        "adapter_target_mismatch": target_mismatch,
+        "adapter_target_mismatch_hint": target_mismatch_hint,
+        "preferred_shell": preferred_shell,
+        "preferred_shell_configured": preferred_shell_configured,
+        "preferred_shell_recommended": preferred_shell_recommended,
+        "preferred_shell_migration_hint": preferred_shell_migration_hint,
+        "adapter_applied": cfg.adapter_applied,
+        "adapter_activation_state": activation_state,
+        "adapter_support_tier": support_tier,
+        "adapter_activation_source": cfg.adapter_activation_source,
+        "adapter_activation_evidence": cfg.adapter_activation_evidence,
+        "adapter_activated_at": cfg.adapter_activated_at,
+        **ingress,
+        "governance_activation_state": governance_state,
+        "governance_activation_verifiable": verifiable,
+        "governance_activation_mode": governance_mode,
+        "governance_activation_detail": detail,
+    }
+
+
+def _persist_config(
+    root: Path,
+    *,
+    detected_ide: IDEKind,
+    agent_target: IDEKind,
+    result: ApplyResult,
+) -> None:
+    cfg = load_project_config(root)
+    updates = {
+        "detected_ide": detected_ide.value,
+        "agent_target": agent_target.value,
+        "adapter_applied": agent_target.value,
+        "adapter_version": ADAPTER_VERSION,
+    }
+    updates.update(
+        _activation_metadata(
+            cfg.agent_target,
+            cfg.adapter_activation_state,
+            cfg.adapter_support_tier,
+            cfg.adapter_activation_source,
+            cfg.adapter_activation_evidence,
+            cfg.adapter_activated_at,
+            agent_target,
+        )
+    )
+    updates.update(_ingress_metadata(root, cfg, target=agent_target))
+    config_path = root / PROJECT_CONFIG_PATH
+    state_changed = (
+        not config_path.is_file()
+        or not cfg.adapter_applied_at
+        or any(getattr(cfg, field_name) != value for field_name, value in updates.items())
+    )
+    if not state_changed:
+        return
+
+    updates["adapter_applied_at"] = now_iso()
+    cfg = cfg.model_copy(update=updates)
+    save_project_config(root, cfg)
+
+
+def ensure_ide_adaptation(
+    root: Path | None,
+    *,
+    agent_target: IDEKind | str | None = None,
+) -> ApplyResult:
+    """Run detection + idempotent install when project has .ai-sdlc/."""
+    if root is None:
+        return ApplyResult(
+            ide=IDEKind.GENERIC.value,
+            skipped_no_project=True,
+            message="no project root",
+        )
+    ai = root / AI_SDLC_DIR
+    if not ai.is_dir():
+        return ApplyResult(
+            ide=IDEKind.GENERIC.value,
+            skipped_no_project=True,
+            message="project not initialized",
+        )
+
+    cfg = load_project_config(root)
+    detected_ide, selected_target = _resolve_agent_target(
+        root,
+        cfg.agent_target,
+        agent_target,
+    )
+    result = apply_adapter(root, selected_target)
+    _persist_config(
+        root,
+        detected_ide=detected_ide,
+        agent_target=selected_target,
+        result=result,
+    )
+    return result
+
+
+def acknowledge_adapter(
+    root: Path,
+    *,
+    agent_target: IDEKind | str | None = None,
+) -> ApplyResult:
+    """Persist an explicit operator acknowledgement for compatibility/debug flows."""
+    result = ensure_ide_adaptation(root, agent_target=agent_target)
+    cfg = load_project_config(root)
+    cfg = cfg.model_copy(
+        update={
+            "adapter_activation_state": ActivationState.ACKNOWLEDGED.value,
+            "adapter_support_tier": AdapterSupportTier.ACKNOWLEDGED_ACTIVATION.value,
+            "adapter_activation_source": "operator_cli",
+            "adapter_activation_evidence": "ai-sdlc adapter activate",
+            "adapter_activated_at": now_iso(),
+        }
+    )
+    save_project_config(root, cfg)
+    return result
+
+
+def format_adapter_notice(result: ApplyResult) -> str:
+    """Short Rich-friendly line when new adapter files were written."""
+    if result.skipped_no_project or not result.written:
+        return ""
+    parts = [
+        f"[dim]IDE adapter ({result.ide}): installed "
+        f"{len(result.written)} file(s)[/dim]",
+    ]
+    if result.skipped_user_modified:
+        parts.append(
+            f"[dim]left {len(result.skipped_user_modified)} user file(s) untouched[/dim]"
+        )
+    return " ".join(parts)

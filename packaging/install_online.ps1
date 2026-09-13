@@ -1,0 +1,472 @@
+param(
+  [string]$VenvPath = ".venv",
+  [string]$PackageSpec = "git+https://github.com/SinclairPan/Ai_AutoSDLC.git@v3.1.0",
+  [switch]$AddToPath
+)
+
+$ErrorActionPreference = "Stop"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+try {
+  $utf8 = [System.Text.UTF8Encoding]::new($false)
+  [Console]::InputEncoding = $utf8
+  [Console]::OutputEncoding = $utf8
+  $OutputEncoding = $utf8
+} catch {
+  Write-Warning "Unable to force UTF-8 console encoding: $_"
+}
+
+function Write-BilingualStatus {
+  param(
+    [string]$Status,
+    [string]$StatusEn,
+    [string]$Command,
+    [string]$Purpose,
+    [string]$PurposeEn
+  )
+
+  Write-Host "Result"
+  Write-Host "  $Status"
+  if ($StatusEn -and ($StatusEn -ne $Status)) {
+    Write-Host "  $StatusEn"
+  }
+  Write-Host ""
+  Write-Host "Next"
+  Write-Host "  $Command"
+  Write-Host "  $Purpose"
+  if ($PurposeEn -and ($PurposeEn -ne $Purpose)) {
+    Write-Host "  $PurposeEn"
+  }
+}
+
+function Assert-LastExitCode {
+  param(
+    [string]$Operation
+  )
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Operation failed with exit code $LASTEXITCODE."
+  }
+}
+
+function Normalize-PathEntry {
+  param([string]$Directory)
+
+  try {
+    return (Resolve-Path -LiteralPath $Directory).Path.TrimEnd('\').ToLowerInvariant()
+  } catch {
+    return $Directory.TrimEnd('\').ToLowerInvariant()
+  }
+}
+
+function Set-PreferredAiSdlcPath {
+  param(
+    [string]$PathValue,
+    [string]$PreferredDirectory
+  )
+
+  $preferredKey = Normalize-PathEntry $PreferredDirectory
+  $result = @($PreferredDirectory)
+  $seen = @{}
+  $seen[$preferredKey] = $true
+  foreach ($entry in @($PathValue -split [IO.Path]::PathSeparator | Where-Object { $_ })) {
+    $key = Normalize-PathEntry $entry
+    if ($seen.ContainsKey($key)) {
+      continue
+    }
+    $seen[$key] = $true
+    $result += $entry
+  }
+  return ($result -join [IO.Path]::PathSeparator)
+}
+
+function Sync-AiSdlcLauncherDirectory {
+  param(
+    [string]$SourceShimDirectory,
+    [string]$TargetDirectory
+  )
+
+  try {
+    if (-not (Test-Path $TargetDirectory)) {
+      return
+    }
+    $sourceKey = Normalize-PathEntry $SourceShimDirectory
+    $targetKey = Normalize-PathEntry $TargetDirectory
+    if ($sourceKey -eq $targetKey) {
+      return
+    }
+    $hasLauncher = $false
+    foreach ($fileName in @("ai-sdlc.exe", "ai-sdlc.cmd", "ai-sdlc.ps1")) {
+      if (Test-Path (Join-Path $TargetDirectory $fileName)) {
+        $hasLauncher = $true
+      }
+    }
+    if (-not $hasLauncher) {
+      return
+    }
+    foreach ($fileName in @("ai-sdlc.exe", "ai-sdlc.cmd", "ai-sdlc-script.py", "ai-sdlc.exe.manifest", "ai-sdlc-runtime.txt")) {
+      $sourcePath = Join-Path $SourceShimDirectory $fileName
+      if (Test-Path $sourcePath) {
+        Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $TargetDirectory $fileName) -Force -ErrorAction Stop
+      }
+    }
+    $targetPsShim = Join-Path $TargetDirectory "ai-sdlc.ps1"
+    if (Test-Path $targetPsShim) {
+      Remove-Item -LiteralPath $targetPsShim -Force -ErrorAction Stop
+    }
+  } catch {
+  }
+}
+
+function Sync-AiSdlcLaunchersOnPath {
+  param([string]$SourceShimDirectory)
+
+  $seen = @{}
+  foreach ($pathValue in @([Environment]::GetEnvironmentVariable("Path", "User"))) {
+    foreach ($entry in @($pathValue -split [IO.Path]::PathSeparator | Where-Object { $_ })) {
+      $entryKey = Normalize-PathEntry $entry
+      if ($seen.ContainsKey($entryKey)) {
+        continue
+      }
+      $seen[$entryKey] = $true
+      Sync-AiSdlcLauncherDirectory -SourceShimDirectory $SourceShimDirectory -TargetDirectory $entry
+    }
+  }
+}
+
+function Repair-AiSdlcCommandPath {
+  param([string]$Directory)
+
+  $resolvedDirectory = (Resolve-Path -LiteralPath $Directory).Path
+  $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if (-not $currentUserPath) {
+    $currentUserPath = ""
+  }
+  $updatedPath = Set-PreferredAiSdlcPath -PathValue $currentUserPath -PreferredDirectory $resolvedDirectory
+  [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
+  $env:Path = Set-PreferredAiSdlcPath -PathValue $env:Path -PreferredDirectory $resolvedDirectory
+  Sync-AiSdlcLaunchersOnPath -SourceShimDirectory $resolvedDirectory
+}
+
+function Write-TextUtf8NoBom {
+  param(
+    [string]$Path,
+    [string]$Value
+  )
+
+  $encoding = [System.Text.UTF8Encoding]::new($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $encoding)
+}
+
+function ConvertTo-GitBashPath {
+  param([string]$PathValue)
+
+  $resolvedPath = $PathValue
+  try {
+    $resolvedPath = (Resolve-Path -LiteralPath $PathValue).Path
+  } catch {
+    $resolvedPath = [IO.Path]::GetFullPath($PathValue)
+  }
+  if ($resolvedPath -match '^([A-Za-z]):\\(.*)$') {
+    $drive = $matches[1].ToLowerInvariant()
+    $rest = $matches[2] -replace '\\', '/'
+    return "/$drive/$rest"
+  }
+  return ($resolvedPath -replace '\\', '/')
+}
+
+function ConvertFrom-GitBashPath {
+  param([string]$PathValue)
+
+  if ($PathValue -match '^/([A-Za-z])/(.*)$') {
+    $drive = $matches[1].ToUpperInvariant()
+    $rest = $matches[2] -replace '/', '\'
+    return "$drive`:\$rest"
+  }
+  return $PathValue
+}
+
+function Get-GitBashHomeDirectory {
+  $candidates = @($env:HOME, $env:USERPROFILE) | Where-Object { $_ }
+  foreach ($candidate in $candidates) {
+    $windowsCandidate = ConvertFrom-GitBashPath $candidate
+    try {
+      $fullPath = [IO.Path]::GetFullPath($windowsCandidate)
+      if (Test-Path $fullPath) {
+        return $fullPath
+      }
+    } catch {
+    }
+  }
+  return $null
+}
+
+function Get-AiSdlcShimDirectory {
+  if ($env:LOCALAPPDATA) {
+    return (Join-Path $env:LOCALAPPDATA "AI-SDLC\bin")
+  }
+  if ($env:USERPROFILE) {
+    return (Join-Path $env:USERPROFILE ".ai-sdlc\bin")
+  }
+  return (Join-Path (Get-Location).Path ".ai-sdlc-bin")
+}
+
+function Install-AiSdlcCommandShim {
+  param(
+    [string]$CliExe,
+    [string]$RuntimePython = ""
+  )
+
+  $resolvedCliExe = (Resolve-Path -LiteralPath $CliExe).Path
+  $shimDir = Get-AiSdlcShimDirectory
+  New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+
+  Copy-Item -LiteralPath $resolvedCliExe -Destination (Join-Path $shimDir "ai-sdlc.exe") -Force
+  $scriptPy = Join-Path (Split-Path -Parent $resolvedCliExe) (([IO.Path]::GetFileNameWithoutExtension($resolvedCliExe)) + "-script.py")
+  if (Test-Path $scriptPy) {
+    Copy-Item -LiteralPath $scriptPy -Destination (Join-Path $shimDir "ai-sdlc-script.py") -Force
+  }
+  $manifest = "$resolvedCliExe.manifest"
+  if (Test-Path $manifest) {
+    Copy-Item -LiteralPath $manifest -Destination (Join-Path $shimDir "ai-sdlc.exe.manifest") -Force
+  }
+
+  $cmdShim = @(
+    "@echo off",
+    ('"{0}" %*' -f $resolvedCliExe),
+    "exit /b %ERRORLEVEL%"
+  ) -join "`r`n"
+  Write-TextUtf8NoBom -Path (Join-Path $shimDir "ai-sdlc.cmd") -Value $cmdShim
+
+  $existingPsShim = Join-Path $shimDir "ai-sdlc.ps1"
+  if (Test-Path $existingPsShim) {
+    Remove-Item -LiteralPath $existingPsShim -Force
+  }
+
+  if (-not $RuntimePython) {
+    $candidateRuntimePython = Join-Path (Split-Path -Parent $resolvedCliExe) "python.exe"
+    if (Test-Path $candidateRuntimePython) {
+      $RuntimePython = $candidateRuntimePython
+    }
+  }
+  if ($RuntimePython -and (Test-Path $RuntimePython)) {
+    $resolvedRuntimePython = (Resolve-Path -LiteralPath $RuntimePython).Path
+    Write-TextUtf8NoBom -Path (Join-Path $shimDir "ai-sdlc-runtime.txt") -Value ($resolvedRuntimePython + "`n")
+  }
+
+  return (Resolve-Path -LiteralPath $shimDir).Path
+}
+
+function Update-GitBashProfilePath {
+  param([string]$Directory)
+
+  $gitBashHome = Get-GitBashHomeDirectory
+  if (-not $gitBashHome) {
+    return
+  }
+  $bashDirectory = ConvertTo-GitBashPath $Directory
+  $begin = "# >>> AI-SDLC managed PATH >>>"
+  $end = "# <<< AI-SDLC managed PATH <<<"
+  $block = @(
+    $begin,
+    'case ":$PATH:" in',
+    ('  *":{0}:"*) ;;' -f $bashDirectory),
+    ('  *) export PATH="{0}:$PATH" ;;' -f $bashDirectory),
+    'esac',
+    'hash -r 2>/dev/null || true',
+    $end
+  ) -join "`n"
+
+  $profileNames = @(".bashrc")
+  $loginProfileName = $null
+  foreach ($candidateProfileName in @(".bash_profile", ".bash_login", ".profile")) {
+    if (Test-Path (Join-Path $gitBashHome $candidateProfileName)) {
+      $loginProfileName = $candidateProfileName
+      break
+    }
+  }
+  if ($loginProfileName) {
+    $profileNames += $loginProfileName
+  } else {
+    $profileNames += ".bash_profile"
+  }
+
+  foreach ($profileName in ($profileNames | Select-Object -Unique)) {
+    $profilePath = Join-Path $gitBashHome $profileName
+    $content = ""
+    if (Test-Path $profilePath) {
+      $content = Get-Content -LiteralPath $profilePath -Raw
+    }
+    $pattern = "(?s)" + [regex]::Escape($begin) + ".*?" + [regex]::Escape($end) + "\r?\n?"
+    $content = [regex]::Replace($content, $pattern, "")
+    $content = $content.TrimEnd()
+    if ($content) {
+      $content = $content + "`n"
+    }
+    Write-TextUtf8NoBom -Path $profilePath -Value ($content + $block + "`n")
+  }
+}
+
+function Update-ProcessPathFromPersistentEnvironment {
+  $entries = @(
+    [Environment]::GetEnvironmentVariable("Path", "Machine"),
+    [Environment]::GetEnvironmentVariable("Path", "User"),
+    $env:Path
+  ) | Where-Object { $_ }
+  $env:Path = ($entries -join [IO.Path]::PathSeparator)
+}
+
+function Get-PythonCommand {
+  $candidates = @(
+    @{ Command = "py"; Args = @("-3") },
+    @{ Command = "python"; Args = @() }
+  )
+
+  $pythonRoots = @()
+  if ($env:LOCALAPPDATA) {
+    $pythonRoots += (Join-Path $env:LOCALAPPDATA "Programs\Python")
+  }
+  if ($env:ProgramFiles) {
+    $pythonRoots += $env:ProgramFiles
+  }
+  foreach ($root in $pythonRoots) {
+    if (-not (Test-Path -LiteralPath $root)) {
+      continue
+    }
+    $pythonHomes = @()
+    foreach ($minorVersion in @(14, 13, 12, 11)) {
+      $pythonHomes += (Join-Path $root "Python3$minorVersion")
+    }
+    $pythonHomes += @(
+      Get-ChildItem -LiteralPath $root -Directory -Filter "Python3*" -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -ExpandProperty FullName
+    )
+    foreach ($pythonHome in @($pythonHomes | Select-Object -Unique)) {
+      $pythonExe = Join-Path $pythonHome "python.exe"
+      if (Test-Path -LiteralPath $pythonExe) {
+        $candidates += @{ Command = $pythonExe; Args = @() }
+      }
+    }
+  }
+
+  foreach ($candidate in $candidates) {
+    if (Get-Command $candidate.Command -ErrorAction SilentlyContinue) {
+      & $candidate.Command @($candidate.Args + @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"))
+      if ($LASTEXITCODE -eq 0) {
+        return $candidate
+      }
+    }
+  }
+  return $null
+}
+
+function Install-PythonOnline {
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements
+    Assert-LastExitCode "winget install Python.Python.3.11"
+    return $true
+  }
+  if (Get-Command choco -ErrorAction SilentlyContinue) {
+    choco install python311 -y
+    Assert-LastExitCode "choco install python311"
+    return $true
+  }
+  return $false
+}
+
+function Assert-GitSourcePrerequisite {
+  if ($PackageSpec -notmatch "^git\+") {
+    return
+  }
+  if (Get-Command git -ErrorAction SilentlyContinue) {
+    git --version
+    Assert-LastExitCode "git --version"
+    return
+  }
+  Write-BilingualStatus `
+    -Status "Git is required for the configured git+ package source, but it was not detected." `
+    -StatusEn "Git is required for the configured git+ package source, but it was not detected." `
+    -Command "winget install --id Git.Git -e" `
+    -Purpose "Install Git, then rerun this installer. If winget is unavailable, install Git for Windows from https://git-scm.com/download/win." `
+    -PurposeEn "Install Git, then rerun this installer. If winget is unavailable, install Git for Windows from https://git-scm.com/download/win."
+  exit 1
+}
+
+Assert-GitSourcePrerequisite
+
+$python = Get-PythonCommand
+if (-not $python) {
+  Write-Host "No Python 3.11+ detected. Attempting online installation..."
+  $installAttempted = $false
+  try {
+    $installAttempted = Install-PythonOnline
+  } catch {
+    Write-Host "Automatic Python installation failed: $_"
+  }
+  if (-not $installAttempted) {
+    Write-Host "Automatic Python installation could not be completed on this host."
+  }
+  Update-ProcessPathFromPersistentEnvironment
+  $python = Get-PythonCommand
+}
+
+if (-not $python) {
+  Write-BilingualStatus `
+    -Status "Python 3.11+ was not detected, and online auto-install could not be completed on this host." `
+    -StatusEn "Python 3.11+ was not detected, and online auto-install could not be completed on this host." `
+    -Command ".\packaging\install_online.ps1" `
+    -Purpose "Rerun this script on a host with winget or choco available." `
+    -PurposeEn "Rerun this script on a host with winget or choco available."
+  exit 1
+}
+
+Write-Host ("Using Python runtime: {0} {1}" -f $python.Command, ($python.Args -join " "))
+& $python.Command @($python.Args + @("-m", "venv", $VenvPath))
+Assert-LastExitCode "python -m venv"
+
+$venvPython = Join-Path $VenvPath "Scripts\python.exe"
+& $venvPython -m pip install --upgrade pip | Out-Null
+Assert-LastExitCode "pip install --upgrade pip"
+& $venvPython -m pip install $PackageSpec
+Assert-LastExitCode "pip install $PackageSpec"
+
+$resolvedVenvPython = (Resolve-Path -LiteralPath $venvPython).Path
+$cliExe = Join-Path $VenvPath "Scripts\ai-sdlc.exe"
+$resolvedCliExe = (Resolve-Path -LiteralPath $cliExe).Path
+$cliDir = Split-Path -Parent $resolvedCliExe
+$doubleQuote = [char]34
+$stableInitCommand = 'cd YOUR_PROJECT_PATH; ai-sdlc init .'
+$stableCodexInitCommand = 'cd YOUR_PROJECT_PATH; ai-sdlc init . --agent-target codex --shell powershell'
+$moduleInitCommand = 'cd YOUR_PROJECT_PATH; Start-Process -Wait -NoNewWindow -FilePath {0}{1}{0} -ArgumentList ''-m'', ''ai_sdlc'', ''init'', ''.''' -f $doubleQuote, $resolvedVenvPython
+$moduleCodexInitCommand = 'cd YOUR_PROJECT_PATH; Start-Process -Wait -NoNewWindow -FilePath {0}{1}{0} -ArgumentList ''-m'', ''ai_sdlc'', ''init'', ''.'', ''--agent-target'', ''codex'', ''--shell'', ''powershell''' -f $doubleQuote, $resolvedVenvPython
+if ($AddToPath) {
+  $commandShimDir = Install-AiSdlcCommandShim -CliExe $resolvedCliExe -RuntimePython $resolvedVenvPython
+  Repair-AiSdlcCommandPath $commandShimDir
+  Update-GitBashProfilePath $commandShimDir
+  $nextCommand = $stableInitCommand
+  $codexPowerShellInitCommand = $stableCodexInitCommand
+} else {
+  $nextCommand = $moduleInitCommand
+  $codexPowerShellInitCommand = $moduleCodexInitCommand
+}
+
+Write-Host ""
+Write-BilingualStatus `
+  -Status "Online installation completed. The installer created the runtime and installed AI-SDLC." `
+  -StatusEn "Online installation completed. The installer created the runtime and installed AI-SDLC." `
+  -Command $nextCommand `
+  -Purpose "Enter your project and initialize it; init will automatically run the required checks and safe rehearsal." `
+  -PurposeEn "Enter your project and initialize it; init will automatically run the required checks and safe rehearsal."
+Write-Host ""
+if ($AddToPath) {
+  Write-Host "New terminals can run ai-sdlc directly."
+} else {
+  Write-Host "Use the full command above, or rerun with -AddToPath for new terminals."
+}
+Write-Host "Supported command:"
+Write-Host "  $nextCommand"
+Write-Host "Direct shim compatibility: runtime-local ai-sdlc.exe remains callable, but use the supported command above for updates."
+Write-Host "Codex + PowerShell project init:"
+Write-Host "  $codexPowerShellInitCommand"
+Write-Host ('  & {0}{1}{0} -m ai_sdlc --help' -f $doubleQuote, $resolvedVenvPython)

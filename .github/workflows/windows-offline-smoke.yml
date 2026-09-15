@@ -208,6 +208,8 @@ jobs:
           uv run --no-sync pytest -q `
             tests/unit/test_counterexample_execution.py::test_v24_native_windows_junction_rejected_without_target_changes `
             tests/unit/test_counterexample_execution.py::test_first_subject_and_later_subject_accept_declared_initial_tree `
+            tests/unit/test_counterexample_execution.py::test_v21_resource_file_requires_single_link `
+            tests/unit/test_counterexample_execution.py::test_resource_inventory_reads_live_identity_beyond_directory_cache `
             --basetemp=$testRoot --junitxml=$report
           if ($LASTEXITCODE -ne 0) {
             throw "Native counterexample resource checks failed with exit code $LASTEXITCODE"

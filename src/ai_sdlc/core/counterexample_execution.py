@@ -3993,7 +3993,8 @@ def _resource_inventory(
             for entry in entries:
                 check_time()
                 relative = Path(entry.path).relative_to(directory).as_posix()
-                info = entry.stat(follow_symlinks=False)
+                # Windows 的 DirEntry 缓存将设备、文件身份与链接数置零；归属检查须实时读取且不跟随链接。
+                info = os.stat(entry.path, follow_symlinks=False)
                 identity = _resource_node_identity(info)
                 if relative == ".ai-sdlc-owner.json":
                     # 宿主 marker 也必须是独占普通文件，但不属于业务初态。

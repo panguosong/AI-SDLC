@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -6992,24 +6993,19 @@ def _v24_nested_resource_case(case):
 
 def _v24_reparse_metadata(monkeypatch, target, enabled, traversed):
     real_scandir = os.scandir
+    real_stat = os.stat
 
-    class Entry:
-        def __init__(self, entry):
-            self.original = entry
-
-        def __getattr__(self, name):
-            return getattr(self.original, name)
-
-        def stat(self, *, follow_symlinks=True):
-            info = self.original.stat(follow_symlinks=follow_symlinks)
-            if enabled() and Path(self.original.path) == target:
-                fields = {
-                    name: getattr(info, name)
-                    for name in dir(info)
-                    if name.startswith("st_")
-                }
-                return SimpleNamespace(**{**fields, "st_file_attributes": 0x400})
-            return info
+    def resource_stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        # 注入实时元数据入口；目录扫描仍记录是否错误进入了 reparse 目标。
+        if enabled() and not isinstance(path, int) and Path(path) == target:
+            fields = {
+                name: getattr(info, name)
+                for name in dir(info)
+                if name.startswith("st_")
+            }
+            return SimpleNamespace(**{**fields, "st_file_attributes": 0x400})
+        return info
 
     class Scan:
         def __init__(self, path):
@@ -7027,12 +7023,58 @@ def _v24_reparse_metadata(monkeypatch, target, enabled, traversed):
             return self
 
         def __next__(self):
-            return Entry(next(self.original))
+            return next(self.original)
 
         def close(self):
             self.original.close()
 
     monkeypatch.setattr(execution.os, "scandir", Scan)
+    monkeypatch.setattr(execution.os, "stat", resource_stat)
+
+
+@pytest.mark.parametrize("consumer", ["inventory", "observation", "hardlink"])
+def test_resource_inventory_reads_live_identity_beyond_directory_cache(
+    execution_case, monkeypatch, consumer
+):
+    _, _, plan = _v24_nested_resource_case(execution_case)
+    resource = plan.steps[0].binding.resources[0]
+    directory = Path(resource.root)
+    target = directory / "nested/kept.txt"
+    if consumer == "hardlink":
+        os.link(target, directory.parent / "external-link.txt")
+        assert target.stat().st_nlink == 2
+    real_scandir = os.scandir
+
+    def cached_entry(entry):
+        info = Path(entry.path).lstat()
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        # Windows 3.11 的目录缓存没有身份字段；陈旧缓存也不能隐藏新增硬链接。
+        fields.update(st_ino=0, st_dev=0, st_nlink=1 if consumer == "hardlink" else 0)
+        return SimpleNamespace(
+            path=entry.path, stat=lambda **kwargs: SimpleNamespace(**fields)
+        )
+
+    @contextmanager
+    def cached_scan(path):
+        with real_scandir(path) as entries:
+            yield (cached_entry(entry) for entry in entries)
+
+    with monkeypatch.context() as context:
+        context.setattr(execution.os, "scandir", cached_scan)
+        deadline = time.time_ns() // 1_000_000 + 10000
+        if consumer == "hardlink":
+            with pytest.raises(ValueError, match="not-exclusively-owned"):
+                execution._resource_inventory(directory, deadline_ms=deadline)
+        elif consumer == "inventory":
+            inventory = execution._resource_inventory(directory, deadline_ms=deadline)
+            info = target.lstat()
+            assert inventory["nested/kept.txt"][0:2] == (info.st_dev, info.st_ino)
+            assert inventory["nested/kept.txt"][-1] == 1
+        else:
+            snapshot = execution._observed_resource_state((resource,), deadline_ms=deadline)
+            files = {item["path"]: item for item in snapshot[0]["files"]}
+            assert files["nested/kept.txt"]["sha256"] == hashlib.sha256(b"kept").hexdigest()
+    assert target.read_bytes() == b"kept"
 
 
 @pytest.mark.parametrize("consumer", ["inventory", "observation"])

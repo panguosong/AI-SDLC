@@ -741,6 +741,296 @@ def test_snapshots_capture_original_bytes_and_exact_mutation_relation(execution_
         execution.validate_counterexample_snapshots(root, plan)
 
 
+def _snapshot_git_mode_fixture(tmp_path, kind):
+    project = tmp_path / "candidate"
+    project.mkdir()
+    _git(project, "init", "-q")
+    _git(project, "config", "user.email", "test@example.invalid")
+    _git(project, "config", "user.name", "Test")
+    (project / "acceptance.py").write_text("assert True\n")
+    (project / "target.txt").write_text("target content must not replace link bytes\n")
+    _git(project, "add", ".")
+    _git(project, "commit", "-qm", "snapshot baseline")
+    name = "linked" if kind != "gitlink" else "module"
+    target = project / name
+    if kind == "gitlink":
+        _git(tmp_path, "clone", "-q", str(project), str(target))
+        content = _git(target, "rev-parse", "HEAD").stdout.strip()
+        _git(project, "update-index", "--add", "--cacheinfo", "160000", content.decode(), name)
+        mode = 0o160000
+    else:
+        link_target = "missing.txt" if kind == "dangling" else "target.txt"
+        if kind == "external":
+            outside = tmp_path / "outside.txt"
+            outside.write_text("outside content must not be captured\n")
+            link_target = str(outside)
+        content = os.fsencode(link_target)
+        if kind == "carrier":
+            _git(project, "config", "core.symlinks", "false")
+            target.write_bytes(content)
+            oid = _git(project, "hash-object", "-w", str(target)).stdout.decode().strip()
+            _git(project, "update-index", "--add", "--cacheinfo", "120000", oid, name)
+        else:
+            target.symlink_to(link_target)
+            _git(project, "add", name)
+        mode = 0o120000
+    _git(project, "commit", "-qm", "add special Git entry")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    return project, evidence, name, content, mode
+
+
+@pytest.mark.parametrize("kind", ["valid", "dangling", "external", "carrier", "gitlink"])
+def test_snapshot_captures_git_entry_payload_without_following(tmp_path, kind):
+    project, evidence, name, content, mode = _snapshot_git_mode_fixture(tmp_path, kind)
+    manifest = execution.capture_counterexample_snapshot(
+        project, evidence_root=evidence,
+        artifact_dir=".ai-sdlc/loops/implementation/special/snapshot",
+        acceptance_sources={"V0": "acceptance.py"},
+    )
+    entry = next(item for item in manifest["files"] if item["path"] == name)
+    assert entry["mode"] == mode
+    assert entry["sha256"] == hashlib.sha256(content).hexdigest()
+    assert (evidence / entry["content_ref"]["path"]).read_bytes() == content
+    assert execution._snapshot_document(execution._json_bytes(manifest)) == manifest
+    assert execution._file_map(project, ()) == [
+        {key: value for key, value in item.items() if key != "content_ref"}
+        for item in manifest["files"]
+    ]
+    assert all(not item["path"].startswith("module/") for item in manifest["files"])
+
+
+def test_snapshot_gitlink_uses_checked_out_commit_and_rejects_dirty_module(tmp_path):
+    project, evidence, name, indexed_oid, mode = _snapshot_git_mode_fixture(tmp_path, "gitlink")
+    module = project / name
+    _git(module, "config", "user.email", "test@example.invalid")
+    _git(module, "config", "user.name", "Test")
+    (module / "new.py").write_text("VALUE = 2\n")
+    _git(module, "add", ".")
+    _git(module, "commit", "-qm", "checked out next commit")
+    actual_oid = _git(module, "rev-parse", "HEAD").stdout.strip()
+    assert actual_oid != indexed_oid
+    manifest = execution.capture_counterexample_snapshot(
+        project, evidence_root=evidence,
+        artifact_dir=".ai-sdlc/loops/implementation/special/changed-module",
+        acceptance_sources={"V0": "acceptance.py"},
+    )
+    entry = next(item for item in manifest["files"] if item["path"] == name)
+    assert entry["mode"] == mode
+    assert (evidence / entry["content_ref"]["path"]).read_bytes() == actual_oid
+    (module / "new.py").write_text("VALUE = 3\n")
+    with pytest.raises(ValueError, match="dirty gitlink"):
+        execution.capture_counterexample_snapshot(
+            project, evidence_root=evidence,
+            artifact_dir=".ai-sdlc/loops/implementation/special/dirty-module",
+            acceptance_sources={"V0": "acceptance.py"},
+        )
+
+
+@pytest.mark.parametrize("kind", ["valid", "dangling", "gitlink"])
+def test_snapshot_special_entries_survive_live_and_captured_consumers(execution_case, kind):
+    root, _, plan = execution_case
+    subjects = []
+    manifests = []
+    for subject in plan.subjects:
+        project = Path(next(step.binding.project_root for step in plan.steps if step.subject_id == subject.id))
+        if kind == "gitlink":
+            module = project / "module"
+            _git(root.parent, "clone", "-q", str(root), str(module))
+            oid = _git(module, "rev-parse", "HEAD").stdout.decode().strip()
+            _git(project, "update-index", "--add", "--cacheinfo", "160000", oid, "module")
+        else:
+            (project / "linked").symlink_to("missing.txt" if kind == "dangling" else "tests/v0.py")
+            _git(project, "add", "linked")
+        manifest = execution.capture_counterexample_snapshot(
+            project, evidence_root=root,
+            artifact_dir=f".ai-sdlc/loops/implementation/special/{subject.id}",
+            acceptance_sources={"V0": "tests/v0.py", "V1": "tests/v1.py"},
+        )
+        manifests.append(manifest)
+        reference = execution._write_json(
+            root, root / f".ai-sdlc/loops/implementation/special/{subject.id}.json", manifest
+        )
+        subjects.append(subject.model_copy(update={"snapshot": reference, "candidate_digest": manifest["source_digest"]}))
+    current_digest = next(subject.candidate_digest for subject in subjects if subject.role == "current")
+    subjects = [subject.model_copy(update={"parent_candidate_digest": current_digest}) for subject in subjects]
+    plan = plan.model_copy(update={"candidate_digest": current_digest, "subjects": tuple(subjects)})
+    references = execution.validate_counterexample_snapshots(root, plan)
+    captured = {reference.path: (root / reference.path).read_bytes() for reference in references}
+    for project in {step.binding.project_root for step in plan.steps}:
+        shutil.rmtree(project)
+    assert execution.validate_counterexample_snapshots(root, plan, captured_artifacts=captured, require_live=False) == references
+
+
+@pytest.mark.parametrize("kind", ["carrier", "gitlink"])
+def test_snapshot_special_entry_cannot_supply_acceptance(tmp_path, kind):
+    project, evidence, name, _, _ = _snapshot_git_mode_fixture(tmp_path, kind)
+    with pytest.raises(ValueError, match="counterexample-acceptance-source-not-regular"):
+        execution.capture_counterexample_snapshot(
+            project, evidence_root=evidence,
+            artifact_dir=".ai-sdlc/loops/implementation/special/not-acceptance",
+            acceptance_sources={"V0": name},
+        )
+
+
+@pytest.mark.parametrize("mode", [0o120000, 0o160000])
+def test_snapshot_historical_acceptance_rejects_special_entry(execution_case, mode):
+    root, _, plan = execution_case
+    subject = plan.subjects[0]
+    manifest = json.loads((root / subject.snapshot.path).read_bytes())
+    source = manifest["acceptance_sources"]["V0"]["path"]
+    next(entry for entry in manifest["files"] if entry["path"] == source)["mode"] = mode
+    reference = execution._write_json(
+        root, root / ".ai-sdlc/loops/implementation/special/nonregular-acceptance.json", manifest
+    )
+    changed = plan.model_copy(update={"subjects": (
+        subject.model_copy(update={"snapshot": reference}), *plan.subjects[1:],
+    )})
+    with pytest.raises(ValueError, match="counterexample-acceptance-source-not-in-snapshot"):
+        execution.validate_counterexample_snapshots(root, changed, require_live=False)
+
+
+def test_snapshot_source_parent_symlink_remains_forbidden(tmp_path):
+    project, _, _, _, _ = _snapshot_git_mode_fixture(tmp_path, "valid")
+    (project / "parent").symlink_to(".", target_is_directory=True)
+    with pytest.raises(ValueError, match="counterexample-symlink-forbidden"):
+        execution._file_map(project, ("parent/acceptance.py",))
+
+
+def test_snapshot_regular_permission_mode_and_same_bytes_type_drift(tmp_path):
+    project, evidence, name, payload, _ = _snapshot_git_mode_fixture(tmp_path, "valid")
+    target = project / name
+    target.unlink()
+    target.write_bytes(payload)
+    _git(project, "add", name)
+    manifest = execution.capture_counterexample_snapshot(
+        project, evidence_root=evidence,
+        artifact_dir=".ai-sdlc/loops/implementation/special/ordinary",
+        acceptance_sources={"V0": "acceptance.py"},
+    )
+    before = next(entry for entry in manifest["files"] if entry["path"] == name)
+    assert before["mode"] == stat.S_IMODE(target.stat().st_mode)
+    target.unlink()
+    target.symlink_to(os.fsdecode(payload))
+    after = next(entry for entry in execution._file_map(project, ()) if entry["path"] == name)
+    assert before["sha256"] == after["sha256"]
+    assert before["mode"] != after["mode"] == 0o120000
+
+
+@pytest.mark.parametrize("empty_directory", [False, True])
+def test_snapshot_uninitialized_gitlink_keeps_index_oid(tmp_path, empty_directory):
+    project, evidence, name, oid, mode = _snapshot_git_mode_fixture(tmp_path, "gitlink")
+    shutil.rmtree(project / name)
+    if empty_directory:
+        (project / name).mkdir()
+    assert _git(project, "rev-parse", "HEAD").stdout.strip() != oid
+    manifest = execution.capture_counterexample_snapshot(
+        project, evidence_root=evidence,
+        artifact_dir=".ai-sdlc/loops/implementation/special/uninitialized",
+        acceptance_sources={"V0": "acceptance.py"},
+    )
+    entry = next(item for item in manifest["files"] if item["path"] == name)
+    assert entry["mode"] == mode
+    assert (evidence / entry["content_ref"]["path"]).read_bytes() == oid
+
+
+@pytest.mark.parametrize("replacement", ["missing", "regular"])
+def test_snapshot_deleted_tracked_directory_remains_valid(tmp_path, replacement):
+    project = tmp_path / "candidate"
+    project.mkdir()
+    _git(project, "init", "-q")
+    _git(project, "config", "user.email", "test@example.invalid")
+    _git(project, "config", "user.name", "Test")
+    directory = project / "directory"
+    directory.mkdir()
+    (directory / "source.py").write_text("VALUE = 1\n")
+    _git(project, "add", ".")
+    _git(project, "commit", "-qm", "tracked directory")
+    shutil.rmtree(directory)
+    if replacement == "regular":
+        directory.write_bytes(b"replacement")
+    entries = execution._file_map(project, ())
+    assert [entry["path"] for entry in entries] == (
+        ["directory"] if replacement == "regular" else []
+    )
+    if entries:
+        assert entries[0]["sha256"] == hashlib.sha256(b"replacement").hexdigest()
+
+
+def test_snapshot_gitlink_reparse_is_rejected_before_directory_read(tmp_path, monkeypatch):
+    project, _, name, _, _ = _snapshot_git_mode_fixture(tmp_path, "gitlink")
+    module = project / name
+    shutil.rmtree(module)
+    module.mkdir()
+    identity = module.lstat()
+    monkeypatch.setattr(execution, "_resource_is_reparse", lambda info: (
+        info.st_ino, info.st_dev
+    ) == (identity.st_ino, identity.st_dev))
+    original_iterdir = Path.iterdir
+
+    def reject_module_read(path):
+        if path == module:
+            raise AssertionError("reparse target was traversed")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", reject_module_read)
+    with pytest.raises(ValueError, match="counterexample-gitlink-not-checked-out"):
+        execution._file_map(project, ())
+
+
+@pytest.mark.parametrize("consumer", ["live", "historical-command"])
+@pytest.mark.parametrize("linked", [False, True])
+def test_snapshot_observer_requires_ordinary_script_source(execution_case, consumer, linked):
+    root, _, plan = execution_case
+    if linked:
+        outside = root.parent / "outside-observer.py"
+        outside.write_text("print('this script is outside the snapshot')\n")
+        subjects = []
+        for subject in plan.subjects:
+            project = Path(next(
+                step.binding.project_root for step in plan.steps if step.subject_id == subject.id
+            ))
+            observer = project / "observe.py"
+            observer.unlink()
+            observer.symlink_to(outside)
+            _git(project, "add", "observe.py")
+            manifest = execution.capture_counterexample_snapshot(
+                project, evidence_root=root,
+                artifact_dir=f".ai-sdlc/loops/implementation/special/observer-{subject.id}",
+                acceptance_sources={"V0": "tests/v0.py", "V1": "tests/v1.py"},
+            )
+            reference = execution._write_json(
+                root, root / f".ai-sdlc/loops/implementation/special/observer-{subject.id}.json", manifest
+            )
+            subjects.append(subject.model_copy(update={
+                "snapshot": reference, "candidate_digest": manifest["source_digest"],
+            }))
+        current = next(subject.candidate_digest for subject in subjects if subject.role == "current")
+        plan = plan.model_copy(update={
+            "candidate_digest": current,
+            "subjects": tuple(subject.model_copy(update={"parent_candidate_digest": current}) for subject in subjects),
+        })
+
+    def consume():
+        if consumer == "live":
+            return execution.validate_counterexample_snapshots(root, plan)
+        step = next(step for step in plan.steps if step.kind == "observe")
+        subject = next(subject for subject in plan.subjects if subject.id == step.subject_id)
+        manifest = json.loads((root / subject.snapshot.path).read_bytes())
+        return execution._validate_original_command_source(
+            plan, step, execution._resolve_command(step), manifest
+        )
+
+    if not linked:
+        consume()
+    else:
+        with pytest.raises(ValueError, match=(
+            "counterexample-independent-observer-script-not-bound" if consumer == "live"
+            else "counterexample-original-command-source-unproven"
+        )):
+            consume()
+
+
 def _delivered_identity(case):
     root, _, plan = case
     parent = _git(root, "rev-parse", "HEAD").stdout.decode().strip()

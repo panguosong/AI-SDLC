@@ -184,10 +184,21 @@ def test_design_budget_rejects_future_stage_path_case_aliases(
     assert target.read_bytes() == budget
 
 
-def test_design_budget_keeps_ordinary_path_spelling(root_tmp_path):
+@pytest.mark.parametrize(
+    "path",
+    [
+        "SPECS/Original/Budget.md",
+        "specs/implementation/budget.md",
+        "specs/design-contract/budget.md",
+        "specs/loops/implementation/budget.md",
+        "specs/Loops/Design-Contract/budget.md",
+        "docs/.ai-sdlc/loops/implementation/budget.md",
+        "docs/.ai-sdlc/loops/design-contract/budget.md",
+    ],
+)
+def test_design_budget_keeps_ordinary_path_spelling(root_tmp_path, path):
     root = root_tmp_path
     work, _, options = _contract(root)
-    path = "SPECS/Original/Budget.md"
     budget = b"Existing operation budget.\n"
     target = root / path
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -469,9 +469,22 @@ def test_requirement_source_rejects_future_stage_path_case_aliases(stage, spelli
         VerificationContract.model_validate(data)
 
 
-def test_requirement_source_keeps_ordinary_path_spelling():
+@pytest.mark.parametrize(
+    "path",
+    [
+        "SPECS/Original/Requirements.md",
+        "specs/implementation/spec.md",
+        "specs/design-contract/spec.md",
+        "specs/IMPLEMENTATION/spec.md",
+        "specs/Design-Contract/spec.md",
+        "specs/loops/implementation/spec.md",
+        "specs/loops/design-contract/spec.md",
+        "docs/.ai-sdlc/loops/implementation/spec.md",
+        "docs/.ai-sdlc/loops/design-contract/spec.md",
+    ],
+)
+def test_requirement_source_keeps_ordinary_path_spelling(path):
     data = contract_data()
-    path = "SPECS/Original/Requirements.md"
     data["sources"][0].update(
         namespace="requirement", path=path, loop_id="requirement",
         profile_id="profile", goal_id="goal", obligation_id="obligation",

@@ -3331,7 +3331,84 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.decode("utf-8")
 
 
-def _file_map(root: Path, ignored_inputs: Sequence[str]) -> list[dict[str, Any]]:
+def _snapshot_source_payload(
+    root: Path, relative: str, index_entry: tuple[str, str] | None
+) -> tuple[int, bytes] | None:
+    project_relative_path(relative)
+    path = root / relative
+    parents = []
+    cursor = root
+    for part in Path(relative).parts[:-1]:
+        cursor /= part
+        try:
+            info = cursor.lstat()
+        except FileNotFoundError:
+            return None  # 整个父目录的跟踪删除仍由 Git 身份绑定。
+        if stat.S_ISLNK(info.st_mode) or _resource_is_reparse(info):
+            raise ValueError("counterexample-symlink-forbidden")
+        if not stat.S_ISDIR(info.st_mode):
+            return None
+        parents.append((cursor, info))
+
+    def identity(info: os.stat_result | None) -> tuple[int, ...] | None:
+        return None if info is None else (
+            info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns,
+        )
+
+    def current() -> os.stat_result | None:
+        try:
+            return path.lstat()
+        except FileNotFoundError:
+            return None
+
+    before = current()
+    indexed_mode, indexed_oid = index_entry or ("", "")
+    if before is not None and stat.S_ISLNK(before.st_mode):
+        # 只保存 Git 链接对象的目标字节；不解析或读取目标，悬空链接也不能丢失。
+        mode, raw = 0o120000, os.fsencode(os.readlink(path))
+    elif indexed_mode == "160000" and (
+        before is None or stat.S_ISDIR(before.st_mode)
+    ):
+        mode = 0o160000
+        if before is not None and _resource_is_reparse(before):
+            raise ValueError("counterexample-gitlink-not-checked-out")
+        if before is None or not any(path.iterdir()):
+            raw = indexed_oid.encode("ascii")
+        else:
+            if Path(
+                _git(path, "rev-parse", "--show-toplevel").strip()
+            ).resolve(strict=True) != path.resolve(strict=True):
+                raise ValueError("counterexample-gitlink-not-checked-out")
+            from ai_sdlc.core.source_change_capture import _gitlink_payload
+
+            raw = _gitlink_payload(path)
+    elif before is None:
+        return None  # 普通跟踪删除由 HEAD/index/diff 身份绑定。
+    else:
+        raw = read_stable_bytes(root, path)
+        # core.symlinks=false 的普通载体仍代表 index 中的链接对象。
+        mode = 0o120000 if indexed_mode == "120000" else stat.S_IMODE(before.st_mode)
+    if identity(before) != identity(current()) or any(
+        identity(info) != identity(parent.lstat()) for parent, info in parents
+    ):
+        raise ValueError("counterexample-source-changed-during-snapshot")
+    return mode, raw
+
+
+def _file_map(
+    root: Path, ignored_inputs: Sequence[str],
+    *, captured_content: dict[str, bytes] | None = None,
+) -> list[dict[str, Any]]:
+    index_entries = {}
+    for record in _git(root, "ls-files", "--stage", "-z").split("\0"):
+        if not record:
+            continue
+        metadata, separator, relative = record.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[2] != "0":
+            raise ValueError("counterexample-snapshot-index-entry-invalid")
+        index_entries[relative] = (fields[0], fields[1])
     paths = set(
         _git(
             root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
@@ -3342,15 +3419,21 @@ def _file_map(root: Path, ignored_inputs: Sequence[str]) -> list[dict[str, Any]]
     paths.update(project_relative_path(path) for path in ignored_inputs)
     entries = []
     for relative in sorted(paths):
-        path = _path(root, relative)
-        if not path.exists():
-            continue  # 跟踪删除由 HEAD/index/diff 身份绑定。
-        raw = read_stable_bytes(root, path)
+        if relative in ignored_inputs:
+            _path(root, relative)
+        material = _snapshot_source_payload(root, relative, index_entries.get(relative))
+        if material is None:
+            continue
+        mode, raw = material
+        if relative in ignored_inputs and mode in (0o120000, 0o160000):
+            raise ValueError("counterexample-ignored-input-not-regular")
+        if captured_content is not None:
+            captured_content[relative] = raw
         entries.append(
             {
                 "path": relative,
                 "sha256": hashlib.sha256(raw).hexdigest(),
-                "mode": stat.S_IMODE(path.stat().st_mode),
+                "mode": mode,
             }
         )
     return entries
@@ -3393,12 +3476,13 @@ def capture_counterexample_snapshot(
         ".",
         *(f":(exclude){prefix}**" for prefix in _RUNTIME),
     )
-    files = _file_map(project_root, ignored_inputs)
+    captured_content: dict[str, bytes] = {}
+    files = _file_map(project_root, ignored_inputs, captured_content=captured_content)
     store = LoopArtifactStore(evidence_root)
     diff_path = folder / "tracked-diff.bin"
     store.write_bytes_artifact(diff_path, tracked_diff, immutable=True)
     for entry in files:
-        content = read_stable_bytes(project_root, project_root / entry["path"])
+        content = captured_content.pop(entry["path"])
         captured = folder / "content" / entry["sha256"]
         store.write_bytes_artifact(captured, content, immutable=True)
         entry["content_ref"] = _ref(evidence_root, captured).model_dump()
@@ -3407,6 +3491,8 @@ def capture_counterexample_snapshot(
     for version, path in acceptance_sources.items():
         if version not in ("V0", "V1") or path not in indexed:
             raise ValueError("counterexample-acceptance-source-not-captured")
+        if not 0 <= indexed[path]["mode"] <= 0o7777:
+            raise ValueError("counterexample-acceptance-source-not-regular")
         accepted[version] = {
             "path": path,
             "sha256": indexed[path]["sha256"],
@@ -3592,6 +3678,7 @@ def validate_counterexample_snapshots(
                 raise ValueError("counterexample-acceptance-source-binding-invalid")
             if not any(
                 entry["path"] == source["path"] and entry["sha256"] == expected
+                and 0 <= entry["mode"] <= 0o7777
                 for entry in manifest["files"]
             ):
                 raise ValueError("counterexample-acceptance-source-not-in-snapshot")
@@ -3608,7 +3695,10 @@ def validate_counterexample_snapshots(
                 if not _command_calls_file(step, project / source, commands[step.id]):
                     raise ValueError("counterexample-acceptance-command-not-bound")
             if step.kind == "observe" and not any(
-                source in {entry["path"] for entry in manifest["files"]}
+                source in {
+                    entry["path"] for entry in manifest["files"]
+                    if 0 <= entry["mode"] <= 0o7777
+                }
                 and _command_calls_file(step, project / source, commands[step.id])
                 for source in plan.protected_paths
             ):
@@ -3850,7 +3940,10 @@ def _validate_original_command_source(
         if step.kind == "acceptance"
         else plan.protected_paths
     )
-    files = {item["path"]: item["sha256"] for item in manifest["files"]}
+    files = {
+        item["path"]: item["sha256"] for item in manifest["files"]
+        if 0 <= item["mode"] <= 0o7777
+    }
     if not any(
         path in files
         and _command_calls_file(step, Path(manifest["root"]) / path, command)

@@ -109,8 +109,8 @@ jobs:
       CELL: ${{ matrix.os }}-py${{ matrix.python-version }}
       TEST_SUITE: ${{ matrix.suite }}
       # 本次发行原始完整执行，只有严格未变的输入才能复用；其他改动自动完整执行。
-      PRIMARY_REUSE_RUN_ID: "34986697226"
-      PRIMARY_REUSE_COMMIT: c091e092519b72c40929086deaa12d7f7716d52c
+      PRIMARY_REUSE_RUN_ID: "35014287602"
+      PRIMARY_REUSE_COMMIT: adbd9d835816a96fd0af3c96e81b44bcbcdf5af4
     steps:
       - name: Checkout candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -177,7 +177,8 @@ jobs:
                          tests/unit/test_counterexample_execution.py tests/unit/test_implementation_loop.py
                          tests/unit/test_ci_static_assurance.py tests/unit/test_ci_candidate_execution.py
                          tests/integration/test_github_workflows.py tests/unit/test_release_identity.py
-                         tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py)
+                         tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py
+                         tests/unit/test_loop_resource_lock.py)
             fi
           else
             while IFS= read -r node; do

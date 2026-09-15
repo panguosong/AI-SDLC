@@ -46,8 +46,11 @@ PRIMARY_REPAIR_TESTS = (
     "tests/unit/test_release_identity.py",
     "tests/architecture/test_removed_review_subsystems.py",
     "tests/unit/test_verify_constraints.py",
+    "tests/unit/test_loop_resource_lock.py",
 )
-PRIMARY_SHARED_TESTS = frozenset(PRIMARY_REPAIR_TESTS[:3])
+PRIMARY_SHARED_TESTS = frozenset((*PRIMARY_REPAIR_TESTS[:3],
+    "tests/unit/test_loop_resource_lock.py",
+))
 PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_SHARED_TESTS,
     "tests/unit/test_ci_static_assurance.py",
     "tests/integration/test_github_workflows.py",
@@ -59,7 +62,7 @@ PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_SHARED_TESTS,
     "docs/pull-request-checklist.zh.md",
     "docs/框架自迭代开发与发布约定.md",
 ))
-PRIMARY_REPAIR_SELECTION = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
+PRIMARY_REPAIR_SELECTION_PREVIOUS = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
     test_args=(tests/unit/test_quality_command.py tests/unit/test_pr_review_provider.py
                tests/unit/test_counterexample_execution.py tests/unit/test_implementation_loop.py
                tests/unit/test_ci_static_assurance.py tests/unit/test_ci_candidate_execution.py
@@ -67,6 +70,11 @@ PRIMARY_REPAIR_SELECTION = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.jso
                tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py)
   fi
 '''
+PRIMARY_REPAIR_SELECTION = PRIMARY_REPAIR_SELECTION_PREVIOUS.replace(
+    "tests/unit/test_verify_constraints.py)",
+    "tests/unit/test_verify_constraints.py\n"
+    "               tests/unit/test_loop_resource_lock.py)",
+)
 
 
 class AssuranceError(ValueError):
@@ -319,14 +327,22 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
             if step.get("name") == "Prepare unchanged primary evidence":
                 continue
             if step.get("name") == "Run selected pytest suite":
-                # 只剥离固定受影响文件的串行重验；旧未变成员的所有执行输入须相同。
-                step["run"] = step["run"].replace(PRIMARY_REPAIR_SELECTION, "")
+                # 仅接受已冻结的十/十一文件选择块；重复或混合块不能被归一化吞掉。
+                selections = (PRIMARY_REPAIR_SELECTION_PREVIOUS, PRIMARY_REPAIR_SELECTION)
+                if sum(step["run"].count(value) for value in selections) > 1:
+                    raise AssuranceError("ambiguous primary repair selection")
+                for selection in selections:
+                    step["run"] = step["run"].replace(selection, "")
             steps.append(step)
         return (workflow.get("env"), workflow.get("defaults"), job.get("defaults"),
                 job["runs-on"], job["strategy"]["matrix"],
                 {key: value for key, value in job["env"].items() if not key.startswith("PRIMARY_REUSE_")},
                 steps)
-    if execution_inputs(old) != execution_inputs(new):
+    try:
+        unchanged_execution = execution_inputs(old) == execution_inputs(new)
+    except AssuranceError:
+        unchanged_execution = False
+    if not unchanged_execution:
         return {"status": "full_required", "reason": "execution_inputs_changed"}
     prefix = f"repos/{repository}"
     run = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}"))

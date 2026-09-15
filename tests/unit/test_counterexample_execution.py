@@ -1398,9 +1398,52 @@ def test_same_head_started_only_history_still_requires_complete_originals(
     execution_case, monkeypatch, damage
 ):
     root, _, old_plan = execution_case
-    impl, progress, _, _, receipt, _ = _same_head_repaired_state(
-        execution_case, monkeypatch
-    )
+    try:
+        impl, progress, _, _, receipt, _ = _same_head_repaired_state(
+            execution_case, monkeypatch
+        )
+    except Exception as failure:
+        # 前置执行失败仍抛原异常；仅附现场原件，不把诊断摘要当成历史完成证明。
+        attempts = []
+        try:
+            for folder in sorted(execution._attempts_dir(root, old_plan).iterdir()):
+                if not folder.is_dir():
+                    continue
+                files = {}
+                attempts.append({
+                    "attempt_directory": folder.relative_to(root).as_posix(),
+                    "files": files,
+                })
+                for name in (
+                    "intent.json", "process.json", "raw-result.json", "cleanup.json",
+                    "completion.json", "resource-cleanup.json", "resource-state.json",
+                    "resource-ownership.json", "reset-state.json", "postcheck.json",
+                    "postcheck-error.json", "receipt.json", "stdout", "stderr",
+                ):
+                    try:
+                        path = folder / name
+                        if not path.exists():
+                            files[name] = {"missing": True}
+                            continue
+                        reference = execution._ref(root, path)
+                        raw = execution._read_ref(root, reference)
+                        files[name] = {
+                            "sha256": reference.sha256,
+                            "size_bytes": len(raw),
+                            "text": raw.decode("utf-8", errors="backslashreplace"),
+                        }
+                    except Exception as read_error:
+                        files[name] = {
+                            "read_error": f"{type(read_error).__name__}: {read_error}"
+                        }
+        except Exception as read_error:
+            attempts.append({
+                "read_error": f"{type(read_error).__name__}: {read_error}"
+            })
+        failure.add_note(json.dumps({
+            "phase": "same-head-prerequisite", "attempts": attempts
+        }, ensure_ascii=False))
+        raise
     progress.tasks[0].counterexample_results.pop(0)
     if damage == "missing-content":
         manifest = json.loads((root / old_plan.subjects[0].snapshot.path).read_bytes())

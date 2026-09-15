@@ -173,8 +173,59 @@ def test_pr_review_provider_timeout_limits_start_subprocess(
                 "--json",
             ],
         )
-        assert start.exit_code == 1, start.output
-        assert "timed out" in json.loads(start.output)["blocker"]
+        def original_diagnostics():
+            import tempfile
+
+            from ai_sdlc.core.pr_review_models import ProviderRunnerInvocation
+            from ai_sdlc.core.stable_file_read import read_stable_bytes
+
+            # 失败时只收集本次调用的原件；诊断缺失或清理不完整不改变原拒绝断言。
+            details = {"cli_output": start.output}
+            try:
+                payload = json.loads(start.output)
+                review_dir = tmp_path / ".ai-sdlc/reviews/pr/review-cli-timeout"
+                assert payload["review_id"] == "review-cli-timeout"
+                assert (tmp_path / payload["review_dir"]).resolve() == review_dir.resolve()
+                invocation_bytes = read_stable_bytes(
+                    tmp_path, review_dir / "reviewer-invocation.json"
+                )
+                details["invocation"] = json.loads(invocation_bytes)
+                details["invocation_sha256"] = hashlib.sha256(invocation_bytes).hexdigest()
+                invocation = ProviderRunnerInvocation.model_validate_json(invocation_bytes)
+                assert Path(invocation.cwd).resolve() == tmp_path.resolve()
+                assert (tmp_path / invocation.input_path).resolve() == (tmp_path / payload["review_pack_path"]).resolve()
+                proof = invocation.completion_proof
+                assert proof is not None
+                _, raw, cleanup = proof.verified_receipts()
+                details["verified_raw"] = raw
+                details["verified_cleanup"] = cleanup
+                marker = "Provider originals retained at "
+                if marker in payload["blocker"]:
+                    retained = Path(payload["blocker"].rsplit(marker, 1)[1])
+                    assert retained.is_absolute() and not retained.is_symlink()
+                    assert retained.parent.resolve() == Path(tempfile.gettempdir()).resolve()
+                    assert retained.name.startswith("ai-sdlc-provider-owned-")
+                    actual_cleanup = read_stable_bytes(retained, retained / "cleanup.json")
+                    assert actual_cleanup.decode("utf-8") == proof.originals["cleanup.json"]
+                    assert json.loads(actual_cleanup)["ownership_nonce"] == proof.ownership_nonce
+                    details["retained_directory"] = str(retained)
+                    files = details["retained_files"] = {}
+                    for name in ("cleanup.json", "process.json", "raw-result.json", "stderr"):
+                        try:
+                            content = read_stable_bytes(retained, retained / name)
+                            digest = hashlib.sha256(content).hexdigest()
+                            expected = raw["stderr_sha256"] if name == "stderr" else proof.sha256.get(name)
+                            files[name] = {"sha256": digest, "expected_sha256": expected,
+                                           "matches_bound_original": digest == expected,
+                                           "content": content.decode("utf-8", errors="replace")}
+                        except (OSError, ValueError) as exc:
+                            files[name] = {"read_error": f"{type(exc).__name__}: {exc}"}
+            except (AssertionError, KeyError, OSError, TypeError, ValueError) as exc:
+                details["diagnostic_error"] = f"{type(exc).__name__}: {exc}"
+            return json.dumps(details, ensure_ascii=False, indent=2)
+
+        assert start.exit_code == 1, original_diagnostics()
+        assert "timed out" in json.loads(start.output)["blocker"], original_diagnostics()
 
 
 def test_pr_review_provider_timeout_reaches_rerun_service(tmp_path: Path) -> None:

@@ -3,6 +3,8 @@
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Event, local
 
 import pytest
 
@@ -697,6 +699,8 @@ def test_concurrent_begin_has_one_identity_and_frozen_start(
         ]
     else:
         assert sum(result.returncode == 0 for result in results) == 1
+        rejected = next(result for result in results if result.returncode != 0)
+        assert json.loads(rejected.stdout)["blocker"] == "simulation-already-started"
     context = json.loads(
         (
             root / ".ai-sdlc/loops/implementation" / LOOP_ID / "decision-context.json"
@@ -704,3 +708,140 @@ def test_concurrent_begin_has_one_identity_and_frozen_start(
     )
     assert len(context["receipts"]) == 1
     assert context["pending_batch"]["number"] == 1
+
+
+def test_concurrent_begin_does_not_treat_peer_commit_as_source_drift(
+    initialized_project_dir, monkeypatch
+):
+    from ai_sdlc.core import loop_decision_service as service
+    from ai_sdlc.core.loop_simulation_context import SimulationPrepareRequest
+
+    root = _ready_project(initialized_project_dir)
+    assert start_simulation(root).status == "ready"
+    request = SimulationPrepareRequest.model_validate(begin_request(root))
+    preview = service.prepare_simulation_decision(root, LOOP_ID, request)
+    original_guard = service._implementation_write_guard
+    original_snapshot = service._snapshot
+    state = local()
+    allow_peer = Event()
+    peer_done = Event()
+
+    @contextmanager
+    def observed_guard(*args, **kwargs):
+        if getattr(state, "primary", False):
+            allow_peer.set()
+        with original_guard(*args, **kwargs):
+            state.locked = True
+            try:
+                yield
+            finally:
+                state.locked = False
+
+    def interleaved_snapshot(*args, **kwargs):
+        snapshot = original_snapshot(*args, **kwargs)
+        if (
+            getattr(state, "primary", False)
+            and not getattr(state, "locked", False)
+            and not getattr(state, "paused", False)
+        ):
+            # 只在旧的锁外读取处交错提交；持锁读取不能等待另一个写者。
+            state.paused = True
+            allow_peer.set()
+            assert peer_done.wait(10), "peer did not finish its prepare"
+        return snapshot
+
+    def apply():
+        return service.prepare_simulation_decision(
+            root,
+            LOOP_ID,
+            request,
+            dry_run=False,
+            expected_digest=preview.prepare_digest,
+        )
+
+    def apply_peer():
+        try:
+            assert allow_peer.wait(10), "primary did not reach prepare"
+            return apply()
+        finally:
+            peer_done.set()
+
+    monkeypatch.setattr(service, "_implementation_write_guard", observed_guard)
+    monkeypatch.setattr(service, "_snapshot", interleaved_snapshot)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        peer = executor.submit(apply_peer)
+        state.primary = True
+        try:
+            first = apply()
+        finally:
+            allow_peer.set()
+        second = peer.result(timeout=10)
+    assert sorted(result.status for result in (first, second)) == [
+        "existing",
+        "prepared",
+    ]
+    path = root / ".ai-sdlc/loops/implementation" / LOOP_ID / "decision-context.json"
+    context = json.loads(path.read_bytes())
+    assert len(context["receipts"]) == 1
+    assert context["pending_batch"]["number"] == 1
+    for result in (first, second):
+        assert result.context.context_digest == context["context_digest"]
+        assert result.context.started_at_ms == context["started_at_ms"]
+
+
+def test_begin_rejects_source_change_during_prepare_without_context(
+    initialized_project_dir, monkeypatch
+):
+    from ai_sdlc.core import loop_decision_service as service
+    from ai_sdlc.core.loop_simulation_context import SimulationPrepareRequest
+
+    root = _ready_project(initialized_project_dir)
+    assert start_simulation(root).status == "ready"
+    request = SimulationPrepareRequest.model_validate(begin_request(root))
+    preview = service.prepare_simulation_decision(root, LOOP_ID, request)
+    original_snapshot = service._snapshot
+    changed = False
+
+    def changed_source_snapshot(*args, **kwargs):
+        nonlocal changed
+        snapshot = original_snapshot(*args, **kwargs)
+        if not changed:
+            changed = True
+            (root / "src/ai_sdlc/core/implementation_loop.py").write_text(
+                "VALUE = 2\n", encoding="utf-8"
+            )
+        return snapshot
+
+    monkeypatch.setattr(service, "_snapshot", changed_source_snapshot)
+    with pytest.raises(
+        service.DecisionPreparationError, match="decision-prepare-snapshot-changed"
+    ):
+        service.prepare_simulation_decision(
+            root,
+            LOOP_ID,
+            request,
+            dry_run=False,
+            expected_digest=preview.prepare_digest,
+        )
+    path = root / ".ai-sdlc/loops/implementation" / LOOP_ID / "decision-context.json"
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("expected_digest", ["", "0" * 64])
+def test_begin_rejects_missing_or_stale_prepare_digest(
+    initialized_project_dir, expected_digest
+):
+    from ai_sdlc.core import loop_decision_service as service
+    from ai_sdlc.core.loop_simulation_context import SimulationPrepareRequest
+
+    root = _ready_project(initialized_project_dir)
+    assert start_simulation(root).status == "ready"
+    request = SimulationPrepareRequest.model_validate(begin_request(root))
+    with pytest.raises(
+        service.DecisionPreparationError, match="decision-prepare-digest-mismatch"
+    ):
+        service.prepare_simulation_decision(
+            root, LOOP_ID, request, dry_run=False, expected_digest=expected_digest
+        )
+    path = root / ".ai-sdlc/loops/implementation" / LOOP_ID / "decision-context.json"
+    assert not path.exists()

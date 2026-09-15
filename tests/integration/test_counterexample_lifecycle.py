@@ -1621,10 +1621,43 @@ def test_actual_observation_or_v0_cannot_change_the_state_claimed_by_v1(
         if item.step_id == f"variant-final-{mutator}"
     )
     state_ref = next(
-        ref
-        for ref in attempt.raw_evidence_refs
-        if ref.path.endswith("/resource-state.json")
+        (
+            ref
+            for ref in attempt.raw_evidence_refs
+            if ref.path.endswith("/resource-state.json")
+        ),
+        None,
     )
+    missing_state = {}
+    if state_ref is None:
+        # 只展开这次失败动作的真实原件；前置错误不得冒充状态改变已被验证。
+        folder = (root / attempt.attempt_ref.path).parent
+        names = {
+            "intent.json", "process.json", "raw-result.json", "cleanup.json",
+            "completion.json", "postcheck.json", "postcheck-error.json",
+            "resource-state.json", "resource-ownership.json", "resource-cleanup.json",
+            "receipt.json",
+        }
+        originals = {}
+        try:
+            for ref in execution.attempt_artifact_refs(root, attempt.attempt_ref):
+                artifact = root / ref.path
+                if artifact.parent == folder and artifact.name in names:
+                    raw = artifact.read_bytes()
+                    if hashlib.sha256(raw).hexdigest() != ref.sha256:
+                        raise ValueError(f"diagnostic-artifact-drift: {ref.path}")
+                    originals[artifact.name] = {
+                        "ref": ref.model_dump(mode="json"), "data": json.loads(raw),
+                    }
+        except (OSError, ValueError) as exc:
+            originals["read_error"] = f"{type(exc).__name__}: {exc}"
+        missing_state = {
+            "attempt": attempt.model_dump(mode="json"),
+            "verify_stdout": verified.stdout,
+            "verify_stderr": verified.stderr,
+            "originals": originals,
+        }
+    assert state_ref is not None, json.dumps(missing_state, ensure_ascii=False)
     state = json.loads((root / state_ref.path).read_bytes())
     assert state["before"] != state["after"]
     # 收尾可继续，但发生过的持久状态改变不能被后续拒绝覆盖为有效检出。

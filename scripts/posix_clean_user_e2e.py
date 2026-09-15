@@ -27,6 +27,18 @@ RUNTIME_MARKERS = (
 )
 
 
+def wait_input_ready(master_fd: int, deadline: float) -> None:
+    import termios
+
+    # 菜单输出早于 raw 模式；提前发键会被终端回显，并在切换模式时丢弃。
+    # 使用本次回放的原有截止时间，终端始终未就绪时仍由调用方终止并回收。
+    while time.monotonic() < deadline:
+        if not termios.tcgetattr(master_fd)[3] & (termios.ICANON | termios.ECHO):
+            return
+        time.sleep(0.01)
+    raise TimeoutError("published CLI terminal did not enter raw input mode")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, type=Path)
@@ -59,7 +71,7 @@ def main() -> int:
         agent_renders = text.count(AGENT_PROMPT)
         if not selected_agent and agent_renders > observed_agent_renders:
             observed_agent_renders = agent_renders
-            time.sleep(0.2)
+            wait_input_ready(master_fd, deadline)
             if agent_key_step < 2:
                 # 干净项目默认是“其他-通用”；每次菜单重绘后发送一个真实上键。
                 os.write(master_fd, b"\x1b[A")
@@ -69,7 +81,7 @@ def main() -> int:
                 selected_agent = True
         elif selected_agent and not selected_shell and SHELL_PROMPT in text:
             # 回车接受菜单中已展示的平台推荐 zsh 或 bash。
-            time.sleep(0.2)
+            wait_input_ready(master_fd, deadline)
             os.write(master_fd, b"\r")
             selected_shell = True
 

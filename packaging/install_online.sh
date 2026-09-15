@@ -5,12 +5,12 @@
 #   ./packaging/install_online.sh /path/to/venv
 #   ./packaging/install_online.sh --add-to-path
 # Env:
-#   AI_SDLC_PACKAGE_SPEC=git+https://github.com/panguosong/AI-SDLC.git@v3.2.0   optional published package spec for pip install
+#   AI_SDLC_PACKAGE_SPEC=git+https://github.com/panguosong/AI-SDLC.git@v3.2.1   optional published package spec for pip install
 #   PYTHON=/path/to/python3.11            optional interpreter override
 
 set -euo pipefail
 
-PACKAGE_SPEC="${AI_SDLC_PACKAGE_SPEC:-git+https://github.com/panguosong/AI-SDLC.git@v3.2.0}"
+PACKAGE_SPEC="${AI_SDLC_PACKAGE_SPEC:-git+https://github.com/panguosong/AI-SDLC.git@v3.2.1}"
 ADD_TO_PATH=0
 POSITIONAL_VENV_TARGET=""
 while [[ $# -gt 0 ]]; do
@@ -269,18 +269,18 @@ print_unsupported_linux_host() {
   print_status \
     "当前 Linux 主机不在缺少 Python 的在线自动安装认证范围内：distro=${LINUX_DISTRO} version=${LINUX_VERSION} arch=${LINUX_ARCH} libc=${LINUX_LIBC}。未执行 Python 包或 AI-SDLC 安装。" \
     "Unsupported Linux Python bootstrap host: distro=${LINUX_DISTRO} version=${LINUX_VERSION} arch=${LINUX_ARCH} libc=${LINUX_LIBC}. No Python package or AI-SDLC install was performed." \
-    "Use ai-sdlc-offline-3.2.0-linux-amd64.tar.gz from User Guide route 6/12." \
-    "缺少 Python 的在线自动安装仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc；请使用路线 6/12 的 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" \
-    "Missing-Python online bootstrap is certified only for Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc; use the exact v3.2.0 Linux offline asset from route 6/12."
+    "Use ai-sdlc-offline-3.2.1-linux-amd64.tar.gz from User Guide route 6/12." \
+    "缺少 Python 的在线自动安装仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc；请使用路线 6/12 的 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz。" \
+    "Missing-Python online bootstrap is certified only for Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc; use the exact v3.2.1 Linux offline asset from route 6/12."
 }
 
 print_unsupported_linux_arch_or_libc() {
   print_status \
     "当前 Linux 架构或 libc 不受支持：distro=${LINUX_DISTRO} version=${LINUX_VERSION} arch=${LINUX_ARCH} libc=${LINUX_LIBC}。未执行 Python 包或 AI-SDLC 安装。" \
     "Unsupported Linux architecture or libc: distro=${LINUX_DISTRO} version=${LINUX_VERSION} arch=${LINUX_ARCH} libc=${LINUX_LIBC}. No Python package or AI-SDLC install was performed." \
-    "Use a host with a compatible v3.2.0 Linux distribution asset." \
-    "缺少 Python 的在线自动安装仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc；该架构或 libc 没有兼容的 v3.2.0 Linux 发行资产。" \
-    "Missing-Python online bootstrap is certified only for Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc; no compatible v3.2.0 Linux distribution asset exists for this architecture or libc."
+    "Use a host with a compatible v3.2.1 Linux distribution asset." \
+    "缺少 Python 的在线自动安装仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc；该架构或 libc 没有兼容的 v3.2.1 Linux 发行资产。" \
+    "Missing-Python online bootstrap is certified only for Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc; no compatible v3.2.1 Linux distribution asset exists for this architecture or libc."
 }
 
 require_git_for_package_source() {

@@ -160,7 +160,7 @@ def test_q003_decision_public_wrappers_keep_typed_boundary(tmp_path, monkeypatch
 
     def prepare(*args, **kwargs):
         calls.append(1)
-        inside = kind == "pr" or len(calls) == 2
+        inside = kind in ("pr", "legacy-simulation") or len(calls) == 2
         if inside and body_error[0] is not None:
             raise body_error[0]
         return existing if inside else preview
@@ -191,7 +191,7 @@ def test_q003_decision_public_wrappers_keep_typed_boundary(tmp_path, monkeypatch
     with pytest.raises(DecisionPreparationError) as denied:
         invoke()
     assert isinstance(denied.value.__cause__, locks._ImplementationWriteLockError)
-    assert len(calls) == (0 if kind == "pr" else 1)
+    assert len(calls) == (0 if kind in ("pr", "legacy-simulation") else 1)
     directory.unlink()
     calls.clear()
     assert invoke() is existing

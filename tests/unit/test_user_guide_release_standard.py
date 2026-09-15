@@ -49,8 +49,8 @@ def _complete_route(route_id: str) -> str:
             "已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径。"
             "缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 "
             "amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用 "
-            "路线 6/12 的 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。"
-            "非 AMD64 或非 glibc 的 Linux 主机，v3.2.0 没有兼容的 Linux 发行资产；"
+            "路线 6/12 的 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz。"
+            "非 AMD64 或非 glibc 的 Linux 主机，v3.2.1 没有兼容的 Linux 发行资产；"
             "不得使用路线 6/12 的 AMD64 离线包。\n"
         )
         git_bootstrap = (
@@ -83,8 +83,8 @@ def _complete_route(route_id: str) -> str:
             'LIBC="$(detect_linux_libc)"\n'
             'if { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; } || '
             '[ "$LIBC" = "musl" ]; then\n'
-            '  echo "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产；'
-            '不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2\n'
+            '  echo "停止：v3.2.1 没有与此主机兼容的 Linux 发行资产；'
+            '不得使用 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz。" >&2\n'
             "  exit 1\n"
             "fi\n"
             'if [ "$LIBC" != "glibc" ]; then\n'
@@ -142,7 +142,7 @@ def _complete_guide() -> str:
 
 
 def test_repository_activates_the_standard_in_v3_0_1() -> None:
-    assert parse_project_version((ROOT / "pyproject.toml").read_text()) == (3, 2, 0)
+    assert parse_project_version((ROOT / "pyproject.toml").read_text()) == (3, 2, 1)
     assert validate_repository(ROOT) == []
 
 
@@ -348,10 +348,10 @@ def test_linux_online_route_requires_executable_download_recovery() -> None:
             "amd64/x86_64",
             "glibc",
             "Python 3.11+",
-            "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
+            "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz",
             "路线 6/12",
             "非 AMD64 或非 glibc",
-            "v3.2.0 没有兼容的 Linux 发行资产",
+            "v3.2.1 没有兼容的 Linux 发行资产",
             "不得使用路线 6/12 的 AMD64 离线包",
         )
     ],
@@ -428,8 +428,8 @@ def test_linux_offline_route_requires_connected_host_download_recovery() -> None
             '"$LIBC" = "musl"',
             '"$LIBC" != "glibc"',
             "无法确定此主机使用的 libc",
-            "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产",
-            "不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
+            "停止：v3.2.1 没有与此主机兼容的 Linux 发行资产",
+            "不得使用 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz",
         )
     ],
 )

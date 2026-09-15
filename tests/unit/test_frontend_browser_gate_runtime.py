@@ -3397,9 +3397,9 @@ export const chromium = {
     assert result["interaction_capture"]["classification_candidate"] == "pass"
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process query failure path")
-@pytest.mark.parametrize("query_failure", [True, False], ids=["failed-query", "normal-group"])
+@pytest.mark.parametrize("query_failure", ["all", "ps-only", "none"], ids=["failed-query", "native-fallback", "normal-group"])
 def test_probe_timeout_reaps_owned_child_and_closes_pipes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query_failure: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query_failure: str
 ) -> None:
     from ai_sdlc.core import quality_command
 
@@ -3410,9 +3410,10 @@ def test_probe_timeout_reaps_owned_child_and_closes_pipes(
         "pathlib.Path(sys.argv[1]).write_text(json.dumps({'pid':__import__('os').getpid(),'descendant':None if child is None else child.pid})); "
         "print('actual probe started',flush=True); time.sleep(60)"
     )
-    command = [sys.executable, "-B", "-c", body, str(ready), "single" if query_failure else "group"]
+    command = [sys.executable, "-B", "-c", body, str(ready), "single" if query_failure == "all" else "group"]
     original_popen, original_run = subprocess.Popen, subprocess.run
-    owned, failed_queries = [], []
+    original_native_query = quality_command._PosixProcessTable.group_members
+    owned, failed_queries, native_queries = [], [], []
 
     def capture_process(argv, **kwargs):
         process = original_popen(argv, **kwargs)
@@ -3421,25 +3422,33 @@ def test_probe_timeout_reaps_owned_child_and_closes_pipes(
         return process
 
     def query(argv, **kwargs):
-        if query_failure and argv == ["ps", "-axo", "pid=,pgid=,stat="]:
+        if query_failure != "none" and argv == ["ps", "-axo", "pid=,pgid=,stat="]:
             failed_queries.append(argv)
             raise subprocess.CalledProcessError(1, argv, stderr="injected process query failure")
         return original_run(argv, **kwargs)
+
+    def native_query(table, group_id):
+        native_queries.append(group_id)
+        if query_failure == "all":
+            raise OSError("injected native process query failure")
+        return original_native_query(table, group_id)
 
     try:
         with monkeypatch.context() as patch:
             patch.setattr(runtime_module.subprocess, "Popen", capture_process)
             patch.setattr(quality_command.subprocess, "run", query)
-            expected = RuntimeError if query_failure else subprocess.TimeoutExpired
-            match = "browser-probe-owned-process-cleanup-incomplete" if query_failure else None
+            patch.setattr(quality_command._PosixProcessTable, "group_members", native_query)
+            expected = RuntimeError if query_failure == "all" else subprocess.TimeoutExpired
+            match = "browser-probe-owned-process-cleanup-incomplete" if query_failure == "all" else None
             with pytest.raises(expected, match=match):
                 runtime_module._run_probe_runner_process(command, cwd=tmp_path, stdin="{}", timeout=0.3)
         assert ready.is_file(), "the real child must reach the intended timeout window"
         assert len(owned) == 1
         process = owned[0]
-        observed = {"returncode": process.poll(), "pipe_closed": {name: getattr(process, name).closed for name in ("stdin", "stdout", "stderr")}, "query_failures": len(failed_queries), "ready": json.loads(ready.read_text())}
+        observed = {"returncode": process.poll(), "pipe_closed": {name: getattr(process, name).closed for name in ("stdin", "stdout", "stderr")}, "query_failures": len(failed_queries), "native_queries": len(native_queries), "ready": json.loads(ready.read_text())}
         (tmp_path / "observed-before-test-cleanup.json").write_text(json.dumps(observed, indent=2) + "\n")
-        assert bool(failed_queries) == query_failure
+        assert bool(failed_queries) == (query_failure != "none")
+        assert bool(native_queries) == (query_failure != "none")
         assert observed["returncode"] is not None, "caller must reap its own child even when group cleanup fails"
         assert all(observed["pipe_closed"].values()), "caller must close all owned PIPE handles"
         for pid in (observed["ready"]["pid"], observed["ready"]["descendant"]):

@@ -2746,7 +2746,7 @@ def test_missing_cleanup_proof_does_not_recreate_resource_or_replay(execution_ca
     assert len(list(execution._attempts_dir(root, plan).glob("*/intent.json"))) == 4
 
 
-def _fix25_repaired_resource_cycle(case):
+def _fix25_repaired_resource_cycle(case, monkeypatch):
     root, contract, original = _case_with_frozen_resets(case)
     data = original.model_dump(mode="json")
     initial_resets = []
@@ -2757,18 +2757,28 @@ def _fix25_repaired_resource_cycle(case):
         next(s for s in data["steps"] if s["id"] == f"{subject.id}-none")["depends_on"] = [reset["id"]]
     data.update(steps=[*initial_resets, *data["steps"]], max_execution_attempts=80)
     original = CounterexamplePlan.model_validate(data)
+    contract, impl, loop, original = _run_admission_case(
+        (root, contract, original), monkeypatch
+    )
+    monkeypatch.setattr(
+        "ai_sdlc.core.implementation_store.read_input", lambda *args: impl
+    )
     execution.validate_plan_contract(contract, original)
     folder = execution._attempts_dir(root, original).parent
     old_plan = execution._write_json(
         root, folder / "plans" / f"{counterexample_digest(original)}.json", original
     )
     case = root, contract, original
-    receipts = [
-        _execute(case, identifier)
-        for identifier in (
-            "current-initial-reset", "current-none", "current-V0", "current-V1", "current-cleanup"
-        )
-    ]
+    # 后继复用要求完整原生归集；单个 subject 的清理回执不能代替整个前例。
+    record_ref, assessment = execution.run_counterexample_plan(
+        root, impl, loop, original.task_id, old_plan.path
+    )
+    assert assessment.current_result.status == "PASS"
+    bound = execution.resolve_counterexample_evidence(root, impl, record_ref)
+    receipts = bound.observations.attempts
+    assert {receipt.step_id for receipt in receipts} == {
+        step.id for step in original.steps if step.phase == "final"
+    }
     assert all(r.status == "completed" and r.cleanup_status == "complete" for r in receipts)
     originals = {
         ref.path: (root / ref.path).read_bytes()
@@ -2776,6 +2786,7 @@ def _fix25_repaired_resource_cycle(case):
         for ref in execution.attempt_artifact_refs(root, receipt.attempt_ref)
     }
     originals[old_plan.path] = (root / old_plan.path).read_bytes()
+    originals[record_ref.path] = (root / record_ref.path).read_bytes()
     successor = _rebase_batch(case, original, preserve_roots=True)
     execution._require_original_batch(root, original, successor)
     execution._write_json(
@@ -2784,30 +2795,40 @@ def _fix25_repaired_resource_cycle(case):
     assert successor.candidate_digest != original.candidate_digest
     assert successor.subjects[0].snapshot != original.subjects[0].snapshot
     assert successor.steps[0].binding.resources == original.steps[0].binding.resources
-    return (root, contract, successor), original, receipts[-1], originals
+    cleanup = next(receipt for receipt in receipts if receipt.step_id == "current-cleanup")
+    return (root, contract, successor), original, cleanup, record_ref, originals
 
 
-@pytest.mark.parametrize("damage", [None, "plan-missing", "plan-identity", "cleanup-missing"])
-def test_fix25_repaired_candidate_reuses_only_original_cleaned_resource(execution_case, damage):
-    case, original, cleanup, originals = _fix25_repaired_resource_cycle(execution_case)
+def test_fix25_repaired_candidate_reuses_only_original_cleaned_resource(execution_case, monkeypatch):
+    case, original, cleanup, record_ref, originals = _fix25_repaired_resource_cycle(
+        execution_case, monkeypatch
+    )
     root, _, successor = case
     folder = execution._attempts_dir(root, original).parent
     old_plan_path = folder / "plans" / f"{counterexample_digest(original)}.json"
     resource = Path(successor.steps[0].binding.resources[0].root)
     assert not resource.exists()
     before = set(folder.glob("attempts/*/intent.json"))
-    if damage == "plan-missing":
-        old_plan_path.unlink()
-    elif damage == "plan-identity":
-        old_plan_path.write_bytes(execution._json_bytes(successor))
-    elif damage == "cleanup-missing":
-        (root / cleanup.attempt_ref.path).with_name("resource-cleanup.json").unlink()
-    if damage:
-        with pytest.raises((OSError, ValueError)):
-            _execute(case, "current-initial-reset")
-        assert not resource.exists()
-        assert set(folder.glob("attempts/*/intent.json")) == before
-        return
+    cleanup_path = (root / cleanup.attempt_ref.path).with_name("resource-cleanup.json")
+    # 同一真实前例依次注入并撤回单点损坏，避免为每个坏字节重复执行整表业务。
+    for damaged_path, replacement, expected in (
+        (old_plan_path, None, None),
+        (old_plan_path, execution._json_bytes(successor), None),
+        (cleanup_path, None, None),
+        (root / record_ref.path, None, "unfinished-predecessor-no-takeover"),
+    ):
+        saved = damaged_path.read_bytes()
+        try:
+            if replacement is None:
+                damaged_path.unlink()
+            else:
+                damaged_path.write_bytes(replacement)
+            with pytest.raises((OSError, ValueError), match=expected):
+                _execute(case, "current-initial-reset")
+            assert not resource.exists()
+            assert set(folder.glob("attempts/*/intent.json")) == before
+        finally:
+            damaged_path.write_bytes(saved)
     restored = _execute(case, "current-initial-reset")
     assert restored.status == "completed" and restored.cleanup_status == "complete"
     assert (resource / "result.json").read_bytes() == b'{"value":"saved"}'
@@ -5565,14 +5586,33 @@ def test_active_owner_loss_after_intent_is_not_reclaimed_or_replayed(
 
     monkeypatch.setattr(execution, "_write_json", write_intent_then_drop_owner)
     monkeypatch.setattr(execution, "read_stable_bytes", read_owner_then_remove)
-    with pytest.raises(ValueError, match="resource-owner"):
-        _execute(execution_case, "current-V0")
+    receipt = _execute(execution_case, "current-V0")
+    assert intent_written
+    assert receipt.status == "execution_unknown" and receipt.cleanup_status == "unknown"
+    assert not receipt.normally_completed
+    folder = (root / receipt.attempt_ref.path).parent
+    assert "resource-owner-missing" in json.loads(
+        (folder / "postcheck-error.json").read_bytes()
+    )["error"]
+    assert not (folder / "process.json").exists()
+    assert not (folder / "postcheck.json").exists()
+    originals = {path: path.read_bytes() for path in folder.iterdir() if path.is_file()}
+    # 执行层保留失败回执而非把启动前错误抛掉；冷读和再执行仍须拒绝未知原操作。
+    assert execution.recover_counterexample_attempt(root, plan, receipt.attempt_ref) == receipt
+    captured = {
+        ref.path: (root / ref.path).read_bytes()
+        for ref in execution.attempt_artifact_refs(root, receipt.attempt_ref)
+    }
+    assert execution.recover_counterexample_attempt(
+        root, plan, receipt.attempt_ref, captured_artifacts=captured
+    ) == receipt
     attempts = list(execution._attempts_dir(root, plan).glob("*/intent.json"))
     assert len(attempts) == 2
     assert not (resource / ".ai-sdlc-owner.json").exists()
     with pytest.raises(ValueError, match="prior-execution-unknown-no-replay"):
         _execute(execution_case, "current-V0")
     assert len(list(execution._attempts_dir(root, plan).glob("*/intent.json"))) == 2
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
 def test_initial_manifest_cannot_treat_a_declared_file_as_a_parent_directory(

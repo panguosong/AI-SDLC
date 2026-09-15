@@ -1,0 +1,8 @@
+# 三系统固定兼容门禁：验证原生进程归属与收尾、文件快照、锁、终端和 CLI 入口。
+# 保留 Windows Job 与 POSIX 原生清理反例；完整业务生命周期由主环境全量套件覆盖。
+tests/unit/test_quality_command.py
+tests/unit/test_source_snapshot.py
+tests/unit/test_loop_resource_lock.py
+tests/unit/test_cli_console_io.py
+tests/unit/test_frontend_browser_gate_runtime.py
+tests/integration/test_cli_module_invocation.py

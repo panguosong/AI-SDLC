@@ -1,0 +1,10 @@
+# Python 次版本固定兼容门禁：验证 CLI、发行包结构、初始化、评审数据合同和实际超时透传。
+# 在单一系统检查解释器兼容；三系统原生行为由 platform 门禁覆盖，不重复完整业务生命周期。
+tests/integration/test_cli_module_invocation.py
+tests/unit/test_cli_console_io.py
+tests/unit/test_packaging_backend.py
+tests/unit/test_packaging_config.py
+tests/unit/test_bootstrap_router.py
+tests/unit/test_review_kernel.py
+tests/integration/test_review_kernel_distribution.py
+tests/unit/test_pr_review_provider_timeout.py

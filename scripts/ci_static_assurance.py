@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -612,6 +613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _collect_nodeids(root, args.pytest_arg),
                 args.cell,
                 source_commit,
+                collection_command=shlex.join(["pytest", "--collect-only", "-q", *args.pytest_arg]),
             )
         elif args.command == "cell-evidence":
             result = build_cell_evidence(

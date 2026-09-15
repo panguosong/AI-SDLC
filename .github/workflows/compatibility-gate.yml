@@ -4,8 +4,6 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
-  push:
-    branches: [main]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -19,7 +17,7 @@ on:
         type: string
         default: ""
       force_full:
-        description: Force the complete OS and Python assurance matrix.
+        description: Force source, platform and Python compatibility assurance.
         required: false
         type: boolean
         default: false
@@ -71,12 +69,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t fast_tests < <(grep -Ev '^\s*(#|$)' .github/ci/fast-gate-tests.txt)
+          mapfile -t fast_tests < <(grep -Ev '^[[:space:]]*(#|$)' .github/ci/fast-gate-tests.txt)
           if [[ "${#fast_tests[@]}" -eq 0 ]]; then
             echo "Static fast suite is empty." >&2
             exit 1
           fi
-          uv run pytest -q "${fast_tests[@]}" --junitxml=fast-gate-results.xml
+          uv run pytest -q -x "${fast_tests[@]}" --junitxml=fast-gate-results.xml
 
       - name: Upload fast gate evidence
         if: always()
@@ -88,16 +86,25 @@ jobs:
 
   cross-platform-validation:
     name: Cross Platform Validation (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: fast-gate
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 120 }}
+    timeout-minutes: ${{ matrix.suite == 'full' && 60 || 15 }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # 完整业务仅主环境执行；其余环境验证真实平台差异与解释器兼容。
+        include:
+          - {os: ubuntu-latest, python-version: "3.11", suite: full}
+          - {os: macos-latest, python-version: "3.11", suite: platform}
+          - {os: windows-latest, python-version: "3.11", suite: platform}
+          - {os: ubuntu-latest, python-version: "3.12", suite: python}
+          - {os: ubuntu-latest, python-version: "3.13", suite: python}
+          - {os: ubuntu-latest, python-version: "3.14", suite: python}
+          - {os: windows-latest, python-version: "3.14", suite: platform}
     env:
       CELL: ${{ matrix.os }}-py${{ matrix.python-version }}
+      TEST_SUITE: ${{ matrix.suite }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -123,22 +130,39 @@ jobs:
           set -euo pipefail
           mkdir -p "ci-evidence/${CELL}"
           candidate_sha="$(git rev-parse HEAD)"
+          collect_args=()
+          if [[ "${TEST_SUITE}" != "full" ]]; then
+            while IFS= read -r node; do
+              collect_args+=(--pytest-arg "${node}")
+            done < <(grep -Ev '^[[:space:]]*(#|$)' ".github/ci/${TEST_SUITE}-gate-tests.txt")
+            test "${#collect_args[@]}" -gt 0
+          fi
           uv run python scripts/ci_static_assurance.py collect \
             --root . \
             --source-commit "${candidate_sha}" \
             --cell "${CELL}" \
+            "${collect_args[@]}" \
             --output "ci-evidence/${CELL}/collection-manifest.json"
           date -u +%Y-%m-%dT%H:%M:%SZ > "ci-evidence/${CELL}/started-at.txt"
 
       - name: Doctor
         run: uv run ai-sdlc doctor
 
-      - name: Run full pytest suite
+      - name: Run selected pytest suite
         shell: bash
         run: |
-          # 006 validates member identity and result completeness; candidate
-          # test bodies remain inside the repository code-review trust boundary.
-          uv run pytest -q --durations=50 \
+          set -euo pipefail
+          test_args=()
+          if [[ "${TEST_SUITE}" == "full" ]]; then
+            # 各测试使用独立临时项目；进程并行，保留所有用例和失败原件。
+            test_args=(-n auto --dist worksteal --max-worker-restart=0)
+          else
+            while IFS= read -r node; do
+              test_args+=("${node}")
+            done < <(grep -Ev '^[[:space:]]*(#|$)' ".github/ci/${TEST_SUITE}-gate-tests.txt")
+            test "${#test_args[@]}" -gt 0
+          fi
+          uv run pytest -q "${test_args[@]}" --durations=30 \
             --junitxml=ci-evidence/${CELL}/compatibility-results.xml
 
       - name: Run fixed SnapshotControl stability sentinel
@@ -164,6 +188,7 @@ jobs:
 
   windows-shell-smoke:
     name: Windows Shell Smoke (${{ matrix.shell }})
+    needs: fast-gate
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true
     runs-on: windows-latest
     timeout-minutes: 30
@@ -239,9 +264,8 @@ jobs:
           set -euo pipefail
           candidate_sha="$(git rev-parse HEAD)"
           cell_args=()
-          for os_name in ubuntu-latest macos-latest windows-latest; do
-            for python_version in 3.11 3.12 3.13 3.14; do
-              cell="${os_name}-py${python_version}"
+          for cell in ubuntu-latest-py3.11 macos-latest-py3.11 windows-latest-py3.11 \
+                      ubuntu-latest-py3.12 ubuntu-latest-py3.13 ubuntu-latest-py3.14 windows-latest-py3.14; do
               evidence_dir="downloaded-evidence/compatibility-${cell}"
               started_at="$(tr -d '\r\n' < "${evidence_dir}/started-at.txt")"
               finished_at="$(tr -d '\r\n' < "${evidence_dir}/finished-at.txt")"
@@ -254,7 +278,6 @@ jobs:
                 --finished-at "${finished_at}" \
                 --output "${evidence_dir}/cell-evidence.json"
               cell_args+=(--expected-cell "${cell}")
-            done
           done
           python scripts/ci_static_assurance.py aggregate \
             --evidence-root downloaded-evidence \
@@ -268,9 +291,18 @@ jobs:
         run: |
           {
             echo "## Candidate Test Layer"
-            echo "- full_matrix: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true }}"
+            echo "- full_assurance: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true }}"
             echo "- candidate_commit: ${{ github.sha }}"
+            echo "- layers: one full source suite, platform checks, Python compatibility"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload aggregate assurance
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: assurance-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: assurance-report.json
+          if-no-files-found: error
 
       - name: Require Windows shell assurance
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true)

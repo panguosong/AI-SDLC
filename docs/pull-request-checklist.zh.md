@@ -1,5 +1,7 @@
 # Pull Request 检查清单
 
+本仓库 v3.2.0 发行采用[本次发行路径与分层验证](框架自迭代开发与发布约定.md#v320-本次发行路径替代)。本次以当前提交的实际线上 Codex review 承接下方本地复核条目，不执行已撤销的本地整包复评或 Local PR Close；普通用户的产品流程不变。
+
 ## 范围与契约
 
 - [ ] 变更目标、范围和验收标准明确；
@@ -19,7 +21,9 @@
 
 - [ ] 新行为有自动化测试；
 - [ ] 修复包含可复现的回归测试；
-- [ ] `uv run pytest -q` 通过；
+- [ ] 主环境完整适用测试集合通过，例如 `uv run pytest -q -n auto --dist worksteal`，允许隔离进程并行；
+- [ ] 固定平台及 Python 兼容集合通过，聚合校验全部预期 cell 和实际成员，无遗漏或重复；
+- [ ] 当前缺陷短回归前置，旧错误能够被拦截，合法对照通过；
 - [ ] `uv run ruff check src tests scripts` 通过；
 - [ ] 没有提交密钥、令牌、环境文件或本地绝对路径。
 
@@ -52,5 +56,6 @@
 - [ ] README、用户指南和打包说明一致；
 - [ ] 离线包名称与 manifest 一致；
 - [ ] Windows、macOS、Linux smoke 覆盖对应平台；
+- [ ] 实际 main 合并树与已验证 PR 合并树、依赖及构建输入一致，发行阶段不重复同一源码整库；不一致的变化另有真实验证；
 - [ ] 当前候选 wheel 与 sdist 构建的 wheel 在隔离安装环境通过五 Loop 既有流程与普通 Close 验收，导入来源为已安装包而不是产品源码；
 - [ ] `python scripts/validate_public_release_identity.py .` 通过。

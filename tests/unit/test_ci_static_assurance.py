@@ -158,12 +158,14 @@ def test_cell_evidence_rejects_incomplete_or_failed_junit(
     assert result["reason"] == reason
 
 
-def test_collect_cli_runs_real_pytest_collection(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scoped", [False, True])
+def test_collect_cli_runs_real_pytest_collection(tmp_path: Path, scoped: bool) -> None:
     module = _load_module()
     (tmp_path / "test_sample.py").write_text(
         "def test_real_collection():\n    assert True\n",
         encoding="utf-8",
     )
+    (tmp_path / "test_other.py").write_text("def test_other():\n    assert True\n", encoding="utf-8")
     output = tmp_path / "manifest.json"
 
     result = module.main(
@@ -177,14 +179,19 @@ def test_collect_cli_runs_real_pytest_collection(tmp_path: Path) -> None:
             _CELL,
             "--output",
             str(output),
+            *(["--pytest-arg", "test_sample.py"] if scoped else []),
         ]
     )
 
     assert result == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert list(payload["case_nodeids"].values()) == [
-        "test_sample.py::test_real_collection"
-    ]
+    assert set(payload["case_nodeids"].values()) == (
+        {"test_sample.py::test_real_collection"} if scoped else
+        {"test_sample.py::test_real_collection", "test_other.py::test_other"}
+    )
+    assert payload["collection_command"] == "pytest --collect-only -q" + (
+        " test_sample.py" if scoped else ""
+    )
 
 
 def test_cli_exposes_only_candidate_local_commands() -> None:

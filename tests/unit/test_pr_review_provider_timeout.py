@@ -15,6 +15,7 @@ from ai_sdlc.core.pr_review_service import (
     rerun_pr_review,
     start_pr_review,
 )
+from ai_sdlc.core.quality_command import run_controlled_process
 
 
 @pytest.mark.parametrize(
@@ -30,7 +31,8 @@ def test_start_provider_timeout_reaches_real_subprocess(
     extra = {} if timeout is None else {"provider_timeout_seconds": timeout}
 
     with patch(
-        "ai_sdlc.core.pr_review_provider.subprocess.run", wraps=subprocess.run
+        "ai_sdlc.core.pr_review_provider.run_controlled_process",
+        wraps=run_controlled_process,
     ) as run:
         result = start_pr_review(
             PRReviewStartOptions(
@@ -47,9 +49,9 @@ def test_start_provider_timeout_reaches_real_subprocess(
     assert result.status == PRReviewCommandStatus.STARTED, result.blocker
     assert result.verdict == "clean"
     assert [
-        call.kwargs["timeout"]
+        call.args[0].timeout_seconds
         for call in run.call_args_list
-        if call.args[0][0] == sys.executable
+        if call.args[0].argv[0] == sys.executable
     ] == [expected]
 
 
@@ -99,16 +101,17 @@ def test_rerun_provider_timeout_is_explicit_or_default_not_inherited(
     extra = {} if timeout is None else {"provider_timeout_seconds": timeout}
 
     with patch(
-        "ai_sdlc.core.pr_review_provider.subprocess.run", wraps=subprocess.run
+        "ai_sdlc.core.pr_review_provider.run_controlled_process",
+        wraps=run_controlled_process,
     ) as run:
         result = rerun_pr_review(tmp_path, **extra)
 
     assert result.status == PRReviewCommandStatus.STARTED, result.blocker
     assert result.verdict == "clean"
     assert [
-        call.kwargs["timeout"]
+        call.args[0].timeout_seconds
         for call in run.call_args_list
-        if call.args[0][0] == sys.executable
+        if call.args[0].argv[0] == sys.executable
     ] == [expected]
 
 

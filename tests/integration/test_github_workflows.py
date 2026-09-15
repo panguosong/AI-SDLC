@@ -1760,7 +1760,6 @@ def test_compatibility_gate_statically_layers_fast_and_full_assurance() -> None:
 
     assert {
         "pull_request",
-        "push",
         "merge_group",
         "workflow_dispatch",
         "workflow_call",
@@ -1774,19 +1773,36 @@ def test_compatibility_gate_statically_layers_fast_and_full_assurance() -> None:
         "converted_to_draft",
     ]
     assert triggers["workflow_call"]["inputs"]["force_full"] == {
-        "description": "Force the complete OS and Python assurance matrix.",
+        "description": "Force source, platform and Python compatibility assurance.",
         "required": False,
         "type": "boolean",
         "default": False,
     }
     jobs = workflow["jobs"]
     assert jobs["fast-gate"]["runs-on"] == "ubuntu-latest"
+    fast_run = next(s["run"] for s in jobs["fast-gate"]["steps"]
+                    if s.get("name") == "Run fixed fast suite")
+    assert 'pytest -q -x "${fast_tests[@]}"' in fast_run
     assert "authority-check" not in jobs
     assert "baseline-preflight" not in jobs
-    assert jobs["cross-platform-validation"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-latest", "macos-latest", "windows-latest"],
-        "python-version": ["3.11", "3.12", "3.13", "3.14"],
-    }
+    cells = jobs["cross-platform-validation"]["strategy"]["matrix"]["include"]
+    assert [(c["os"], c["python-version"], c["suite"]) for c in cells] == [
+        ("ubuntu-latest", "3.11", "full"),
+        ("macos-latest", "3.11", "platform"),
+        ("windows-latest", "3.11", "platform"),
+        ("ubuntu-latest", "3.12", "python"),
+        ("ubuntu-latest", "3.13", "python"),
+        ("ubuntu-latest", "3.14", "python"),
+        ("windows-latest", "3.14", "platform"),
+    ]
+    assert jobs["cross-platform-validation"]["needs"] == "fast-gate"
+    assert jobs["windows-shell-smoke"]["needs"] == "fast-gate"
+    # PR 验证合并树；发行核对相同树，避免合并后再重复整库执行。
+    assert "push" not in triggers
+    aggregate = next(s["run"] for s in jobs["merge-assurance"]["steps"]
+                     if s.get("name") == "Rebuild, verify, and aggregate full evidence")
+    for c in cells:
+        assert f'{c["os"]}-py{c["python-version"]}' in aggregate
     full_condition = (
         "github.event_name != 'pull_request' || "
         "github.event.pull_request.draft == false || inputs.force_full == true"
@@ -1825,9 +1841,10 @@ def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
 
     parsed = yaml.safe_load(workflow)
     matrix_steps = parsed["jobs"]["cross-platform-validation"]["steps"]
+    assert all("mapfile" not in str(step.get("run", "")) for step in matrix_steps)
     assert all("cell-evidence" not in str(step.get("run", "")) for step in matrix_steps)
     full_pytest_step = next(
-        step for step in matrix_steps if step.get("name") == "Run full pytest suite"
+        step for step in matrix_steps if step.get("name") == "Run selected pytest suite"
     )
     assert "uv run pytest" in full_pytest_step["run"]
     assert (
@@ -1835,7 +1852,11 @@ def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
         in full_pytest_step["run"]
     )
     step_names = [step.get("name") for step in matrix_steps]
-    assert step_names.index("Doctor") < step_names.index("Run full pytest suite")
+    assert step_names.index("Doctor") < step_names.index("Run selected pytest suite")
+    assert "--dist worksteal" in full_pytest_step["run"]
+    assert '"${test_args[@]}"' in full_pytest_step["run"]
+    collect_step = next(s for s in matrix_steps if s.get("name") == "Collect exact candidate members")
+    assert "--pytest-arg" in collect_step["run"]
     merge_steps = parsed["jobs"]["merge-assurance"]["steps"]
     assert all("uv run python" not in str(step.get("run", "")) for step in merge_steps)
     gate_script = merge_steps[0]["run"]
@@ -1977,7 +1998,7 @@ def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
         "--output ci-evidence/${{ env.CELL }}/snapshot-control-sentinel.json"
     )
     assert (
-        step_names.index("Run full pytest suite")
+        step_names.index("Run selected pytest suite")
         < step_names.index("Run fixed SnapshotControl stability sentinel")
         < step_names.index("Record raw cell completion")
     )
@@ -2009,10 +2030,9 @@ def test_compatibility_gate_uses_candidate_local_execution_evidence_only() -> No
     assert "collect" in workflow_text
     assert "cell-evidence" in workflow_text
     assert "aggregate" in workflow_text
-    assert jobs["cross-platform-validation"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-latest", "macos-latest", "windows-latest"],
-        "python-version": ["3.11", "3.12", "3.13", "3.14"],
-    }
+    cells = jobs["cross-platform-validation"]["strategy"]["matrix"]["include"]
+    assert sum(c["suite"] == "full" for c in cells) == 1
+    assert {c["os"] for c in cells} == {"ubuntu-latest", "macos-latest", "windows-latest"}
     assert "windows-shell-smoke" in jobs
     assert "fast-gate" in jobs
 

@@ -950,7 +950,11 @@ def test_controlled_detached_helper_really_stops_writing(repository, mode):
         assert helper_pid in {
             row[0] for row in receipts["cleanup"]["process_tracking"]["owned"]
         }
-        process = _PosixProcessTable().snapshot().get(helper_pid)
+        # 此处只证明已知后代停止；其它并行用例的进程变化不影响该 PID 的终态。
+        try:
+            process = _PosixProcessTable().info(helper_pid)
+        except (ProcessLookupError, FileNotFoundError):
+            process = None
         assert process is None or process.zombie
         value = (folder / "helper-value").read_bytes()
         time.sleep(0.08)

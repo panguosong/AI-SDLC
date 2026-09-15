@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,7 +87,10 @@ from ai_sdlc.core.loop_models import (
     utc_now_iso,
     validate_decision_identity,
 )
-from ai_sdlc.core.loop_resource_lock import _stage_write_guard
+from ai_sdlc.core.loop_resource_lock import (
+    _ImplementationWriteLockError,
+    _stage_write_guard,
+)
 from ai_sdlc.core.loop_review_service import read_verified_implementation_close
 from ai_sdlc.core.loop_stage_input import (
     preserve_stage_run,
@@ -130,7 +134,13 @@ def start_frontend_evidence_loop(
         return _start_frontend_evidence_loop_locked(
             options, review_input_validator=review_input_validator
         )
-    with _stage_write_guard(options.root.resolve(), "frontend-evidence", loop_id):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_stage_write_guard(options.root.resolve(), 'frontend-evidence', loop_id))
+        except _ImplementationWriteLockError as exc:
+            return _blocked_result(str(exc), loop_id=loop_id).model_copy(
+                update={"dry_run": options.dry_run}
+            )
         return _start_frontend_evidence_loop_locked(
             replace(options, loop_id=loop_id),
             review_input_validator=review_input_validator,
@@ -416,7 +426,11 @@ def skip_frontend_evidence_loop(
         return _skip_frontend_evidence_loop_locked(
             options, review_input_validator=review_input_validator
         )
-    with _stage_write_guard(options.root.resolve(), "frontend-evidence", loop_id):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_stage_write_guard(options.root.resolve(), 'frontend-evidence', loop_id))
+        except _ImplementationWriteLockError as exc:
+            return _blocked_result(str(exc), loop_id=loop_id)
         return _skip_frontend_evidence_loop_locked(
             replace(options, loop_id=loop_id),
             review_input_validator=review_input_validator,
@@ -622,7 +636,11 @@ def close_frontend_evidence_loop(
             reviewed_artifacts=reviewed_artifacts,
         )
     loop_id = run_path.parent.name
-    with _stage_write_guard(root, "frontend-evidence", loop_id):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_stage_write_guard(root, 'frontend-evidence', loop_id))
+        except _ImplementationWriteLockError as exc:
+            return _blocked_result(str(exc), loop_id=loop_id)
         return _close_frontend_evidence_loop_locked(
             replace(options, loop_id=loop_id),
             review_input_validator=review_input_validator,

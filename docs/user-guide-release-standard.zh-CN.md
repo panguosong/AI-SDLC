@@ -46,7 +46,7 @@
 - Windows 使用 PowerShell 语法；macOS 与 Linux 使用各自真实可用的 shell 命令，不得把一种语法机械复制到另一平台。
 - Windows 正常入口优先使用外部 stable shim 或 `python -m ai_sdlc`。运行时目录内 direct `Scripts\\ai-sdlc.exe` 的自动更新限制、迁移提示和显式更新非零行为必须在相关路线中就地说明。
 - `-AddToPath` 或 `--add-to-path` 成功后，重开终端的主路径必须是裸 `ai-sdlc`；当前窗口的 module 命令仅作为明确标注的安装后或排障入口。
-- Linux 在线路线中，已有 Python 3.11+ 的路径保持发行版无关；缺少 Python 3.11+ 的自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc。其他缺少 Python 的 amd64/x86_64 + glibc 主机必须就地指向路线 6/12 的 `ai-sdlc-offline-3.1.0-linux-amd64.tar.gz`；非 AMD64 或非 glibc 主机必须明确 v3.1.0 没有兼容的 Linux 发行资产，且不得使用路线 6/12 的 AMD64 离线包。该边界必须同时出现在每条 Linux 在线路线的 `prerequisites` 和 `recover`，不得用共享文本或“同上”替代。
+- Linux 在线路线中，已有 Python 3.11+ 的路径保持发行版无关；缺少 Python 3.11+ 的自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc。其他缺少 Python 的 amd64/x86_64 + glibc 主机必须就地指向路线 6/12 的 `ai-sdlc-offline-3.2.0-linux-amd64.tar.gz`；非 AMD64 或非 glibc 主机必须明确 v3.2.0 没有兼容的 Linux 发行资产，且不得使用路线 6/12 的 AMD64 离线包。该边界必须同时出现在每条 Linux 在线路线的 `prerequisites` 和 `recover`，不得用共享文本或“同上”替代。
 
 ## 初始化与已有项目保护
 
@@ -80,7 +80,7 @@
 
 ## 安装后的量化使用说明
 
-`v3.1.0` 手册须保留安装后的普通 `run` 入口，说明 Result / Next 与宿主 Agent 的分工：`run` 只读路由，宿主按 Next 新建量化 Loop、准备冻结输入和独立判断，用户不手填 JSON、评分或预算。该说明可放在公共概念章节，不改变任何路线的七个独立步骤。
+`v3.2.0` 手册须保留安装后的普通 `run` 入口，说明 Result / Next 与宿主 Agent 的分工：`run` 只读路由，宿主按 Next 新建量化 Loop、准备冻结输入和独立判断，用户不手填 JSON、评分或预算。该说明可放在公共概念章节，不改变任何路线的七个独立步骤。
 
 说明必须覆盖五 Loop、六个评分视角、原始计数与区间评分、预测和实际证据的分离，以及原时间窗口、两批候选与 R1/R2 的上限。代码成果视角仅用于有剩余批次的可选改善比较，Local PR 只评价当前暂存树；预测不替代实际审查或正常 Close，旧实例不迁移。不得把有限候选择路写成全局最优、自动完成或业务 ROI 保证。
 

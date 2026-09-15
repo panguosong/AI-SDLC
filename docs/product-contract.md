@@ -1,12 +1,12 @@
-# AI-SDLC 3.1.0 产品能力契约
+# AI-SDLC 3.2.0 产品能力契约
 
-本文为 `v3.1.0` 发布文档，描述本版代码的能力与边界；正式发布、安装资产及平台验收是否完成，以对应 Release 和发布回执为准。
+本文为 `v3.2.0` 发布文档，描述本版代码的能力与边界；正式发布、安装资产及平台验收是否完成，以对应 Release 和发布回执为准。
 
 ## 产品定位
 
 AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负责读取项目事实、固化工程规则、组织可恢复流水线、运行质量门禁，并把每次推进转化为可验证的本地证据。
 
-项目地址：<https://github.com/SinclairPan/Ai_AutoSDLC>
+项目地址：<https://github.com/sinclairpan0720/Ai_AutoSDLC>
 
 ## 核心原则
 
@@ -121,12 +121,12 @@ AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负�
 
 ## 本版发行目标与历史版本
 
-### v3.1.0 发行目标
+### v3.2.0 发行目标
 
-- 目标源码版本及安装后输出：`3.1.0`；目标正式 tag：`v3.1.0`；
-- Git 仓库：`https://github.com/SinclairPan/Ai_AutoSDLC`；
+- 目标源码版本及安装后输出：`3.2.0`；目标正式 tag：`v3.2.0`；
+- Git 仓库：`https://github.com/sinclairpan0720/Ai_AutoSDLC`；
 - 安装与校验入口见 `USER_GUIDE.zh-CN.md` 的完整 12 条路线；只有对应正式 Release、资产和摘要已就绪后才能按正式渠道安装；
-- 目标离线产物：`ai-sdlc-offline-3.1.0-windows-amd64.zip`、`ai-sdlc-offline-3.1.0-macos-arm64.tar.gz`、`ai-sdlc-offline-3.1.0-linux-amd64.tar.gz`，每个归档同时提供同名 `.sha256`；
+- 目标离线产物：`ai-sdlc-offline-3.2.0-windows-amd64.zip`、`ai-sdlc-offline-3.2.0-macos-arm64.tar.gz`、`ai-sdlc-offline-3.2.0-linux-amd64.tar.gz`，每个归档同时提供同名 `.sha256`；
 - 本版范围为五 Loop / 六视角的有界模拟量化、原生实际评审与关闭接线，以及对应公开文档和安装包；不因源码测试或协议夹具通过就宣称模型效果、全平台安装或发行已完成。
 
 版本号、tag、下载链接、资产名、摘要与安装后版本必须对应同一发行候选。Windows AMD64、macOS Apple Silicon、Linux AMD64 的在线/离线与新建/已有项目路径必须独立验证。Linux 有 Python 3.11+ 的在线路径保持发行版无关；缺少 Python 时，在线自动 bootstrap 只认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc，其他兼容 AMD64/glibc 主机使用本版 Linux 离线包；非 AMD64 或非 glibc 主机没有兼容 Linux 发行资产。
@@ -135,7 +135,8 @@ AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负�
 
 ### 历史版本事实
 
-- `v3.0.1` 是维护补丁版本，仅启用面向全新用户的 12 条安装、初始化与恢复路线并修正文档合同，运行时能力与 `v3.0.0` 保持一致；其版本绑定的安装包和指南不能作为 `v3.1.0` 安装证据；
+- `v3.1.0` 引入五 Loop / 六视角的有界模拟量化，预测评分与实际验收保持分开；该版本的安装包不能作为 `v3.2.0` 的安装证据；
+- `v3.0.1` 是维护补丁版本，仅启用面向全新用户的 12 条安装、初始化与恢复路线并修正文档合同，运行时能力与 `v3.0.0` 保持一致；其版本绑定的安装包和指南不能作为 `v3.2.0` 安装证据；
 - `v2.0.0` 相对 `v1.0.2` 删除了旧审查治理入口，历史升级说明见 `docs/v2-migration.zh-CN.md`；
 - `v3.0.0` 删除了 `v2.0.0` 中公开但已退出产品边界的旧顶层命令；升级说明见 `docs/v3-migration.zh-CN.md`。
 

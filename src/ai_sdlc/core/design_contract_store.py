@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -25,6 +26,16 @@ from ai_sdlc.core.stable_file_read import read_stable_bytes, read_stable_text
 from ai_sdlc.utils.helpers import AI_SDLC_DIR
 
 _SAFE_EXPLICIT_LOOP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+DESIGN_CHECK_PENDING = "design-check-publication.pending.json"
+
+
+def require_design_check_published(loop_dir: Path) -> None:
+    """未完成的多文件写入只能由同 Loop 的 check 恢复，不能用于后续判断。"""
+    pending = loop_dir / DESIGN_CHECK_PENDING
+    if pending.exists() or pending.is_symlink():
+        raise ValueError(
+            "design-contract-publication-pending: rerun check for the same loop"
+        )
 
 
 def design_contract_input_digest(contract_input: DesignContractInput) -> str:
@@ -79,13 +90,45 @@ def build_contract_input(
     loop_id: str,
     work_item_dir: Path,
     requirement_loop_id: str,
+    decision_mode: str = "legacy",
+    decision_capability: str | None = None,
+    verification_contract: str = "",
+    captured_artifacts: dict[str, bytes] | None = None,
 ) -> DesignContractInput:
     """Build a persisted input model from resolved paths."""
 
     spec_path = work_item_dir / "spec.md"
     plan_path = work_item_dir / "plan.md"
     tasks_path = work_item_dir / "tasks.md"
-    return DesignContractInput(
+    artifacts = design_contract_artifacts(root, loop_id)
+    previous = (
+        DesignContractInput.model_validate_json(
+            read_stable_bytes(root, artifacts.input_path)
+        )
+        if artifacts.input_path.is_file()
+        else None
+    )
+    reference = verification_contract or (
+        previous.verification_contract_ref if previous is not None else ""
+    )
+    binding = {}
+    content = None
+    if reference:
+        from ai_sdlc.core.counterexample_models import (
+            VERIFICATION_CAPABILITY,
+            project_relative_path,
+        )
+
+        project_relative_path(reference)
+        content = read_stable_bytes(root, root / reference)
+        digest = hashlib.sha256(content).hexdigest()
+        capture = artifacts.loop_dir / f"verification-contract-{digest}.json"
+        binding = {
+            "verification_capability": VERIFICATION_CAPABILITY,
+            "verification_contract_ref": repo_relative_path(root, capture),
+            "verification_contract_digest": digest,
+        }
+    contract_input = DesignContractInput(
         loop_id=loop_id,
         work_item_id=work_item_dir.name,
         work_item_path=repo_relative_path(root, work_item_dir),
@@ -95,8 +138,298 @@ def build_contract_input(
         plan_digest=_document_digest(read_stable_bytes(root, plan_path)),
         tasks_path=repo_relative_path(root, tasks_path),
         tasks_digest=_document_digest(read_stable_bytes(root, tasks_path)),
-        requirement_loop_id=requirement_loop_id.strip(),
+        requirement_loop_id=requirement_loop_id.strip()
+        or (
+            previous.requirement_loop_id
+            if previous is not None and previous.verification_capability is not None
+            else ""
+        ),
+        decision_mode=decision_mode,
+        decision_capability=decision_capability,
+        **binding,
     )
+    if content is not None:
+        staged = {contract_input.verification_contract_ref: content}
+        _, material = read_verification_contract(
+            root, contract_input, staged_content=staged
+        )
+        if captured_artifacts is not None:
+            captured_artifacts.update(material)
+    return contract_input
+
+
+def verification_binding(stage_input) -> dict[str, str | None]:
+    """沿原输入传递能力；不从报告结论推断是否必达。"""
+    return {
+        name: getattr(stage_input, name)
+        for name in (
+            "verification_capability",
+            "verification_contract_ref",
+            "verification_contract_digest",
+        )
+    }
+
+
+def read_verification_contract(
+    root: Path,
+    frozen_input,
+    captured_artifacts: Mapping[str, bytes] | None = None,
+    *,
+    staged_content: Mapping[str, bytes] | None = None,
+):
+    """复用同一完整合同和原条目核验，返回审查必须捕获的全部内容。"""
+    design_id = getattr(frozen_input, "design_contract_loop_id", frozen_input.loop_id)
+    if design_id:
+        require_design_check_published(
+            design_contract_artifacts(root, design_id).loop_dir
+        )
+    from ai_sdlc.core.counterexample_models import (
+        VerificationContract,
+        obligation_task_owners,
+        project_relative_path,
+        validate_contract_sources,
+    )
+    from ai_sdlc.core.loop_stage_input import validate_verification_identity
+
+    validate_verification_identity(frozen_input)
+    if frozen_input.verification_capability is None:
+        return None, {}
+    expected = repo_relative_path(
+        root,
+        design_contract_artifacts(root, design_id).loop_dir
+        / f"verification-contract-{frozen_input.verification_contract_digest}.json",
+    )
+    if frozen_input.verification_contract_ref != expected:
+        raise ValueError("counterexample-contract-owner-mismatch")
+    material: dict[str, bytes] = {}
+
+    def read(path: str) -> bytes:
+        project_relative_path(path)
+        if path in material:
+            return material[path]
+        if captured_artifacts is not None:
+            if path not in captured_artifacts:
+                raise ValueError(f"counterexample-captured-source-missing: {path}")
+            content = captured_artifacts[path]
+        elif staged_content is not None and path in staged_content:
+            content = staged_content[path]
+        else:
+            content = read_stable_bytes(root, root / path)
+        material[path] = content
+        return content
+
+    raw = read(expected)
+    if hashlib.sha256(raw).hexdigest() != frozen_input.verification_contract_digest:
+        raise ValueError("counterexample-contract-digest-mismatch")
+    contract = VerificationContract.model_validate_json(raw)
+    if contract.work_item_id != frozen_input.work_item_id:
+        raise ValueError("counterexample-contract-work-item-mismatch")
+    from ai_sdlc.core.design_contract_checks import _TASK_ID, _task_sections
+
+    tasks_content = read(frozen_input.tasks_path)
+    task_ids = tuple(
+        task_id
+        for section in _task_sections(tasks_content.decode("utf-8"))
+        if (task_id := next(iter(_TASK_ID.findall(section)), ""))
+    )
+    if isinstance(frozen_input, DesignContractInput):
+        if _document_digest(tasks_content) != frozen_input.tasks_digest:
+            raise ValueError("counterexample-original-tasks-digest-mismatch")
+    elif getattr(frozen_input, "task_scopes", None):
+        if set(task_ids) != set(frozen_input.task_scopes):
+            raise ValueError("counterexample-original-task-set-mismatch")
+    else:
+        # 历史 Implementation 输入可能尚无 task_scopes，必须回到原设计全文确认。
+        upstream = DesignContractInput.model_validate_json(
+            read(
+                repo_relative_path(
+                    root, design_contract_artifacts(root, design_id).input_path
+                )
+            )
+        )
+        if (
+            upstream.tasks_path != frozen_input.tasks_path
+            or _document_digest(tasks_content) != upstream.tasks_digest
+        ):
+            raise ValueError("counterexample-original-tasks-digest-mismatch")
+    obligation_task_owners(contract, task_ids=task_ids)
+    entries: dict[str, dict[str, bytes]] = {}
+    for source in contract.sources:
+        content = read(source.path)
+        if source.namespace == "task":
+            if source.path != frozen_input.tasks_path:
+                raise ValueError("counterexample-original-task-path-mismatch")
+            entry = _verification_task_entry(content, source.task_id, source.locator)
+        else:
+            if source.namespace == "spec" and source.path != frozen_input.spec_path:
+                raise ValueError("counterexample-original-spec-path-mismatch")
+            if source.namespace == "requirement":
+                _verification_requirement_source(root, frozen_input, source, read)
+            entry = _verification_spec_entry(content, source.locator)
+        entries.setdefault(source.path, {})[source.locator] = entry
+    budget = read(contract.budget_ref.path)
+    if hashlib.sha256(budget).hexdigest() != contract.budget_ref.sha256:
+        raise ValueError("counterexample-original-budget-digest-mismatch")
+    if (
+        "/loops/implementation/" in contract.budget_ref.path
+        or "/loops/design-contract/" in contract.budget_ref.path
+    ):
+        raise ValueError("counterexample-future-stage-budget-forbidden")
+    validate_contract_sources(contract, material, entries)
+    if captured_artifacts is None:
+        for path, content in material.items():
+            if staged_content is not None and path in staged_content:
+                continue
+            if read_stable_bytes(root, root / path) != content:
+                raise ValueError("counterexample-contract-source-drift")
+    return contract, material
+
+
+def _verification_spec_entry(content: bytes, locator: str) -> bytes:
+    """条目仅来自原规范：唯一标题正文或唯一编号需求行。"""
+    from ai_sdlc.core.design_contract_checks import (
+        _contract_source_text,
+        _without_fenced_blocks,
+    )
+
+    text = content.decode("utf-8")
+    lines = _without_fenced_blocks(text).splitlines()
+    headings = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"#{1,6}\s+" + re.escape(locator) + r"\s*", line)
+    ]
+    if len(headings) == 1:
+        start = headings[0] + 1
+        end = next(
+            (i for i in range(start, len(lines)) if re.match(r"^#{1,6}\s", lines[i])),
+            len(lines),
+        )
+        entry = "\n".join(lines[start:end]).strip("\n").encode("utf-8")
+        if not entry.strip():
+            raise ValueError("counterexample-original-spec-entry-empty")
+        return entry
+    pattern = re.compile(
+        r"^\s*[-*]\s+(?:\*\*)?" + re.escape(locator) + r"(?:\*\*)?\s*[:：]\s*(.+)$"
+    )
+    matches = [
+        match.group(1)
+        for line in _contract_source_text(text).splitlines()
+        if (match := pattern.match(line))
+    ]
+    if len(matches) != 1 or headings:
+        raise ValueError("counterexample-original-spec-entry-unavailable-or-duplicate")
+    return matches[0].encode("utf-8")
+
+
+def _verification_task_entry(content: bytes, task_id: str, locator: str) -> bytes:
+    from ai_sdlc.core.implementation_loop import (
+        _TASK_ID,
+        _task_list_after_label,
+        _task_sections,
+    )
+
+    match = re.fullmatch(re.escape(task_id) + r"/acceptance/([1-9][0-9]*)", locator)
+    sections = [
+        section
+        for section in _task_sections(content.decode("utf-8"))
+        if next(iter(_TASK_ID.findall(section)), "") == task_id
+    ]
+    if match is None or len(sections) != 1:
+        raise ValueError("counterexample-original-task-entry-unavailable")
+    values = _task_list_after_label(sections[0], "验收标准", "acceptance")
+    index = int(match.group(1)) - 1
+    if index >= len(values):
+        raise ValueError("counterexample-original-task-entry-unavailable")
+    return values[index].encode("utf-8")
+
+
+def _verification_requirement_source(root, frozen_input, source, read):
+    from ai_sdlc.core.loop_stage_decision_service import parse_stage_simulation_context
+    from ai_sdlc.core.loop_stage_input import stage_input_identity
+    from ai_sdlc.core.requirement_loop import (
+        RequirementFreeze,
+        RequirementIntake,
+        _requirement_intake_digest,
+    )
+
+    design_id = getattr(frozen_input, "design_contract_loop_id", None)
+    if design_id is not None:
+        upstream = DesignContractInput.model_validate_json(
+            read(
+                repo_relative_path(
+                    root, design_contract_artifacts(root, design_id).input_path
+                )
+            )
+        )
+    else:
+        upstream = frozen_input
+    if source.loop_id != upstream.requirement_loop_id:
+        raise ValueError("counterexample-original-requirement-loop-mismatch")
+    directory = Path(".ai-sdlc/loops/requirement") / validate_explicit_loop_id(
+        source.loop_id
+    )
+    context = parse_stage_simulation_context(
+        read((directory / "decision-context.json").as_posix())
+    )
+    intake = RequirementIntake.model_validate_json(
+        read((directory / "requirement-intake.json").as_posix())
+    )
+    run = LoopRun.model_validate_json(read((directory / "loop-run.json").as_posix()))
+    freeze = RequirementFreeze.model_validate_json(
+        read((directory / "requirement-freeze.json").as_posix())
+    )
+    if (
+        context.loop_id != source.loop_id
+        or context.loop_type != "requirement"
+        or run.status != "closed"
+        or run.loop_id != source.loop_id
+        or intake.loop_id != source.loop_id
+        or (intake.work_item_id and intake.work_item_id != frozen_input.work_item_id)
+        or context.capability != "stage-simulation-v1"
+        or context.phase != "review_sealed"
+        or run.loop_type != "requirement"
+        or run.decision_capability != context.capability
+        or intake.decision_capability != context.capability
+        or freeze.loop_id != source.loop_id
+        or freeze.artifact_kind != "requirement-freeze"
+        or freeze.intake_path != (directory / "requirement-intake.json").as_posix()
+        or freeze.intake_digest != _requirement_intake_digest(intake)
+        or freeze.acceptance_count != len(intake.acceptance_criteria)
+        or context.implementation_input_digest
+        != stage_input_identity("requirement", intake)
+    ):
+        raise ValueError("counterexample-original-requirement-identity-mismatch")
+    profiles = [
+        item for item in context.contracts if item.profile_id == source.profile_id
+    ]
+    if len(profiles) != 1:
+        raise ValueError("counterexample-original-profile-missing")
+    profile = profiles[0]
+    obligations = [
+        item
+        for item in profile.goal_contract.obligations
+        if item.id == source.obligation_id and item.goal_id == source.goal_id
+    ]
+    if len(obligations) != 1 or source.goal_id not in {
+        item.id for item in profile.goal_contract.goals
+    }:
+        raise ValueError("counterexample-original-obligation-mismatch")
+    criteria = [item for item in profile.criteria if item.id == source.criterion_id]
+    if source.criterion_id and (
+        len(criteria) != 1
+        or source.goal_id not in {share.goal_id for share in criteria[0].goal_shares}
+    ):
+        raise ValueError("counterexample-original-criterion-mismatch")
+    originals = [
+        item
+        for item in context.sources
+        if item.id == obligations[0].source_ref
+        and item.path == source.path
+        and item.sha256 == source.sha256
+    ]
+    if len(originals) != 1 or source.path.startswith(".ai-sdlc/loops/"):
+        raise ValueError("counterexample-original-business-source-mismatch")
 
 
 def _document_digest(content: bytes) -> str:
@@ -129,7 +462,10 @@ def resolve_work_item_dir(root: Path, work_item: str) -> tuple[Path, str]:
 
     value = work_item.strip() or _current_work_item_path(root)
     if not value:
-        return root / "specs", "Pass --wi specs/<work-item> or link a current work item."
+        return (
+            root / "specs",
+            "Pass --wi specs/<work-item> or link a current work item.",
+        )
     try:
         path = _resolve_repo_relative_path(root, value)
     except ValueError:
@@ -198,11 +534,9 @@ def _resolve_design_contract_loop_run_identity(
         )
         if blocker:
             return current_path, safe_loop_id, blocker
-        if (
-            current_loop_id != safe_loop_id
-            or current_path.resolve(strict=False)
-            != artifacts.loop_run_path.resolve(strict=False)
-        ):
+        if current_loop_id != safe_loop_id or current_path.resolve(
+            strict=False
+        ) != artifacts.loop_run_path.resolve(strict=False):
             return (
                 artifacts.loop_run_path,
                 safe_loop_id,
@@ -233,16 +567,28 @@ def _current_design_contract_loop_run_path(root: Path) -> tuple[Path, str, str]:
         )
     path_text = payload.get("loop_run_path")
     if not isinstance(path_text, str) or not path_text.strip():
-        return pointer_path, "", "Current design-contract pointer is missing loop_run_path."
+        return (
+            pointer_path,
+            "",
+            "Current design-contract pointer is missing loop_run_path.",
+        )
     path = Path(path_text)
     if path.is_absolute() or ".." in path.parts:
-        return pointer_path, "", "Current design-contract pointer path must be project-relative."
+        return (
+            pointer_path,
+            "",
+            "Current design-contract pointer path must be project-relative.",
+        )
     canonical_root = root.resolve(strict=False)
     candidate = canonical_root / path
     try:
         candidate.resolve(strict=False).relative_to(canonical_root)
     except ValueError:
-        return pointer_path, "", "Current design-contract pointer path must stay within project."
+        return (
+            pointer_path,
+            "",
+            "Current design-contract pointer path must stay within project.",
+        )
     canonical = design_contract_artifacts(canonical_root, safe_loop_id).loop_run_path
     if candidate != canonical:
         return (
@@ -256,6 +602,7 @@ def _current_design_contract_loop_run_path(root: Path) -> tuple[Path, str, str]:
 def read_loop_run(path: Path, *, root: Path | None = None) -> LoopRun:
     """Read and validate a design-contract loop-run artifact."""
 
+    require_design_check_published(path.parent)
     try:
         content = (
             read_stable_text(root, path, encoding="utf-8")
@@ -264,7 +611,9 @@ def read_loop_run(path: Path, *, root: Path | None = None) -> LoopRun:
         )
         payload = json.loads(content)
     except (json.JSONDecodeError, OSError) as exc:
-        raise ValueError(f"Design-contract loop-run.json is not readable: {exc}") from exc
+        raise ValueError(
+            f"Design-contract loop-run.json is not readable: {exc}"
+        ) from exc
     try:
         loop_run = LoopRun.model_validate(payload)
     except ValidationError as exc:
@@ -294,6 +643,7 @@ def _design_contract_loop_identity_issue(
 def read_report(path: Path) -> DesignContractReport:
     """Read and validate a design-contract report artifact."""
 
+    require_design_check_published(path.parent)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
@@ -307,6 +657,7 @@ def read_report(path: Path) -> DesignContractReport:
 def _read_close(path: Path) -> DesignContractClose:
     """Read and validate a design-contract close artifact."""
 
+    require_design_check_published(path.parent)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
@@ -331,7 +682,11 @@ def repo_relative_path(root: Path, path: Path) -> str:
     """Render a path relative to the repository root when possible."""
 
     try:
-        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+        return (
+            path.resolve(strict=False)
+            .relative_to(root.resolve(strict=False))
+            .as_posix()
+        )
     except ValueError:
         return path.as_posix()
 

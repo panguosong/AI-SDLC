@@ -18,6 +18,10 @@ def test_build_wheel_includes_templates_and_entry_points(tmp_path: Path) -> None
     with zipfile.ZipFile(wheel_path) as archive:
         names = set(archive.namelist())
 
+        assert archive.read("ai_sdlc/LICENSE") == (
+            Path(packaging_backend.__file__).resolve().parent / "LICENSE"
+        ).read_bytes()
+
         assert "ai_sdlc/templates/spec-template.md" in names
         assert "ai_sdlc/templates/plan-template.md" in names
         assert "ai_sdlc/templates/tasks-template.md" in names

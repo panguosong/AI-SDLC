@@ -708,3 +708,145 @@ def test_actual_obligations_override_perfect_forecast(current_tree, status, expe
     assert actual.evaluation.q == (100 if status == "PASS" else 0)
     assert actual.selected_route_id == "current-staged-tree"
     assert context.selection.scores["current-staged-tree"].s_low == 100
+
+
+def _released_quantified_r2(tmp_path, monkeypatch, second_status):
+    from ai_sdlc.core import pr_review_service as service
+    from tests.integration.test_stage_pr_review_pipeline import (
+        LOOP_ID,
+        REVIEW_ID,
+        _cli,
+        _payload,
+        _ready,
+        _record_actual,
+    )
+
+    root = tmp_path.resolve()
+    first = _ready(root)
+    directory = root / ".ai-sdlc/reviews/pr" / REVIEW_ID
+    assert _record_actual(root, first, "UNKNOWN")["status"] == "needs_fix"
+    first_raw = (directory / "review-outcome-round-1.json").read_bytes()
+    context_raw = (directory / "decision-context.json").read_bytes()
+    (root / "README.md").write_text(
+        "# Repaired output\nThe corrected ordinary result is documented.\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", "README.md")
+    read_originals = service._read_pr_formal_originals
+
+    def released_production(reader, run, pack, **options):
+        originals = read_originals(reader, run, pack, **options)
+        # v3.1.0 rerun 只保存 finding 映射，没有新增的正式原件生产和 pack 引用。
+        # 在生产边界表示该已发布格式，不删除现成链；判断、原件读取及 outcome writer 不替换。
+        return None if options.get("require_repair") else originals
+
+    with monkeypatch.context() as producer:
+        producer.setattr(service, "_read_pr_formal_originals", released_production)
+        assert service.rerun_pr_review(root).status == "started"
+    history = json.loads((directory / "finding-history.json").read_bytes())
+    pack = json.loads((directory / "review-pack.json").read_bytes())
+    assert "formal_review_originals" not in history
+    assert not any(ref.startswith("pr-formal-originals") for ref in pack["test_results_refs"])
+    first_manifest = json.loads(first_raw)["simulation"]["manifest"]
+    for name in ("diff.patch", "review-pack.json"):
+        key = (directory / name).relative_to(root).as_posix()
+        assert hashlib.sha256((directory / name).read_bytes()).hexdigest() != first_manifest[key]
+    verified = _payload(_cli(
+        root, "pr-review", "verify", "--json", "--", sys.executable, "-c",
+        "from pathlib import Path;assert 'corrected ordinary result' in Path('README.md').read_text()",
+    ))
+    assert verified["status"] == "ready"
+    verification_key = (directory / "verification-evidence.json").relative_to(root).as_posix()
+    assert hashlib.sha256((directory / "verification-evidence.json").read_bytes()).hexdigest() != first_manifest[verification_key]
+    second = _payload(_cli(
+        root, "loop", "review", "--type", "local-pr-review", "--loop-id", LOOP_ID, "--json",
+    ))
+    assert second["round_number"] == 2 and second["input_digest"] != first["input_digest"]
+    recorded = _record_actual(root, second, second_status)
+    assert recorded["status"] == "passed" if second_status == "PASS" else recorded["status"] in {"blocked", "needs_user"}
+    assert (directory / "review-outcome-round-1.json").read_bytes() == first_raw
+    assert (directory / "decision-context.json").read_bytes() == context_raw
+    return root, directory, second
+
+
+@pytest.mark.parametrize("second_status", ["PASS", "FAIL"])
+def test_released_quantified_r2_keeps_native_delivery_contract(tmp_path, monkeypatch, second_status):
+    from ai_sdlc.cli.loop_review_cmd import resolve_review_input
+    from ai_sdlc.core import pr_review_service as service
+    from tests.integration.test_stage_pr_review_pipeline import (
+        LOOP_ID,
+        REVIEW_ID,
+        _cli,
+        _payload,
+    )
+
+    root, directory, second = _released_quantified_r2(tmp_path, monkeypatch, second_status)
+    captured = {}
+    reviewed = resolve_review_input(
+        root, loop_type="local-pr-review", loop_id=LOOP_ID,
+        review_round_number=2, captured_artifacts=captured, capture_all=True,
+    )
+    assert reviewed.input_digest == second["input_digest"]
+    first_path = directory / "review-outcome-round-1.json"
+    first_key = first_path.relative_to(root).as_posix()
+    assert captured[first_key] == first_path.read_bytes()
+    # 显式 review 的捕获按其原 run 定位，不要求仅当前指针入口使用的额外文件。
+    run_key = (directory / "review-run.json").relative_to(root).as_posix()
+    run = service.ReviewRun.model_validate_json(captured[run_key])
+    pack = service._load_review_pack(root, run.review_pack_path, reviewed_artifacts=captured)
+    service.read_pr_recovery_originals(root, run, pack, reviewed_artifacts=captured).assert_unchanged()
+    single = _payload(_cli(
+        root, "loop", "review", "--type", "local-pr-review", "--loop-id", LOOP_ID,
+        "--expect-digest", second["input_digest"], "--read-path", "README.md", "--json",
+    ))
+    assert single["review_snapshot"]["sha256"] == hashlib.sha256((root / "README.md").read_bytes()).hexdigest()
+
+    original_bytes = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in (root / ".ai-sdlc").rglob("*") if path.is_file()
+    }
+    # 原格式可读取不等于可以恢复或重新产生 R2；缺捕获也不能从仍存在的现场补齐。
+    with pytest.raises(ValueError, match="originals were not preserved"):
+        service._read_pr_formal_originals(
+            service._RecoveryOriginalReader(root, captured), run, pack, require_preserved=True,
+        )
+    with pytest.raises(ValueError, match="completed, exhausted"):
+        service.read_pr_recovery_originals(root, run, pack, require_formal_repair=True)
+    for key in (
+        first_key,
+        (directory / "decision-context.json").relative_to(root).as_posix(),
+        (directory / "diff.patch").relative_to(root).as_posix(),
+    ):
+        for replacement in (None, b"{}"):
+            damaged = dict(captured)
+            if replacement is None:
+                del damaged[key]
+            else:
+                damaged[key] = replacement
+            with pytest.raises(ValueError):
+                service.read_pr_recovery_originals(root, run, pack, reviewed_artifacts=damaged)
+    assert {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in (root / ".ai-sdlc").rglob("*") if path.is_file()
+    } == original_bytes
+
+    original_head = _git(root, "rev-parse", "HEAD")
+    committed = _cli(root, "pr-review", "commit", "--message", "reviewed released-format repair", "--json")
+    closed = _cli(
+        root, "pr-review", "close", "--review-id", REVIEW_ID, "--loop-id", LOOP_ID,
+        "--expect-review-digest", second["input_digest"], "--json",
+    )
+    if second_status == "PASS":
+        assert _payload(committed)["status"] == "ready"
+        assert _payload(closed)["status"] == "closed"
+        proof = service.read_verified_delivery_commit(root)
+        assert proof.current_commit == _git(root, "rev-parse", "HEAD")
+        assert proof.review_input_digest == second["input_digest"]
+        assert proof.staged_tree == _git(root, "rev-parse", "HEAD^{tree}")
+    else:
+        assert committed.returncode != 0 and json.loads(committed.stdout)["status"] == "blocked"
+        assert closed.returncode != 0 and json.loads(closed.stdout)["status"] == "blocked"
+        assert _git(root, "rev-parse", "HEAD") == original_head
+        assert not (directory / "final-report.md").exists()
+    assert first_path.read_bytes() == original_bytes[first_key]
+    assert not (directory / "review-outcome-round-3.json").exists()

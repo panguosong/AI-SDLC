@@ -993,7 +993,7 @@ def test_release_docs_consistency_blocks_when_current_identity_is_missing(
     blockers = collect_constraint_blockers(tmp_path)
 
     assert any("release docs consistency drift" in item for item in blockers)
-    assert any("README.md" in item and "3.1.0" in item for item in blockers)
+    assert any("README.md" in item and "3.2.0" in item for item in blockers)
 
 
 def test_release_docs_consistency_passes_when_current_surfaces_align(
@@ -1091,7 +1091,7 @@ def test_beginner_guide_blocks_old_source_and_upgrade_paths(tmp_path: Path) -> N
     guide.write_text(
         guide.read_text(encoding="utf-8")
         + "\n## 老版本升级\n\n从源码运行：`uv sync` 后使用 `@main`。\n"
-        + "https://github.com/SinclairPan/Ai_AutoSDLC/"
+        + "https://github.com/sinclairpan0720/Ai_AutoSDLC/"
         "releases/download/v1.0.4/ai-sdlc-offline-1.0.4-linux-amd64.tar.gz\n",
         encoding="utf-8",
     )

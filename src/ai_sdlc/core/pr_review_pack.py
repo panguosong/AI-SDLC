@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import hashlib
+import json
 import os
+import re
 import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -78,6 +82,11 @@ class ReviewPackBuildOptions:
     max_file_bytes: int = 1_000_000
     clear_stale_artifacts: bool = True
     preserve_resolution_history: bool = False
+    expected_repair_source: SourceAdapterResolution | None = None
+    pre_publish_guard: Callable[[], None] | None = None
+    publication_recorder: Callable[[Path, bytes], None] | None = None
+    rejected_feedback_ref: dict[str, str] | None = None
+    workspace_adoption_ref: dict[str, str] | None = None
 
 
 class ReviewPackBuildResult(BaseModel):
@@ -192,8 +201,60 @@ def analyze_pr_review_redaction(
 def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
     """Build a bounded local PR review pack from Git state and policy."""
 
+    # 拒绝未发布恢复引用，不触碰原评审或发布新材料。
+    if options.rejected_feedback_ref is not None or options.workspace_adoption_ref is not None:
+        return ReviewPackBuildResult(
+            status=ReviewPackBuildStatus.BLOCKED,
+            review_id=options.review_id, loop_id=options.loop_id, review_dir="",
+            blocker="Historical provider recovery references are unsupported.",
+            next_action="Preserve the original review and use only a supported normal review pack.",
+        )
+
     root = options.root.resolve()
     store = LoopArtifactStore(root)
+    pending_publication: dict[Path, bytes] = {}
+
+    def publish_json(path: Path, payload: BaseModel) -> Path:
+        # 有发布归属绑定时先准备原序列化字节；验证拒绝不能覆盖原包或制造发布记录。
+        if options.publication_recorder is not None:
+            raw = (json.dumps(payload.model_dump(mode="json"), ensure_ascii=False,
+                              indent=2, sort_keys=False) + "\n").encode("utf-8")
+            pending_publication[path] = raw
+            return path
+        return store.write_json_artifact(path, payload)
+
+    def publish_markdown(path: Path, content: str) -> Path:
+        if options.publication_recorder is not None:
+            text = content if content.endswith("\n") else content + "\n"
+            pending_publication[path] = text.encode("utf-8")
+            return path
+        return store.write_markdown_artifact(path, content)
+
+    def publication_bytes(path: Path) -> bytes:
+        return pending_publication[path] if options.publication_recorder is not None else path.read_bytes()
+
+    def check_publication_guard() -> None:
+        if options.pre_publish_guard is not None:
+            try:
+                options.pre_publish_guard()
+            except (ValueError, OSError) as exc:
+                raise GitError(f"Review publication guard rejected: {exc}") from exc
+
+    if options.expected_repair_source is not None and (
+        options.clear_stale_artifacts
+        or not options.preserve_resolution_history
+        or options.diff_source != "local-staged"
+    ):
+        raise GitError("repair scope requires the original staged rerun history")
+    limit_blocker = review_diff_limit_blocker(options.max_diff_bytes)
+    if limit_blocker:
+        return _build_result(
+            options=options,
+            review_dir=store.review_run_dir(options.review_id),
+            status=ReviewPackBuildStatus.NEEDS_USER,
+            blocker=limit_blocker,
+            next_action="Set --max-diff-bytes to a positive integer for this invocation.",
+        )
     review_dir = store.create_review_run_dir(options.review_id)
     if options.clear_stale_artifacts:
         _clear_stale_run_artifacts(
@@ -212,7 +273,32 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
             source_provider=options.source_provider,
         )
     )
-    source_resolution_path = store.write_json_artifact(
+    repair_input = None
+    if options.expected_repair_source is not None:
+        _require_repair_source(source_resolution, options.expected_repair_source)
+        repair_input = _resolve_review_input(root, source_resolution)
+        # 暂存读取期间可能漂移；准备发布前核对源及实际文件字节。
+        expected = options.expected_repair_source
+        expected_paths = _git_name_only(
+            root, "diff", expected.head_commit, expected.staged_tree_oid, "--name-only"
+        )
+        if (
+            repair_input.changed_files != expected_paths
+            or repair_input.source_file_bytes
+            != _git_file_blobs(root, expected.staged_tree_oid, expected_paths)
+            or repair_input.base_file_bytes
+            != _git_file_blobs(root, expected.head_commit, expected_paths)
+        ):
+            raise GitError("repair scope staged input drifted before pack write")
+        _require_repair_source(
+            resolve_diff_source(
+                DiffSourceResolutionOptions(root=root, source_kind="local-staged")
+            ),
+            expected,
+        )
+    if options.publication_recorder is None:
+        check_publication_guard()
+    source_resolution_path = publish_json(
         review_dir / "source-resolution.json",
         source_resolution,
     )
@@ -229,7 +315,11 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
             source_resolution=source_resolution,
         )
     try:
-        review_input = _resolve_review_input(root, source_resolution)
+        review_input = (
+            repair_input
+            if repair_input is not None
+            else _resolve_review_input(root, source_resolution)
+        )
     except GitError as exc:
         return _build_result(
             options=options,
@@ -257,11 +347,11 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
         ),
     )
 
-    changed_files_path = store.write_markdown_artifact(
+    changed_files_path = publish_markdown(
         review_dir / "changed-files.txt",
         "\n".join(changed_files),
     )
-    model_resolution_path = store.write_json_artifact(
+    model_resolution_path = publish_json(
         review_dir / "model-resolution.json",
         model_resolution,
     )
@@ -287,7 +377,7 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
             head_file_bytes=review_input.source_file_bytes,
             base_file_bytes=review_input.base_file_bytes,
         )
-    redaction_report_path = store.write_json_artifact(
+    redaction_report_path = publish_json(
         review_dir / "redaction-report.json",
         redaction_report,
     )
@@ -352,9 +442,20 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
         )
 
     included_files = list(redaction_report.included_files)
-    diff = _diff_for_source(root, source_resolution, included_files, review_input)
+    if options.expected_repair_source is not None:
+        # 已确认的请求只消费该不可变树；不把之后的 index 变化写成新的获准基线。
+        diff = _git_diff_for_paths(
+            root,
+            ["diff", source_resolution.head_commit, source_resolution.staged_tree_oid],
+            included_files,
+        )
+    else:
+        diff = diff_for_review_source(
+            root, source_resolution, included_files, review_input
+        )
     diff_bytes = len(diff.encode("utf-8"))
-    if diff_bytes > options.max_diff_bytes:
+    size_blocker = review_diff_size_blocker(diff, options.max_diff_bytes)
+    if size_blocker:
         return _build_result(
             options=options,
             review_dir=review_dir,
@@ -363,11 +464,8 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
             model_resolution_path=model_resolution_path,
             source_resolution_path=source_resolution_path,
             status=ReviewPackBuildStatus.NEEDS_USER,
-            blocker=(
-                f"Review diff is {diff_bytes} bytes, above the configured "
-                f"{options.max_diff_bytes} byte limit."
-            ),
-            next_action="Narrow the diff, raise the limit, or split the review.",
+            blocker=size_blocker,
+            next_action="Set --max-diff-bytes to the required capacity for this invocation.",
             changed_files_count=len(changed_files),
             included_files_count=len(redaction_report.included_files),
             omitted_files_count=len(redaction_report.omitted_files),
@@ -376,7 +474,7 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
             source_resolution=source_resolution,
         )
 
-    diff_path = store.write_markdown_artifact(review_dir / "diff.patch", diff)
+    diff_path = publish_markdown(review_dir / "diff.patch", diff)
     review_pack = ReviewPack(
         review_id=options.review_id,
         loop_id=options.loop_id,
@@ -385,7 +483,7 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
         source_access_status=source_resolution.access_status,
         source_resolution_path=_repo_relative(root, source_resolution_path),
         source_resolution_digest=(
-            f"sha256:{hashlib.sha256(source_resolution_path.read_bytes()).hexdigest()}"
+            f"sha256:{hashlib.sha256(publication_bytes(source_resolution_path)).hexdigest()}"
         ),
         repo_root=str(root),
         base_ref=source_resolution.base_ref,
@@ -401,7 +499,7 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
             f"{len(redaction_report.omitted_files)} omitted."
         ),
         diff_path=_repo_relative(root, diff_path),
-        diff_digest=f"sha256:{hashlib.sha256(diff_path.read_bytes()).hexdigest()}",
+        diff_digest=f"sha256:{hashlib.sha256(publication_bytes(diff_path)).hexdigest()}",
         diff_coverage={
             "changed_files": len(changed_files),
             "included_files": len(redaction_report.included_files),
@@ -439,11 +537,11 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
         redaction_report_path=_repo_relative(root, redaction_report_path),
         reviewer_allowlist=included_files,
     )
-    review_pack_path = store.write_json_artifact(
+    review_pack_path = publish_json(
         review_dir / "review-pack.json",
         review_pack,
     )
-    return _build_result(
+    result = _build_result(
         options=options,
         review_dir=review_dir,
         review_pack_path=review_pack_path,
@@ -461,31 +559,17 @@ def build_review_pack(options: ReviewPackBuildOptions) -> ReviewPackBuildResult:
         model_resolution=model_resolution,
         source_resolution=source_resolution,
     )
+    if options.publication_recorder is not None:
+        # 六件字节及 READY 结果均已构造成功，最终复核后才逐件登记并严格原子发布。
+        check_publication_guard()
+        for path, raw in pending_publication.items():
+            options.publication_recorder(path, raw)
+            store.write_bytes_artifact(path, raw)
+    return result
 
 
 def _git_changed_files(root: Path, base_ref: str, head_ref: str) -> list[str]:
-    cmd = ["git", "diff", "--name-only", f"{base_ref}...{head_ref}"]
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=30,
-        )
-    except FileNotFoundError as exc:
-        raise GitError("git is not installed or not on PATH") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise GitError("git diff timed out while detecting changed files") from exc
-    if result.returncode != 0:
-        raise GitError(
-            f"git diff --name-only failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
-        )
-    return [path for path in result.stdout.splitlines() if path.strip()]
+    return _git_name_only(root, "diff", "--name-only", f"{base_ref}...{head_ref}")
 
 
 def _resolve_review_input(
@@ -565,6 +649,17 @@ def _require_visible_local_index(root: Path) -> None:
         )
 
 
+def _require_repair_source(
+    actual: SourceAdapterResolution, expected: SourceAdapterResolution
+) -> None:
+    if (
+        actual.access_status != SourceAccessStatus.RESOLVED
+        or actual.source_kind != DiffSourceKind.LOCAL_STAGED
+        or actual.to_descriptor() != expected.to_descriptor()
+    ):
+        raise GitError("repair scope HEAD or staged source changed before pack write")
+
+
 def resolve_review_input_for_source(
     root: Path,
     source_resolution: SourceAdapterResolution,
@@ -574,7 +669,30 @@ def resolve_review_input_for_source(
     return _resolve_review_input(root, source_resolution)
 
 
-def _diff_for_source(
+def review_diff_limit_blocker(max_diff_bytes: int) -> str:
+    """在写入工件前校验本次调用的容量。"""
+
+    if type(max_diff_bytes) is not int or max_diff_bytes <= 0:
+        return "Review diff byte limit must be a positive integer."
+    return ""
+
+
+def review_diff_size_blocker(diff: str, max_diff_bytes: int) -> str:
+    """预览和实际构建共用相同的 UTF-8 字节边界。"""
+
+    invalid = review_diff_limit_blocker(max_diff_bytes)
+    if invalid:
+        return invalid
+    diff_bytes = len(diff.encode("utf-8"))
+    if diff_bytes > max_diff_bytes:
+        return (
+            f"Review diff is {diff_bytes} bytes, above the configured "
+            f"{max_diff_bytes} byte limit."
+        )
+    return ""
+
+
+def diff_for_review_source(
     root: Path,
     source_resolution: SourceAdapterResolution,
     included_files: list[str],
@@ -788,7 +906,19 @@ def _normalize_patch_path(value: str) -> str:
     text = value.strip()
     if "\t" in text:
         text = text.split("\t", 1)[0].rstrip()
-    text = text.strip('"')
+    if text.startswith('"'):
+        # 只解 Git C 字节转义，不改原 diff；未知转义和非法 UTF-8 仍拒绝。
+        if not re.fullmatch(r'"(?:[^"\\]|\\(?:[0-3][0-7]{2}|[abfnrtv"\\]))*"', text):
+            raise GitError("Malformed Git quoted patch path")
+        try:
+            encoded = ''.join(
+                chr(byte) if byte < 128 else f"\\x{byte:02x}"
+                for byte in text.encode("utf-8")
+            )
+            decoded = ast.literal_eval("b" + encoded)
+            text = decoded.decode("utf-8")
+        except (SyntaxError, ValueError, UnicodeError) as exc:
+            raise GitError("Invalid Git quoted patch path encoding") from exc
     if text == "/dev/null":
         return ""
     if text.startswith("a/") or text.startswith("b/"):
@@ -828,6 +958,14 @@ def _diff_git_paths(line: str) -> list[str]:
             )
             if path
         ]
+    if text.startswith('"') or ' "' in text:
+        tokens = re.fullmatch(
+            r'("(?:[^"\\]|\\.)*"|[^\s]+)\s+("(?:[^"\\]|\\.)*"|[^\s]+)',
+            text,
+        )
+        if tokens is None:
+            raise GitError("Malformed quoted diff Git header")
+        return [_normalize_patch_path(part) for part in tokens.groups()]
     try:
         parts = shlex.split(text)
     except ValueError:
@@ -846,7 +984,8 @@ def _append_unique(items: list[str], value: str) -> None:
 
 
 def _git_name_only(root: Path, *args: str) -> list[str]:
-    return [line for line in _git_text(root, *args).splitlines() if line.strip()]
+    # Git 的 NUL 名单保留真实路径；不能把 C 引号转义当成仓库文件名。
+    return [path for path in _git_text(root, *args, "-z").split("\0") if path]
 
 
 def _git_diff_for_paths(root: Path, args: list[str], paths: list[str]) -> str:
@@ -907,34 +1046,9 @@ def _git_text(root: Path, *args: str) -> str:
 
 
 def _git_deleted_files(root: Path, base_ref: str, head_ref: str) -> list[str]:
-    cmd = ["git", "diff", "--name-status", f"{base_ref}...{head_ref}"]
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=30,
-        )
-    except FileNotFoundError as exc:
-        raise GitError("git is not installed or not on PATH") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise GitError("git diff timed out while detecting deleted files") from exc
-    if result.returncode != 0:
-        raise GitError(
-            f"git diff --name-status failed (exit {result.returncode}): "
-            f"{result.stderr.strip()}"
-        )
-
-    deleted: list[str] = []
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2 and parts[0] == "D":
-            deleted.append(parts[1].replace("\\", "/").lstrip("/"))
-    return deleted
+    return _git_name_only(
+        root, "diff", "--name-only", "--diff-filter=D", f"{base_ref}...{head_ref}"
+    )
 
 
 def _git_file_blobs(root: Path, ref: str, paths: list[str]) -> dict[str, bytes]:
@@ -1006,6 +1120,10 @@ def _build_result(
     model_resolution: ModelResolution | None = None,
     source_resolution: SourceAdapterResolution | None = None,
 ) -> ReviewPackBuildResult:
+    if options.publication_recorder is not None and status != ReviewPackBuildStatus.READY:
+        # 缓冲中的诊断没有发布，不能把磁盘旧件路径呈现为本次拒绝的新证据。
+        review_pack_path = diff_path = changed_files_path = None
+        redaction_report_path = model_resolution_path = source_resolution_path = None
     return ReviewPackBuildResult(
         status=status,
         review_id=options.review_id,
@@ -1043,5 +1161,8 @@ __all__ = [
     "analyze_pr_review_redaction",
     "build_review_pack",
     "decide_incomplete_review_pack",
+    "diff_for_review_source",
     "resolve_review_input_for_source",
+    "review_diff_limit_blocker",
+    "review_diff_size_blocker",
 ]

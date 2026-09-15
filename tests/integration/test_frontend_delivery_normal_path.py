@@ -16,6 +16,7 @@ from ai_sdlc.cli.loop_review_cmd import (
     resolve_review_input,
     validate_review_input_for_close,
 )
+from ai_sdlc.core.design_contract_store import build_contract_input
 from ai_sdlc.core.frontend_delivery_service import (
     FRONTEND_APPLY_LATEST,
     FRONTEND_BROWSER_LATEST,
@@ -32,7 +33,10 @@ from ai_sdlc.core.implementation_models import (
     ImplementationCurrentPointer,
     ImplementationReport,
 )
-from ai_sdlc.core.implementation_store import implementation_artifacts
+from ai_sdlc.core.implementation_store import (
+    build_implementation_input,
+    implementation_artifacts,
+)
 from ai_sdlc.core.loop_artifacts import LoopArtifactStore
 from ai_sdlc.core.loop_models import LoopRound, LoopRun, LoopStatus, LoopType
 from ai_sdlc.core.loop_review_service import (
@@ -153,12 +157,12 @@ def _write_closed_implementation(root: Path, work_item_id: str) -> None:
     design_dir.mkdir(parents=True)
     store.write_json_artifact(
         design_dir / "design-contract-input.json",
-        {
-            "requirement_loop_id": "",
-            "spec_path": f"specs/{work_item_id}/spec.md",
-            "plan_path": f"specs/{work_item_id}/plan.md",
-            "tasks_path": f"specs/{work_item_id}/tasks.md",
-        },
+        build_contract_input(
+            root=root,
+            loop_id=design_loop_id,
+            work_item_dir=root / "specs" / work_item_id,
+            requirement_loop_id="",
+        ),
     )
     store.write_json_artifact(design_dir / "design-contract-report.json", {})
     (design_dir / "design-contract-report.md").write_text(
@@ -167,7 +171,15 @@ def _write_closed_implementation(root: Path, work_item_id: str) -> None:
     )
     store.write_json_artifact(
         artifacts.input_path,
-        {"design_contract_loop_id": design_loop_id},
+        build_implementation_input(
+            root=root,
+            loop_id=loop_id,
+            work_item_dir=root / "specs" / work_item_id,
+            design_contract_loop_id=design_loop_id,
+            design_contract_report_path=(design_dir / "design-contract-report.json")
+            .relative_to(root)
+            .as_posix(),
+        ),
     )
     for path in (
         artifacts.tasks_path,

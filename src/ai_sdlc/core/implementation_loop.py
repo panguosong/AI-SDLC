@@ -8,6 +8,11 @@ import stat
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_sdlc.core.counterexample_models import ArtifactRef
+    from ai_sdlc.core.pr_review_service import VerifiedDeliveryCommit
 
 from pydantic import ValidationError
 
@@ -105,7 +110,10 @@ from ai_sdlc.core.review_kernel import (
     revalidate_review_input_at_transition,
 )
 from ai_sdlc.core.slimming_advice import collect_slimming_advice
-from ai_sdlc.core.stable_file_read import read_stable_bytes
+from ai_sdlc.core.stable_file_read import (
+    _stable_regular_file_exists,
+    read_stable_bytes,
+)
 
 _TASK_ID = re.compile(r"\bT\d{2,}\b")
 _TASK_SECTION = re.compile(r"(?m)^###\s+(?:Task|任务)\b.*$")
@@ -372,13 +380,14 @@ def _record_implementation_progress_locked(
 
     from ai_sdlc.core.loop_decision_service import implementation_execution_started
 
-    if status == ImplementationTaskStatus.IN_PROGRESS or (
-        loop_run.decision_capability
-        in {"implementation-simulation-v1", "stage-simulation-v1"}
-        and status == ImplementationTaskStatus.DONE
-        and not implementation_execution_started(root, loop_run.loop_id)
-    ):
-        try:
+    try:
+        # 前置核验后的原尝试仍可能变化；条件中的第二次读取也必须返回普通阻断。
+        if status == ImplementationTaskStatus.IN_PROGRESS or (
+            loop_run.decision_capability
+            in {"implementation-simulation-v1", "stage-simulation-v1"}
+            and status == ImplementationTaskStatus.DONE
+            and not implementation_execution_started(root, loop_run.loop_id)
+        ):
             from ai_sdlc.core.loop_decision_service import (
                 validate_implementation_context,
             )
@@ -386,8 +395,8 @@ def _record_implementation_progress_locked(
             validate_implementation_context(
                 root, loop_run, impl_input, purpose="execute"
             )
-        except ValueError as exc:
-            return _blocked_result(str(exc), loop_id=loop_run.loop_id)
+    except (OSError, ValueError) as exc:
+        return _blocked_result(str(exc), loop_id=loop_run.loop_id)
 
     progress_by_task = {item.task_id: item for item in progress.tasks}
     current = progress_by_task.get(task_id) or ImplementationTaskProgress(
@@ -452,6 +461,16 @@ def verify_implementation_task(
     """执行并持久化一次绑定当前源码的任务验证结果。"""
 
     root = options.root.resolve()
+    if options.counterexample_plan and (
+        options.argv
+        or options.command_options_explicit
+        or options.cwd != "."
+        or options.timeout_seconds != 300.0
+    ):
+        return _blocked_result(
+            "Counterexample plan cannot be combined with argv, cwd or timeout overrides.",
+            loop_id=options.loop_id,
+        )
     try:
         loop_id = _implementation_write_loop_id(root, options.loop_id)
         with _implementation_write_guard(root, loop_id):
@@ -508,14 +527,36 @@ def _verify_implementation_task_locked(
             validate_implementation_context(
                 root, loop_run, impl_input, purpose="execute"
             )
-        quality_result = run_quality_command(
-            QualityCommandOptions(
-                root=root,
-                cwd=root / (options.cwd.strip() or "."),
-                argv=options.argv,
-                timeout_seconds=options.timeout_seconds,
+        counterexample_ref = None
+        counterexample_assessment = None
+        quality_result = None
+        if options.counterexample_plan:
+            from ai_sdlc.core.counterexample_execution import run_counterexample_plan
+
+            # 原互斥内分派；执行层先落原始回执，再做可能失败的上游后验。
+            counterexample_ref, counterexample_assessment = run_counterexample_plan(
+                root,
+                impl_input,
+                loop_run,
+                task_id,
+                options.counterexample_plan,
             )
-        )
+            # 首尝试已在原锁内更新进度；不能用分派前的 pending 覆盖真实启动状态。
+            progress = read_progress(artifacts.progress_path)
+            if (
+                progress.loop_id != loop_run.loop_id
+                or progress.work_item_id != impl_input.work_item_id
+            ):
+                raise ValueError("counterexample-progress-identity-mismatch")
+        else:
+            quality_result = run_quality_command(
+                QualityCommandOptions(
+                    root=root,
+                    cwd=root / (options.cwd.strip() or "."),
+                    argv=options.argv,
+                    timeout_seconds=options.timeout_seconds,
+                )
+            )
         from ai_sdlc.core.loop_decision_service import validate_implementation_context
 
         # 验证命令也可能修改上游；写入任务证据前仍须满足同一冻结边界。
@@ -535,12 +576,19 @@ def _verify_implementation_task_locked(
     current = progress_by_task.get(task_id) or ImplementationTaskProgress(
         task_id=task_id
     )
-    updated = current.model_copy(
-        update={
-            "quality_results": [*current.quality_results, quality_result],
-            "updated_at": utc_now_iso(),
-        }
-    )
+    updates: dict[str, object] = {"updated_at": utc_now_iso()}
+    if quality_result is not None:
+        updates["quality_results"] = [*current.quality_results, quality_result]
+    if counterexample_ref is not None:
+        updates["counterexample_results"] = [
+            *current.counterexample_results,
+            *(
+                []
+                if counterexample_ref in current.counterexample_results
+                else [counterexample_ref]
+            ),
+        ]
+    updated = current.model_copy(update=updates)
     progress.tasks = [
         updated if item.task_id == task_id else item for item in progress.tasks
     ]
@@ -560,6 +608,32 @@ def _verify_implementation_task_locked(
         loop_run,
         artifacts,
     )
+    if counterexample_assessment is not None:
+        complete = (
+            counterexample_assessment.required_complete
+            and report.status != LoopStatus.NEEDS_FIX
+            and not report.blockers
+        )
+        return _result_from_report(
+            report,
+            artifacts=artifacts.refs(root),
+            result=(
+                f"Counterexample verification {'complete' if complete else 'incomplete'} for {task_id}; "
+                f"business={counterexample_assessment.current_result.status}, "
+                f"acceptance={counterexample_assessment.v1_disposition}."
+            ),
+            status=(
+                ImplementationCommandStatus.READY
+                if complete
+                else ImplementationCommandStatus.NEEDS_FIX
+            ),
+            blocker=(
+                ""
+                if complete
+                else "; ".join([*report.blockers, *counterexample_assessment.reasons])
+            ),
+        )
+    assert quality_result is not None
     if not quality_result.successful:
         return _result_from_report(
             report,
@@ -675,7 +749,9 @@ def _close_implementation_loop_locked(
             loop_id=loop_run.loop_id,
             artifacts=artifacts.refs(root),
         )
-    report = _build_report(root, impl_input, tasks, progress)
+    report = _build_report(
+        root, impl_input, tasks, progress, reviewed_artifacts=reviewed_artifacts
+    )
     if loop_run.status == LoopStatus.CLOSED and artifacts.close_path.is_file():
         try:
             from ai_sdlc.core.loop_review_service import (
@@ -711,7 +787,13 @@ def _close_implementation_loop_locked(
             next_action=loop_run.next_action or _next_loop_action(report),
         )
         return result
-    close_blockers = _close_blockers(root, tasks, progress)
+    close_blockers = _close_blockers(
+        root,
+        tasks,
+        progress,
+        impl_input=impl_input,
+        reviewed_artifacts=reviewed_artifacts,
+    )
     if close_blockers:
         report = report.model_copy(
             update={
@@ -752,16 +834,17 @@ def _close_implementation_loop_locked(
             status=ImplementationCommandStatus.NEEDS_FIX,
             blocker=close_blockers[0],
         )
-    revalidate_review_input_at_transition(
-        root,
-        loop_type="implementation",
-        loop_id=loop_run.loop_id,
-        expected_digest=options.expected_review_digest,
-        validator=review_input_validator,
-    )
     if impl_input.decision_mode != "adaptive-quantified":
+        revalidate_review_input_at_transition(
+            root,
+            loop_type="implementation",
+            loop_id=loop_run.loop_id,
+            expected_digest=options.expected_review_digest,
+            validator=review_input_validator,
+        )
         return _write_close(root, loop_run, report, artifacts, options.closed_by)
 
+    # 量化关闭在纯内存构造之后、持久化之前完整复验，避免紧邻重复同一守卫。
     def revalidate_review_close():
         revalidate_review_input_at_transition(
             root,
@@ -1009,6 +1092,13 @@ def _read_current_state(
         )
 
         reject_retired_implementation_continuation(root, loop_id)
+        from ai_sdlc.core.implementation_store import (
+            validate_implementation_verification_contract,
+        )
+
+        validate_implementation_verification_contract(
+            root, impl_input, reviewed_artifacts
+        )
     except ValueError as exc:
         return _blocked_result(
             str(exc), loop_id=loop_id, artifacts=artifacts.refs(root)
@@ -1337,18 +1427,35 @@ def _canonical_task_scope(section: str) -> list[str]:
 def _task_list_after_label(section: str, *labels: str) -> list[str]:
     lines = section.splitlines()
     values: list[str] = []
+    # 仅把完整 Markdown 字段名当标签，正文与文件路径中的同名词没有字段身份。
+    field = re.compile(r"^(\s*)(?:[-*]\s+)?(?:\*\*)?([\w （）()-]+?)(?:\*\*)?\s*[:：]\s*(.*)$")
+    wanted = {label.casefold() for label in labels}
+    if "acceptance" in wanted:
+        wanted.add("acceptance criteria")
+    if "验收标准" in wanted:
+        wanted.update({"验收标准（ac）", "验收标准(ac)"})
+    if "verification" in wanted:
+        wanted.add("verification commands")
     for index, line in enumerate(lines):
-        lower = line.lower()
-        if not any(label.lower() in lower for label in labels):
+        match = field.fullmatch(line)
+        if match is None or match.group(2).strip().casefold() not in wanted:
             continue
-        inline_value = _label_value(line)
+        inline_value = match.group(3).strip()
         if inline_value:
             values.extend(_split_values(inline_value))
         for candidate in lines[index + 1 :]:
             stripped = candidate.strip()
             if not stripped:
                 continue
-            if stripped.startswith("- **") or stripped.startswith("### "):
+            next_field = field.fullmatch(candidate)
+            if (
+                re.match(r"^#{1,6}\s", stripped)
+                or stripped.startswith("- **")
+                or (
+                    next_field is not None
+                    and len(next_field.group(1)) <= len(match.group(1))
+                )
+            ):
                 break
             if stripped.startswith(("-", "*")) or re.match(r"^\d+[.)]", stripped):
                 values.append(stripped.lstrip("-* ").strip())
@@ -1380,10 +1487,18 @@ def _build_report(
     impl_input: ImplementationInput,
     tasks: ImplementationTasks,
     progress: ImplementationProgress,
+    *,
+    reviewed_artifacts: Mapping[str, bytes] | None = None,
 ) -> ImplementationReport:
     progress_by_task = {item.task_id: item for item in progress.tasks}
     required = [item for item in tasks.items if item.required]
-    current_source_digest = _current_source_digest(root, progress)
+    current_source_digest = (
+        _current_source_digest(root, progress)
+        if reviewed_artifacts is None
+        else _current_source_digest(
+            root, progress, reviewed_artifacts=reviewed_artifacts
+        )
+    )
     done_required = [
         item
         for item in required
@@ -1401,13 +1516,25 @@ def _build_report(
         and progress_by_task[item.task_id].status == ImplementationTaskStatus.BLOCKED
     ]
     blockers = [f"{item.task_id} is blocked." for item in blocked]
+    counterexample_blockers, counterexample_advisories, _ = _counterexample_state(
+        root, impl_input, progress, reviewed_artifacts
+    )
+    if len(done_required) == len(required) or any(
+        item.counterexample_results for item in progress.tasks
+    ):
+        blockers.extend(counterexample_blockers)
+    else:
+        counterexample_advisories.extend(counterexample_blockers)
     status = LoopStatus.RUNNING
     if blockers:
         status = LoopStatus.NEEDS_FIX
     elif len(done_required) == len(required):
         status = LoopStatus.NEEDS_REVIEW
     evidence_count = sum(
-        len(item.evidence) + len(item.verification_commands) + len(item.quality_results)
+        len(item.evidence)
+        + len(item.verification_commands)
+        + len(item.quality_results)
+        + len(item.counterexample_results)
         for item in progress.tasks
     )
     return ImplementationReport(
@@ -1421,7 +1548,10 @@ def _build_report(
         evidence_count=evidence_count,
         blocker_count=len(blockers),
         blockers=blockers,
-        advisories=_implementation_slimming_advisories(root, impl_input),
+        advisories=[
+            *_implementation_slimming_advisories(root, impl_input),
+            *counterexample_advisories,
+        ],
         requires_frontend_evidence=_requires_frontend_evidence(root, impl_input),
         next_action=_next_action_for_progress(
             tasks,
@@ -1543,9 +1673,18 @@ def _close_blockers(
     root: Path,
     tasks: ImplementationTasks,
     progress: ImplementationProgress,
+    *,
+    impl_input: ImplementationInput | None = None,
+    reviewed_artifacts: Mapping[str, bytes] | None = None,
 ) -> list[str]:
     progress_by_task = {item.task_id: item for item in progress.tasks}
-    current_source_digest = _current_source_digest(root, progress)
+    current_source_digest = (
+        _current_source_digest(root, progress)
+        if reviewed_artifacts is None
+        else _current_source_digest(
+            root, progress, reviewed_artifacts=reviewed_artifacts
+        )
+    )
     blockers: list[str] = []
     for item in tasks.items:
         if not item.required:
@@ -1561,25 +1700,138 @@ def _close_blockers(
             blockers.append(
                 f"{item.task_id} has no successful verification for current source."
             )
+    if impl_input is not None:
+        counterexample_blockers, _, _ = _counterexample_state(
+            root, impl_input, progress, reviewed_artifacts
+        )
+        blockers.extend(counterexample_blockers)
     return blockers
+
+
+def _counterexample_state(
+    root: Path,
+    impl_input: ImplementationInput,
+    progress: ImplementationProgress,
+    reviewed_artifacts: Mapping[str, bytes] | None = None,
+) -> tuple[list[str], list[str], tuple[ArtifactRef, ...]]:
+    if impl_input.verification_capability is None and not any(
+        item.counterexample_results for item in progress.tasks
+    ):
+        return [], [], ()
+    from ai_sdlc.cli.loop_review_cmd import _COUNTEREXAMPLE_EXECUTION_CAPTURE
+    from ai_sdlc.core.counterexample_execution import counterexample_verification_state
+
+    try:
+        capturing = _COUNTEREXAMPLE_EXECUTION_CAPTURE.get()
+        return counterexample_verification_state(
+            root,
+            impl_input,
+            progress,
+            captured_artifacts=reviewed_artifacts,
+            # 有效改善动作的捕获仍读完整原件，但不反向要求该动作尚未完成的 R2。
+            require_r2=False if capturing else None,
+            require_completion=not capturing,
+        )
+    except (OSError, ValueError) as exc:
+        return [f"Counterexample evidence is incomplete: {exc}"], [], ()
 
 
 def _has_evidence(progress: ImplementationTaskProgress) -> bool:
     return bool(
-        progress.evidence or progress.verification_commands or progress.quality_results
+        progress.evidence
+        or progress.verification_commands
+        or progress.quality_results
+        or progress.counterexample_results
     )
 
 
 def _current_source_digest(
     root: Path,
     progress: ImplementationProgress,
+    *,
+    reviewed_artifacts: Mapping[str, bytes] | None = None,
 ) -> str:
     if not any(item.quality_results for item in progress.tasks):
         return ""
     try:
-        return build_source_digest(root)
+        current = build_source_digest(root)
+        if any(_has_current_quality_evidence(item, current) for item in progress.tasks):
+            return current
+        proof = _closed_implementation_delivery_proof(
+            root, progress.loop_id, reviewed_artifacts
+        )
+        if proof is None:
+            return current
+        from ai_sdlc.core.quality_command import build_source_digest_at_reviewed_parent
+
+        delivered = build_source_digest_at_reviewed_parent(
+            root,
+            reviewed_parent=proof.reviewed_head,
+            reviewed_tree=proof.staged_tree,
+        )
+        _require_unchanged_delivery_proof(
+            root, progress.loop_id, proof, reviewed_artifacts
+        )
+        return (
+            delivered
+            if any(
+                _has_current_quality_evidence(item, delivered)
+                for item in progress.tasks
+            )
+            else current
+        )
     except ValueError:
         return ""
+
+
+def _closed_implementation_delivery_proof(
+    root: Path,
+    loop_id: str,
+    reviewed_artifacts: Mapping[str, bytes] | None = None,
+) -> VerifiedDeliveryCommit | None:
+    """交付凭据仅作当前只读 guard；不加入原阶段评审指纹或修改旧证据。"""
+    from ai_sdlc.core.pr_review_service import read_verified_delivery_commit
+
+    artifacts = implementation_artifacts(root, loop_id)
+    run = LoopRun.model_validate_json(read_stable_bytes(root, artifacts.loop_run_path))
+    if run.status != LoopStatus.CLOSED:
+        return None
+    close = ImplementationClose.model_validate_json(
+        read_stable_bytes(root, artifacts.close_path)
+    )
+    if (
+        run.loop_id != loop_id
+        or run.loop_type != "implementation"
+        or close.loop_id != loop_id
+        or close.report_path != repo_relative_path(root, artifacts.report_json_path)
+    ):
+        raise ValueError("closed-loop-identity-mismatch")
+    pointer = root / ".ai-sdlc/reviews/pr/current-review.json"
+    if not _stable_regular_file_exists(root, pointer):
+        return None
+    proof = read_verified_delivery_commit(root)
+    if reviewed_artifacts is not None:
+        # 原 R1 不可能捕获未来 PR；只核对本次捕获中实际重叠的原路径。
+        for path, digest in proof.artifact_digests:
+            if path in reviewed_artifacts and (
+                digest is None
+                or hashlib.sha256(reviewed_artifacts[path]).hexdigest() != digest
+            ):
+                raise ValueError("delivery-proof-captured-artifact-drift")
+    return proof
+
+
+def _require_unchanged_delivery_proof(
+    root: Path,
+    loop_id: str,
+    proof: VerifiedDeliveryCommit,
+    reviewed_artifacts: Mapping[str, bytes] | None = None,
+) -> None:
+    if (
+        _closed_implementation_delivery_proof(root, loop_id, reviewed_artifacts)
+        != proof
+    ):
+        raise ValueError("delivery-proof-changed-during-consumption")
 
 
 def _has_current_quality_evidence(
@@ -1612,7 +1864,10 @@ def _evidence_from_progress(
         tasks=[
             item
             for item in progress.tasks
-            if item.evidence or item.verification_commands or item.quality_results
+            if item.evidence
+            or item.verification_commands
+            or item.quality_results
+            or item.counterexample_results
         ],
     )
 

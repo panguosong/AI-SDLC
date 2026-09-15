@@ -52,6 +52,8 @@
 
 ## 阶段执行顺序
 
+反例验收由宿主按 `verification.md` 与 `quality-gate.md` 推进：从真实规范和合法输入准备冻结合同，限制为最多 3 项所选义务、每项 2 种机制、一批候选和一次 V1 强化，安排全部合法控制、真实修复、最终复验及防护。普通用户只需表达目标和约束，不填内部 JSON 或评分。新必达能力仅限事先绑定的 `stage-simulation-v1` 新任务，旧 legacy/B1/D1 保持原合同和建议边界；不得以切换模式、删证据或重建 Loop 刷新原预算、R1/R2 与 Close。各适配器使用同一 `run` 返回的 `Applicable Rules`，通用适配器保持既有手动引用与 degraded 接入边界；规则被安装或展示不等于宿主已执行，更不等于业务验收通过。
+
 严格按以下顺序执行，不允许跳阶段：
 
 ```
@@ -83,5 +85,5 @@ init → refine → design → decompose → verify → execute → close
 - 禁止在 EXECUTE 阶段修改 spec.md 或 plan.md（发现设计问题应阻断并记录）
 - 禁止生成没有文件路径的任务
 - 禁止在测试未通过的情况下标记任务为已完成
-- 禁止在没有运行全量回归的情况下提交 git
+- 禁止在未完成当前批次或最终交付规定的验证时提交 git。批次范围统一依 `rules/verification.md`：原失败优先，覆盖直接影响与既有兼容，跨模块或影响不明时扩大检查，项目/合同必跑与最终全量保持；`batch-protocol.md` Step 3、Step 4.5 的普通批次全量表述按此口径执行，产物合并及最终完整门禁不变
 - 禁止把 GitHub / Pull Request / GitHub Actions / `@codex review` / `gh pr` 等宿主平台专有流程写成框架通用规则、模板默认值或预设要求

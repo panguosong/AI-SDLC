@@ -6,7 +6,7 @@ on:
       tag:
         description: Published release tag to verify against the user guide.
         required: true
-        default: v3.1.0
+        default: v3.2.0
   pull_request:
     paths:
       - ".github/workflows/windows-user-guide-e2e.yml"
@@ -36,7 +36,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     env:
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.0' || inputs.tag }}
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
 
@@ -138,7 +138,7 @@ jobs:
           $ChecksumName = "$PackageName.sha256"
           $PackageDir = (Get-Location).Path
           $ExtractRoot = Join-Path $PackageDir ".ai-sdlc-install"
-          $expectedTag = if ($env:GITHUB_EVENT_NAME -eq "pull_request") { "v3.1.0" } else { "v3.1.0" }
+          $expectedTag = if ($env:GITHUB_EVENT_NAME -eq "pull_request") { "v3.2.0" } else { "v3.2.0" }
           if ($env:RELEASE_TAG -ne $expectedTag) {
             throw "Guide replay tag $env:RELEASE_TAG differs from the expected candidate/published split $expectedTag."
           }
@@ -157,8 +157,8 @@ jobs:
             }
             Copy-Item -LiteralPath $localChecksum.FullName -Destination $checksumPath -Force
           } else {
-            Invoke-WebRequest -Uri "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$PackageName" -OutFile $packagePath
-            Invoke-WebRequest -Uri "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$ChecksumName" -OutFile $checksumPath
+            Invoke-WebRequest -Uri "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$PackageName" -OutFile $packagePath
+            Invoke-WebRequest -Uri "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$ChecksumName" -OutFile $checksumPath
           }
           $checksumParts = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
           if ($checksumParts.Count -ne 2 -or $checksumParts[1] -ne $PackageName) {
@@ -343,7 +343,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.0' || inputs.tag }}
       PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
 
@@ -504,7 +504,7 @@ jobs:
           $installerPath = Join-Path $env:RUNNER_TEMP "install_online.ps1"
           $installVenv = Join-Path $env:RUNNER_TEMP "ai-sdlc-online"
           $sourceKind = "remote-release-tag"
-          $sourceRepository = "SinclairPan/Ai_AutoSDLC"
+          $sourceRepository = "sinclairpan0720/Ai_AutoSDLC"
           if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
             if (-not $env:PR_HEAD_REPOSITORY -or -not $env:PR_HEAD_SHA) {
               throw "Pull request source repository or revision is unavailable."
@@ -513,7 +513,7 @@ jobs:
             $sourceRepository = $env:PR_HEAD_REPOSITORY
             $remoteSha = $env:PR_HEAD_SHA
           } else {
-            $tagLines = @(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}")
+            $tagLines = @(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}")
             $peeledTag = $tagLines | Where-Object { $_ -match '\^\{\}$' } | Select-Object -First 1
             $resolvedTag = if ($peeledTag) { $peeledTag } else { $tagLines | Select-Object -First 1 }
             $remoteSha = ($resolvedTag -split "`t")[0]

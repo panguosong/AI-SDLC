@@ -6,7 +6,6 @@ import importlib.resources as importlib_resources
 import inspect
 import json
 import os
-import signal
 import subprocess
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -283,11 +282,28 @@ def _run_probe_runner_process(
     try:
         stdout, stderr = process.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        _kill_probe_runner_process_tree(process)
         try:
-            stdout, stderr = process.communicate(timeout=2)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
+            _kill_probe_runner_process_tree(process)
+        finally:
+            # 组查询失败不撤销本次 Popen 的直接归属；仍回收自己的子进程及管道。
+            # 这里只终止已持有的子进程，不能将它的退出冒充整棵进程树清理成功。
+            try:
+                if process.poll() is None:
+                    process.kill()
+                try:
+                    stdout, stderr = process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    stdout, stderr = "", ""
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired as wait_error:
+                        raise RuntimeError(
+                            "browser-probe-owned-child-reap-incomplete"
+                        ) from wait_error
+            finally:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
         raise subprocess.TimeoutExpired(
             command,
             timeout,
@@ -303,8 +319,6 @@ def _run_probe_runner_process(
 
 
 def _kill_probe_runner_process_tree(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
     if os.name == "nt":
         _kill_windows_process_tree(process)
         return
@@ -330,27 +344,11 @@ def _kill_windows_process_tree(process: subprocess.Popen[str]) -> None:
 
 
 def _kill_posix_process_group(process: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        process.terminate()
-    try:
-        process.wait(timeout=2)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        process.kill()
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        process.kill()
+    from ai_sdlc.core.quality_command import cleanup_owned_process_group
+
+    # 父进程返回后仍可能有所属后代；与受控质量命令使用同一组完成判据。
+    if not cleanup_owned_process_group(process):
+        raise RuntimeError("browser-probe-owned-process-cleanup-incomplete")
 
 
 @contextmanager

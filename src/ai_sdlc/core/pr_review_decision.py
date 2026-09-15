@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from ai_sdlc.core.loop_artifacts import LoopArtifactStore
@@ -15,7 +16,10 @@ from ai_sdlc.core.loop_decision_service import (
     _write_context,
     validate_implementation_source_boundary,
 )
-from ai_sdlc.core.loop_resource_lock import _implementation_write_guard
+from ai_sdlc.core.loop_resource_lock import (
+    _implementation_write_guard,
+    _ImplementationWriteLockError,
+)
 from ai_sdlc.core.loop_simulation_context import (
     SimulationContext,
     SimulationPreparation,
@@ -133,7 +137,11 @@ def prepare_pr_review_decision(
     if type(dry_run) is not bool:
         raise DecisionPreparationError("decision-dry-run-invalid")
     # 同一 review 与原 stage 写锁共用键；模型调用始终在锁外。
-    with _implementation_write_guard(root, f"local-pr-review:{review_id}"):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_implementation_write_guard(root, f'local-pr-review:{review_id}'))
+        except _ImplementationWriteLockError as exc:
+            raise DecisionPreparationError(str(exc)) from exc
         preview = _prepare(root, review_id, request)
         if dry_run or preview.status == "existing":
             return preview

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 import ai_sdlc.core.design_contract_loop as design_contract_loop_module
 from ai_sdlc.cli.loop_review_cmd import (
@@ -15,6 +18,7 @@ from ai_sdlc.cli.loop_review_cmd import (
     resolve_review_input,
     validate_review_input_for_close,
 )
+from ai_sdlc.cli.main import app
 from ai_sdlc.core.design_contract_loop import (
     CURRENT_DESIGN_CONTRACT_PATH,
     DesignContractCheckOptions,
@@ -28,6 +32,7 @@ from ai_sdlc.core.design_contract_models import (
 )
 from ai_sdlc.core.design_contract_store import (
     DesignContractArtifacts,
+    require_design_check_published,
     resolve_design_contract_loop_run_path,
 )
 from ai_sdlc.core.loop_artifacts import LoopArtifactStore
@@ -202,12 +207,14 @@ def test_check_design_contract_loop_recovers_initial_partial_artifact_write(
         loop_id: str,
         work_item_dir: Path,
         requirement_loop_id: str,
+        **verification_options,
     ) -> DesignContractInput:
         built = original_build(
             root=root,
             loop_id=loop_id,
             work_item_dir=work_item_dir,
             requirement_loop_id=requirement_loop_id,
+            **verification_options,
         )
         return built.model_copy(update={"created_at": next(timestamps)})
 
@@ -236,14 +243,16 @@ def test_check_design_contract_loop_recovers_initial_partial_artifact_write(
         "_write_check_artifacts",
         write_input_then_fail,
     )
-    with pytest.raises(OSError, match="injected initial artifact write failure"):
-        check_design_contract_loop(
-            DesignContractCheckOptions(
-                root=tmp_path,
-                work_item="specs/demo-contract",
-                loop_id=loop_id,
-            )
+    failed = check_design_contract_loop(
+        DesignContractCheckOptions(
+            root=tmp_path,
+            work_item="specs/demo-contract",
+            loop_id=loop_id,
         )
+    )
+    assert failed.status == "blocked"
+    assert "injected initial artifact write failure" in failed.blocker
+    assert f"--loop-id {loop_id}" in failed.next_action
 
     monkeypatch.setattr(
         design_contract_loop_module,
@@ -259,6 +268,962 @@ def test_check_design_contract_loop_recovers_initial_partial_artifact_write(
     )
     assert retried.status == "ready", retried.blocker
     assert retried.loop_status == "needs_review"
+
+
+@pytest.mark.parametrize(
+    "drift,expected_side",
+    [
+        ("target-before-write", "old"),
+        ("target-at-finish", "new"),
+        ("journal-at-finish", "new"),
+    ],
+)
+def test_fix24_design_initial_publication_drift_recovers_same_cli(
+    tmp_path, monkeypatch, drift, expected_side
+):
+    _write_work_item(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    loop_id = "dc-initial-drift"
+    artifacts = design_contract_loop_module.design_contract_artifacts(tmp_path, loop_id)
+    paths = design_contract_loop_module._design_publication_paths(artifacts)
+    pending = artifacts.loop_dir / design_contract_loop_module.DESIGN_CHECK_PENDING
+    target = artifacts.coverage_matrix_path
+    original_write = LoopArtifactStore.write_bytes_artifact
+    runner = CliRunner()
+    command = [
+        "loop", "design-contract", "check", "--wi", "specs/demo-contract",
+        "--loop-id", loop_id, "--json",
+    ]
+    changed_bytes = {}
+
+    def introduce_drift(self, path, content, **kwargs):
+        result = original_write(self, path, content, **kwargs)
+        if path == pending and drift == "target-before-write":
+            states = design_contract_loop_module._validate_design_publication(
+                content, artifacts
+            )
+            # 模拟并发者已写入日志中的新件；恢复只能消费已记录的 old/new。
+            target.write_bytes(states[target.name]["new"])
+            changed_bytes["target"] = target.read_bytes()
+        if path == artifacts.pointer_path and drift == "target-at-finish":
+            target.unlink()
+            changed_bytes["target"] = None
+        if path == artifacts.pointer_path and drift == "journal-at-finish":
+            # 字节改变但身份与摘要仍有效，恢复必须以实际保留的 journal 为准。
+            pending.write_bytes(pending.read_bytes() + b"\n")
+            changed_bytes["journal"] = pending.read_bytes()
+        return result
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            LoopArtifactStore, "write_bytes_artifact", introduce_drift
+        )
+        first = runner.invoke(app, command)
+    assert first.exit_code == 1
+    payload = json.loads(first.stdout)
+    assert payload["status"] == "blocked"
+    expected_error = "journal-drift" if drift == "journal-at-finish" else "target-drift"
+    assert expected_error in payload["blocker"]
+    assert f"--loop-id {loop_id}" in payload["next_action"]
+    assert '--wi "specs/demo-contract"' in payload["next_action"]
+    assert "--requirement-loop-id req-current" in payload["next_action"]
+    raw = pending.read_bytes()
+    before = {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    }
+    if "target" in changed_bytes:
+        assert before[target.name] == changed_bytes["target"]
+    if "journal" in changed_bytes:
+        assert raw == changed_bytes["journal"]
+    preview = runner.invoke(app, [*command, "--dry-run"])
+    assert preview.exit_code == 1
+    assert json.loads(preview.stdout)["status"] == "blocked"
+    assert pending.read_bytes() == raw
+    assert {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    } == before
+
+    states = design_contract_loop_module._validate_design_publication(raw, artifacts)
+    recovered_states = []
+    original_recover = design_contract_loop_module._recover_design_publication
+
+    def observe_actual_recovery(root, current_artifacts):
+        original_recover(root, current_artifacts)
+        recovered_states.append({
+            name: path.read_bytes() if path.exists() else None
+            for name, path in paths.items()
+        })
+        archive = (
+            artifacts.loop_dir / "design-check-publications"
+            / (hashlib.sha256(raw).hexdigest() + ".json")
+        )
+        assert archive.read_bytes() == raw
+        assert not pending.exists()
+
+    recovery_command = shlex.split(
+        payload["next_action"].removeprefix("Run ").removesuffix(
+            " to recover this publication."
+        )
+    )
+    with monkeypatch.context() as recovering:
+        recovering.setattr(
+            design_contract_loop_module,
+            "_recover_design_publication",
+            observe_actual_recovery,
+        )
+        completed = runner.invoke(app, [*recovery_command[1:], "--json"])
+    assert completed.exit_code == 0, completed.stdout + completed.stderr
+    assert json.loads(completed.stdout)["status"] == "ready"
+    assert recovered_states == [{
+        name: values[expected_side] for name, values in states.items()
+    }]
+    assert not pending.exists()
+    current_input = DesignContractInput.model_validate_json(
+        artifacts.input_path.read_bytes()
+    )
+    current_run = LoopRun.model_validate_json(artifacts.loop_run_path.read_bytes())
+    assert current_run.input_digest == (
+        design_contract_loop_module.design_contract_input_digest(current_input)
+    )
+    assert resolve_review_input(
+        root=tmp_path,
+        loop_type="design-contract",
+        loop_id=loop_id,
+        review_round_number=1,
+    ).loop_id == loop_id
+
+
+@pytest.mark.parametrize("damage", ["target", "journal"])
+def test_fix24_design_initial_publication_damage_stays_blocked(
+    tmp_path, monkeypatch, damage
+):
+    _write_work_item(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    loop_id = "dc-initial-damaged"
+    artifacts = design_contract_loop_module.design_contract_artifacts(tmp_path, loop_id)
+    paths = design_contract_loop_module._design_publication_paths(artifacts)
+    pending = artifacts.loop_dir / design_contract_loop_module.DESIGN_CHECK_PENDING
+    original_write = LoopArtifactStore.write_bytes_artifact
+    runner = CliRunner()
+    command = [
+        "loop", "design-contract", "check", "--wi", "specs/demo-contract",
+        "--loop-id", loop_id, "--json",
+    ]
+    corrupted = b"unrecognized concurrent bytes\n"
+
+    def introduce_damage(self, path, content, **kwargs):
+        result = original_write(self, path, content, **kwargs)
+        if path == pending and damage == "target":
+            artifacts.coverage_matrix_path.write_bytes(corrupted)
+        if path == artifacts.pointer_path and damage == "journal":
+            pending.write_bytes(corrupted)
+        return result
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            LoopArtifactStore, "write_bytes_artifact", introduce_damage
+        )
+        first = runner.invoke(app, command)
+    assert first.exit_code == 1
+    first_payload = json.loads(first.stdout)
+    assert first_payload["status"] == "blocked"
+    assert f"--loop-id {loop_id}" in first_payload["next_action"]
+    raw = pending.read_bytes()
+    before = {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    }
+    assert (
+        before[artifacts.coverage_matrix_path.name] if damage == "target" else raw
+    ) == corrupted
+    repeated = runner.invoke(app, command)
+    assert repeated.exit_code == 1
+    assert json.loads(repeated.stdout)["status"] == "blocked"
+    assert pending.read_bytes() == raw
+    assert {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    } == before
+    if damage == "target":
+        # 初次写入尚未到 run/指针，当前入口应先因没有发布的指针拒绝。
+        assert not artifacts.loop_run_path.exists()
+        assert not artifacts.pointer_path.exists()
+        rejection = r"current-design-contract\.json"
+    else:
+        assert artifacts.loop_run_path.is_file()
+        assert artifacts.pointer_path.is_file()
+        rejection = "publication-pending"
+    with pytest.raises((ValueError, ReviewInputGuardError), match=rejection):
+        resolve_review_input(
+            root=tmp_path,
+            loop_type="design-contract",
+            loop_id=loop_id,
+            review_round_number=1,
+        )
+    with pytest.raises(ValueError, match="publication-pending"):
+        require_design_check_published(artifacts.loop_dir)
+    assert pending.read_bytes() == raw
+    assert {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["unexpected publisher programming error", "design-contract-publication-target-drift"],
+)
+def test_fix24_design_initial_publication_unknown_value_error_propagates(
+    tmp_path, monkeypatch, message
+):
+    _write_work_item(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    loop_id = "dc-initial-unknown-error"
+    artifacts = design_contract_loop_module.design_contract_artifacts(tmp_path, loop_id)
+    pending = artifacts.loop_dir / design_contract_loop_module.DESIGN_CHECK_PENDING
+    original_write = LoopArtifactStore.write_bytes_artifact
+    raised = ValueError(message)
+    written = []
+
+    def write_journal_then_raise(self, path, content, **kwargs):
+        result = original_write(self, path, content, **kwargs)
+        if path == pending:
+            written.append(content)
+            raise raised
+        return result
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            LoopArtifactStore, "write_bytes_artifact", write_journal_then_raise
+        )
+        result = CliRunner().invoke(app, [
+            "loop", "design-contract", "check", "--wi", "specs/demo-contract",
+            "--loop-id", loop_id, "--json",
+        ])
+    assert result.exit_code == 1
+    assert result.exception is raised
+    assert not result.stdout.strip()
+    assert written == [pending.read_bytes()]
+    assert not artifacts.input_path.exists()
+
+
+@pytest.mark.parametrize(
+    "failed_target",
+    ["coverage-matrix.json", "loop-run.json", "current-design-contract.json"],
+)
+def test_design_check_recheck_recovers_interrupted_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_target: str
+) -> None:
+    work_item = _write_work_item(tmp_path)
+    options = DesignContractCheckOptions(
+        root=tmp_path,
+        work_item="specs/demo-contract",
+        loop_id="dc-publication-recovery",
+    )
+    assert check_design_contract_loop(options).status == "ready"
+    plan = work_item / "plan.md"
+    plan.write_text(plan.read_text() + "\n补充有界执行说明。\n", encoding="utf-8")
+    original_json = LoopArtifactStore.write_json_artifact
+    original_bytes = LoopArtifactStore.write_bytes_artifact
+
+    def fail_json(self, path, payload):
+        if path.name == failed_target:
+            raise OSError("interrupted design publication")
+        return original_json(self, path, payload)
+
+    def fail_bytes(self, path, content, **kwargs):
+        if path.name == failed_target:
+            raise OSError("interrupted design publication")
+        return original_bytes(self, path, content, **kwargs)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(LoopArtifactStore, "write_json_artifact", fail_json)
+        interrupted.setattr(LoopArtifactStore, "write_bytes_artifact", fail_bytes)
+        try:
+            failed = check_design_contract_loop(options)
+        except OSError:
+            pass
+        else:
+            assert failed.status == "blocked"
+            assert "--loop-id dc-publication-recovery" in failed.next_action
+    retried = check_design_contract_loop(options)
+    assert retried.status == "ready", retried.blocker
+    artifacts = design_contract_loop_module.design_contract_artifacts(
+        tmp_path, options.loop_id
+    )
+    current_input = DesignContractInput.model_validate_json(
+        artifacts.input_path.read_bytes()
+    )
+    current_run = LoopRun.model_validate_json(artifacts.loop_run_path.read_bytes())
+    assert (
+        current_run.input_digest
+        == design_contract_loop_module.design_contract_input_digest(current_input)
+    )
+    assert current_run.loop_id == options.loop_id
+
+
+def _interrupted_publication_case(
+    tmp_path, monkeypatch, *, initial=False, target="coverage-matrix.json"
+):
+    work_item = _write_work_item(tmp_path)
+    options = DesignContractCheckOptions(
+        root=tmp_path, work_item="specs/demo-contract", loop_id="dc-interrupted"
+    )
+    if not initial:
+        assert check_design_contract_loop(options).status == "ready"
+        plan = work_item / "plan.md"
+        plan.write_text(plan.read_text() + "\n补充执行说明。\n", encoding="utf-8")
+    artifacts = design_contract_loop_module.design_contract_artifacts(
+        tmp_path, options.loop_id
+    )
+    paths = design_contract_loop_module._design_publication_paths(artifacts)
+    before = {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    }
+    original = LoopArtifactStore.write_bytes_artifact
+
+    def interrupt(self, path, content, **kwargs):
+        if path.name == target or (
+            target == "archive" and path.parent.name == "design-check-publications"
+        ):
+            raise OSError("publication write interrupted")
+        return original(self, path, content, **kwargs)
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(LoopArtifactStore, "write_bytes_artifact", interrupt)
+        result = check_design_contract_loop(options)
+    assert result.status == "blocked", result
+    assert result.loop_id == options.loop_id
+    assert '--wi "specs/demo-contract"' in result.next_action
+    pending = artifacts.loop_dir / design_contract_loop_module.DESIGN_CHECK_PENDING
+    assert pending.is_file()
+    return options, artifacts, paths, before, pending
+
+
+@pytest.mark.parametrize("initial", [True, False])
+@pytest.mark.parametrize(
+    "target,side",
+    [
+        ("coverage-matrix.json", "old"),
+        ("current-design-contract.json", "new"),
+        ("archive", "new"),
+    ],
+)
+def test_design_publication_restores_exact_old_or_committed_new_bytes(
+    tmp_path, monkeypatch, initial, target, side
+):
+    options, artifacts, paths, before, pending = _interrupted_publication_case(
+        tmp_path, monkeypatch, initial=initial, target=target
+    )
+    raw = pending.read_bytes()
+    states = design_contract_loop_module._validate_design_publication(raw, artifacts)
+    with design_contract_loop_module._stage_write_guard(
+        tmp_path, "design-contract", options.loop_id
+    ):
+        design_contract_loop_module._recover_design_publication(tmp_path, artifacts)
+    assert not pending.exists()
+    actual = {
+        name: path.read_bytes() if path.exists() else None
+        for name, path in paths.items()
+    }
+    assert actual == {name: values[side] for name, values in states.items()}
+    if side == "old":
+        assert actual == before
+    archive = (
+        artifacts.loop_dir
+        / "design-check-publications"
+        / (hashlib.sha256(raw).hexdigest() + ".json")
+    )
+    assert archive.read_bytes() == raw
+    assert check_design_contract_loop(options).status == "ready"
+
+
+@pytest.mark.parametrize(
+    "target", ["coverage-matrix.json", "current-design-contract.json"]
+)
+def test_design_publication_rejects_unknown_file_before_any_recovery_write(
+    tmp_path, monkeypatch, target
+):
+    options, _, paths, _, pending = _interrupted_publication_case(tmp_path, monkeypatch)
+    paths[target].write_text("another process wrote this value\n", encoding="utf-8")
+    before = {name: path.read_bytes() for name, path in paths.items()}
+    journal = pending.read_bytes()
+    result = check_design_contract_loop(options)
+    assert result.status == "blocked"
+    assert "publication-target-drift" in result.blocker
+    assert {name: path.read_bytes() for name, path in paths.items()} == before
+    assert pending.read_bytes() == journal
+
+
+@pytest.mark.parametrize("corruption", ["loop", "digest", "extra-target"])
+def test_design_publication_rejects_inconsistent_journal_without_writes(
+    tmp_path, monkeypatch, corruption
+):
+    options, _, paths, _, pending = _interrupted_publication_case(tmp_path, monkeypatch)
+    journal = json.loads(pending.read_bytes())
+    if corruption == "loop":
+        journal["loop_id"] = "other-loop"
+    elif corruption == "digest":
+        journal["entries"]["loop-run.json"]["old"]["sha256"] = "0" * 64
+    else:
+        journal["entries"]["other-file.json"] = journal["entries"]["loop-run.json"]
+    pending.write_text(json.dumps(journal), encoding="utf-8")
+    before = {name: path.read_bytes() for name, path in paths.items()}
+    raw = pending.read_bytes()
+    result = check_design_contract_loop(options)
+    assert result.status == "blocked"
+    assert {name: path.read_bytes() for name, path in paths.items()} == before
+    assert pending.read_bytes() == raw
+
+
+def test_design_publication_pending_blocks_dry_run_close_review_and_downstream_reader(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    from ai_sdlc.core.design_contract_store import read_loop_run
+    from ai_sdlc.core.implementation_loop import _design_contract_gate
+
+    options, artifacts, paths, _, pending = _interrupted_publication_case(
+        tmp_path, monkeypatch
+    )
+    before = {name: path.read_bytes() for name, path in paths.items()}
+    raw = pending.read_bytes()
+    assert (
+        check_design_contract_loop(replace(options, dry_run=True)).status == "blocked"
+    )
+    assert check_design_contract_loop(replace(options, loop_id="")).status == "blocked"
+    closed = close_design_contract_loop(
+        DesignContractCloseOptions(root=tmp_path, loop_id=options.loop_id, yes=True)
+    )
+    assert closed.status == "blocked"
+    assert not artifacts.close_path.exists()
+    with pytest.raises(ValueError, match="publication-pending"):
+        read_loop_run(artifacts.loop_run_path, root=tmp_path)
+    gate = _design_contract_gate(
+        tmp_path, options.loop_id, work_item_id="demo-contract"
+    )
+    assert "publication-pending" in gate[2]
+    with pytest.raises(
+        (ValueError, ReviewInputGuardError), match="publication-pending"
+    ):
+        resolve_review_input(
+            root=tmp_path,
+            loop_type="design-contract",
+            loop_id=options.loop_id,
+            review_round_number=1,
+        )
+    assert {name: path.read_bytes() for name, path in paths.items()} == before
+    assert pending.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "target", ["design-check-publication.pending.json", "design-contract-input.json"]
+)
+def test_design_publication_replace_failure_keeps_original_complete_bytes(
+    tmp_path, monkeypatch, target
+):
+    import ai_sdlc.core.loop_artifacts as artifact_module
+
+    work_item = _write_work_item(tmp_path)
+    options = DesignContractCheckOptions(
+        root=tmp_path, work_item="specs/demo-contract", loop_id="dc-strict-publication"
+    )
+    assert check_design_contract_loop(options).status == "ready"
+    artifacts = design_contract_loop_module.design_contract_artifacts(
+        tmp_path, options.loop_id
+    )
+    paths = design_contract_loop_module._design_publication_paths(artifacts)
+    before = {name: path.read_bytes() for name, path in paths.items()}
+    plan = work_item / "plan.md"
+    plan.write_text(plan.read_text() + "\n新增处理说明。\n", encoding="utf-8")
+    original = artifact_module._replace_with_retry
+
+    def fail_replace(source, destination):
+        if destination.name == target:
+            raise PermissionError("publication replace unavailable")
+        return original(source, destination)
+
+    if target == "design-check-publication.pending.json":
+        original_link = artifact_module.os.link
+
+        def fail_link(source, destination):
+            if Path(destination).name == target:
+                raise PermissionError("publication journal unavailable")
+            return original_link(source, destination)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(artifact_module, "_replace_with_retry", fail_replace)
+        if target == "design-check-publication.pending.json":
+            interrupted.setattr(artifact_module.os, "link", fail_link)
+        result = check_design_contract_loop(options)
+    assert result.status == "blocked"
+    assert f"--loop-id {options.loop_id}" in result.next_action
+    if target == "design-check-publication.pending.json":
+        assert {name: path.read_bytes() for name, path in paths.items()} == before
+    else:
+        assert paths[target].read_bytes() == before[target]
+    assert check_design_contract_loop(options).status == "ready"
+
+
+@pytest.mark.parametrize(
+    "target", ["design-contract-input.json", "current-design-contract.json"]
+)
+def test_design_publication_recovery_can_resume_after_second_interruption(
+    tmp_path, monkeypatch, target
+):
+    options, artifacts, _, _, pending = _interrupted_publication_case(
+        tmp_path,
+        monkeypatch,
+        initial=target == "current-design-contract.json",
+        target="coverage-matrix.json"
+        if target == "design-contract-input.json"
+        else "current-design-contract.json",
+    )
+    raw = pending.read_bytes()
+    original = LoopArtifactStore.write_bytes_artifact
+
+    def interrupt(self, path, content, **kwargs):
+        if path.name == target:
+            raise OSError("recovery interrupted")
+        return original(self, path, content, **kwargs)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(LoopArtifactStore, "write_bytes_artifact", interrupt)
+        assert check_design_contract_loop(options).status == "blocked"
+    assert pending.read_bytes() == raw
+    assert check_design_contract_loop(options).status == "ready"
+    assert not pending.exists()
+    current = LoopRun.model_validate_json(artifacts.loop_run_path.read_bytes())
+    current_input = DesignContractInput.model_validate_json(
+        artifacts.input_path.read_bytes()
+    )
+    assert (
+        current.input_digest
+        == design_contract_loop_module.design_contract_input_digest(current_input)
+    )
+
+
+@pytest.mark.parametrize("later_stage", ["ready", "needs-fix", "closed", "quantified-closed"])
+def test_design_publication_recovers_after_later_published_loop(
+    initialized_project_dir, monkeypatch, later_stage
+):
+    import base64
+    from dataclasses import replace
+
+    from tests.integration import test_stage_quantified_pipeline as stage
+
+    root = initialized_project_dir
+    if later_stage == "quantified-closed":
+        stage._ready_project(root)
+    options, artifacts, _, _, pending = _interrupted_publication_case(
+        root, monkeypatch, initial=True, target="archive"
+    )
+    original = pending.read_bytes()
+    later = replace(options, loop_id="dc-second")
+    if later_stage == "quantified-closed":
+        later = replace(
+            later, decision_mode="adaptive-quantified",
+            decision_capability=stage.CAPABILITY,
+        )
+    tasks = root / options.work_item / "tasks.md"
+    original_tasks = tasks.read_bytes()
+    if later_stage == "needs-fix":
+        tasks.write_bytes(original_tasks.replace(b"FR-DEMO-001", b"FR-UNKNOWN-001"))
+    if later_stage == "quantified-closed":
+        published_status = stage._payload(stage._cli(
+            root, "loop", "design-contract", "check", "--wi", later.work_item,
+            "--loop-id", later.loop_id, "--decision-mode", later.decision_mode,
+            "--decision-capability", later.decision_capability, "--json",
+        ))["status"]
+    else:
+        published_status = check_design_contract_loop(later).status
+    assert published_status == ("needs_fix" if later_stage == "needs-fix" else "ready")
+    if later_stage == "needs-fix":
+        tasks.write_bytes(original_tasks)
+    later_artifacts = design_contract_loop_module.design_contract_artifacts(
+        root, later.loop_id
+    )
+    initial_run = later_artifacts.loop_run_path.read_bytes()
+    if later_stage == "quantified-closed":
+        # 仅参数化既有测试驱动的目标，begin、判断和关闭仍走原生入口。
+        with monkeypatch.context() as target:
+            target.setattr(stage, "LOOP", later.loop_id)
+            target.setattr(stage, "WORK_ITEM", later.work_item)
+            stage.stage_selected(root, "design-contract", start=False)
+            stage.stage_apply(root, "design-contract", {
+                "operation": "seal-for-review", "request_id": "seal"
+            })
+            reviewed = stage._payload(stage._cli(
+                root, "loop", "review", "--type", "design-contract",
+                "--loop-id", later.loop_id, "--json",
+            ))
+            assert stage.actual_record(root, "design-contract", reviewed)["status"] == "passed"
+            closed = stage._cli(
+                root, "loop", "design-contract", "close", "--loop-id", later.loop_id,
+                "--expect-review-digest", reviewed["input_digest"], "--yes", "--json",
+            )
+            assert closed.returncode == 0, closed.stdout + closed.stderr
+    elif later_stage == "closed":
+        assert close_design_contract_loop(DesignContractCloseOptions(
+            root=root, loop_id=later.loop_id, yes=True,
+        )).closed
+    if later_stage in {"closed", "quantified-closed"}:
+        assert later_artifacts.loop_run_path.read_bytes() != initial_run
+    later_bytes = {
+        path: path.read_bytes()
+        for path in later_artifacts.loop_dir.rglob("*") if path.is_file()
+    }
+    later_pointer = artifacts.pointer_path.read_bytes()
+    recovery = design_contract_loop_module._recover_design_publication
+    observed = []
+
+    def observe_recovery(recovery_root, recovery_artifacts):
+        recovery(recovery_root, recovery_artifacts)
+        observed.append(artifacts.pointer_path.read_bytes())
+        assert {path: path.read_bytes() for path in later_bytes} == later_bytes
+
+    with monkeypatch.context() as observed_recovery:
+        observed_recovery.setattr(
+            design_contract_loop_module, "_recover_design_publication", observe_recovery
+        )
+        result = check_design_contract_loop(options)
+    assert result.status == "ready", result
+    assert observed == [later_pointer]
+    assert not pending.exists()
+    archives = artifacts.loop_dir / "design-check-publications"
+    assert (archives / (hashlib.sha256(original).hexdigest() + ".json")).read_bytes() == original
+    assert json.loads(artifacts.pointer_path.read_bytes())["loop_id"] == options.loop_id
+    assert any(
+        (old := json.loads(path.read_bytes())["entries"][artifacts.pointer_path.name]["old"])
+        and base64.b64decode(old["base64"]) == later_pointer
+        for path in archives.glob("*.json")
+    )
+    resolve_review_input(
+        root=root, loop_type="design-contract", loop_id=options.loop_id,
+        review_round_number=1,
+    )
+    assert close_design_contract_loop(DesignContractCloseOptions(
+        root=root, loop_id=options.loop_id, yes=True,
+    )).closed
+    assert design_contract_loop_module.read_loop_run(
+        artifacts.loop_run_path, root=root
+    ).status == "closed"
+    assert artifacts.close_path.is_file()
+    assert {path: path.read_bytes() for path in later_bytes} == later_bytes
+
+
+@pytest.mark.parametrize("damage", [
+    "missing-archive", "damaged-archive", "missing-input", "run-identity",
+    "same-loop", "noncanonical-pointer", "pending-publication",
+])
+def test_design_publication_rejects_unproven_later_pointer(
+    tmp_path, monkeypatch, damage
+):
+    from dataclasses import replace
+
+    options, artifacts, _, _, pending = _interrupted_publication_case(
+        tmp_path, monkeypatch, initial=True, target="archive"
+    )
+    later = replace(options, loop_id="dc-second")
+    if damage == "pending-publication":
+        write = LoopArtifactStore.write_bytes_artifact
+
+        def interrupt_later_archive(self, path, content, **kwargs):
+            if (
+                path.parent.name == "design-check-publications"
+                and path.parent.parent.name == later.loop_id
+            ):
+                raise OSError("later publication archive interrupted")
+            return write(self, path, content, **kwargs)
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(LoopArtifactStore, "write_bytes_artifact", interrupt_later_archive)
+            assert check_design_contract_loop(later).status == "blocked"
+    else:
+        assert check_design_contract_loop(later).status == "ready"
+    later_artifacts = design_contract_loop_module.design_contract_artifacts(
+        tmp_path, later.loop_id
+    )
+    if damage in {"missing-archive", "damaged-archive"}:
+        archive = next((later_artifacts.loop_dir / "design-check-publications").glob("*.json"))
+    if damage == "missing-archive":
+        archive.unlink()
+    elif damage == "damaged-archive":
+        archive.write_bytes(archive.read_bytes() + b" ")
+    elif damage == "missing-input":
+        later_artifacts.input_path.unlink()
+    elif damage == "run-identity":
+        run = json.loads(later_artifacts.loop_run_path.read_bytes())
+        run["input_digest"] = "sha256:" + "0" * 64
+        later_artifacts.loop_run_path.write_text(json.dumps(run), encoding="utf-8")
+    elif damage in {"same-loop", "noncanonical-pointer"}:
+        pointer = json.loads(artifacts.pointer_path.read_bytes())
+        if damage == "same-loop":
+            pointer["loop_id"] = options.loop_id
+            pointer["loop_run_path"] = str(artifacts.loop_run_path.relative_to(tmp_path))
+            pointer["created_at"] = "2030-01-01T00:00:00Z"
+        else:
+            pointer["loop_run_path"] = "other/loop-run.json"
+        artifacts.pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+    before = {
+        path: path.read_bytes() for path in (tmp_path / ".ai-sdlc").rglob("*")
+        if path.is_file()
+    }
+    result = check_design_contract_loop(options)
+    assert result.status == "blocked", result
+    assert "publication" in result.blocker
+    if damage == "pending-publication":
+        assert "later publication pending" in result.blocker
+        assert (later_artifacts.loop_dir / design_contract_loop_module.DESIGN_CHECK_PENDING).is_file()
+    assert pending.is_file()
+    assert {path: path.read_bytes() for path in before} == before
+    assert set(path for path in (tmp_path / ".ai-sdlc").rglob("*") if path.is_file()) == set(before)
+
+
+def test_design_publication_preserves_pointer_changed_during_recovery(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    options, artifacts, _, _, pending = _interrupted_publication_case(
+        tmp_path, monkeypatch, initial=True, target="archive"
+    )
+    original = pending.read_bytes()
+    assert check_design_contract_loop(replace(options, loop_id="dc-second")).status == "ready"
+    write = LoopArtifactStore.write_bytes_artifact
+    replacement = []
+
+    def publish_third(self, path, content, **kwargs):
+        result = write(self, path, content, **kwargs)
+        if path.parent == artifacts.loop_dir / "design-check-publications":
+            third = check_design_contract_loop(replace(options, loop_id="dc-third"))
+            assert third.status == "ready", third
+            replacement.append(artifacts.pointer_path.read_bytes())
+        return result
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(LoopArtifactStore, "write_bytes_artifact", publish_third)
+        result = check_design_contract_loop(options)
+    assert result.status == "blocked", result
+    assert "publication" in result.blocker
+    assert len(replacement) == 1
+    assert artifacts.pointer_path.read_bytes() == replacement[0]
+    assert pending.read_bytes() == original
+    assert check_design_contract_loop(options).status == "ready"
+    assert not pending.exists()
+
+
+def test_design_publication_equal_commit_bytes_choose_exact_old_state(
+    tmp_path, monkeypatch
+):
+    options, artifacts, paths, before, pending = _interrupted_publication_case(
+        tmp_path, monkeypatch
+    )
+    journal = json.loads(pending.read_bytes())
+    for name in ("loop-run.json", "design-contract-input.json"):
+        journal["entries"][name]["new"] = journal["entries"][name]["old"]
+        paths[name].write_bytes(before[name])
+    pending.write_text(json.dumps(journal), encoding="utf-8")
+    with design_contract_loop_module._stage_write_guard(
+        tmp_path, "design-contract", options.loop_id
+    ):
+        design_contract_loop_module._recover_design_publication(tmp_path, artifacts)
+    assert {name: path.read_bytes() for name, path in paths.items()} == before
+    assert not pending.exists()
+
+
+@pytest.mark.parametrize("intervening_publication", [False, True])
+def test_quantified_design_recovery_preserves_r1_costs_and_completes_original_r2_close(
+    initialized_project_dir, monkeypatch, intervening_publication
+):
+    from tests.integration.test_stage_quantified_pipeline import (
+        CAPABILITY,
+        LOOP,
+        WORK_ITEM,
+        _cli,
+        _payload,
+        actual_record,
+        stage_apply,
+        stage_selected,
+    )
+
+    root = initialized_project_dir
+    stage_selected(root, "design-contract", repair_fact=True)
+    stage_apply(
+        root, "design-contract", {"operation": "seal-for-review", "request_id": "seal"}
+    )
+    reviewed = _payload(
+        _cli(
+            root,
+            "loop",
+            "review",
+            "--type",
+            "design-contract",
+            "--loop-id",
+            LOOP,
+            "--json",
+        )
+    )
+    assert (
+        actual_record(root, "design-contract", reviewed, status="UNKNOWN")["status"]
+        == "needs_fix"
+    )
+    directory = root / ".ai-sdlc/loops/design-contract" / LOOP
+    history = {
+        name: (directory / name).read_bytes()
+        for name in ("decision-context.json", "review-outcome-round-1.json")
+    }
+    old_run = LoopRun.model_validate_json((directory / "loop-run.json").read_bytes())
+    (root / "repair-fact.md").write_text("R1 后补充实际处理说明。\n", encoding="utf-8")
+    plan = root / WORK_ITEM / "plan.md"
+    plan.write_text(plan.read_text() + "\n补充原范围内的处理说明。\n", encoding="utf-8")
+    options = DesignContractCheckOptions(
+        root=root,
+        work_item=WORK_ITEM,
+        loop_id=LOOP,
+        decision_mode="adaptive-quantified",
+        decision_capability=CAPABILITY,
+    )
+    original = LoopArtifactStore.write_bytes_artifact
+
+    def interrupt(self, path, content, **kwargs):
+        if (
+            path.parent.name == "design-check-publications"
+            if intervening_publication else path.name == "loop-run.json"
+        ):
+            raise OSError("quantified design publication interrupted")
+        return original(self, path, content, **kwargs)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(LoopArtifactStore, "write_bytes_artifact", interrupt)
+        failed = check_design_contract_loop(options)
+        assert failed.status == "blocked"
+    if intervening_publication:
+        later = check_design_contract_loop(DesignContractCheckOptions(
+            root=root, work_item=WORK_ITEM, loop_id="dc-intervening",
+        ))
+        assert later.status == "ready", later
+    command = shlex.split(
+        failed.next_action.removeprefix("Run ").removesuffix(
+            " to recover this publication."
+        )
+    )
+    assert "adaptive-quantified" in command and CAPABILITY in command
+    assert _payload(_cli(root, *command[1:], "--json"))["status"] == "ready"
+    assert {name: (directory / name).read_bytes() for name in history} == history
+    current_run = LoopRun.model_validate_json(
+        (directory / "loop-run.json").read_bytes()
+    )
+    assert current_run.current_round == 2
+    assert current_run.created_at == old_run.created_at
+    second = _payload(
+        _cli(
+            root,
+            "loop",
+            "review",
+            "--type",
+            "design-contract",
+            "--loop-id",
+            LOOP,
+            "--json",
+        )
+    )
+    assert second["round_number"] == 2
+    assert actual_record(root, "design-contract", second)["status"] == "passed"
+    close = _cli(
+        root,
+        "loop",
+        "design-contract",
+        "close",
+        "--loop-id",
+        LOOP,
+        "--expect-review-digest",
+        second["input_digest"],
+        "--yes",
+        "--json",
+    )
+    assert close.returncode == 0, close.stdout + close.stderr
+    assert (directory / "review-outcome-round-1.json").read_bytes() == history[
+        "review-outcome-round-1.json"
+    ]
+    assert not (directory / "review-outcome-round-3.json").exists()
+
+
+@pytest.mark.parametrize(
+    "pending_id,blocked",
+    [
+        (None, False),
+        ("design-upstream", True),
+        ("impl-current", False),
+        ("empty-upstream", False),
+    ],
+)
+def test_design_publication_guard_uses_implementation_upstream_identity(
+    tmp_path, pending_id, blocked
+):
+    from ai_sdlc.core.design_contract_store import (
+        DESIGN_CHECK_PENDING,
+        read_verification_contract,
+    )
+    from ai_sdlc.core.implementation_models import ImplementationInput
+
+    impl = ImplementationInput(
+        loop_id="impl-current",
+        work_item_id="demo",
+        work_item_path="specs/demo",
+        spec_path="specs/demo/spec.md",
+        plan_path="specs/demo/plan.md",
+        tasks_path="specs/demo/tasks.md",
+        design_contract_loop_id=""
+        if pending_id == "empty-upstream"
+        else "design-upstream",
+    )
+    if pending_id and pending_id != "empty-upstream":
+        pending = (
+            design_contract_loop_module.design_contract_artifacts(
+                tmp_path, pending_id
+            ).loop_dir
+            / DESIGN_CHECK_PENDING
+        )
+        pending.parent.mkdir(parents=True)
+        pending.write_text("{}", encoding="utf-8")
+    if blocked:
+        with pytest.raises(ValueError, match="publication-pending"):
+            read_verification_contract(tmp_path, impl)
+    else:
+        assert read_verification_contract(tmp_path, impl) == (None, {})
+
+
+def test_quantified_design_next_keeps_options_when_pending_creation_fails(
+    tmp_path, monkeypatch
+):
+    _write_work_item(tmp_path)
+    options = DesignContractCheckOptions(
+        root=tmp_path,
+        work_item="specs/demo-contract",
+        loop_id="dc-quantified-first-write",
+        decision_mode="adaptive-quantified",
+        decision_capability="stage-simulation-v1",
+    )
+    original = LoopArtifactStore.write_bytes_artifact
+
+    def interrupt(self, path, content, **kwargs):
+        if path.name == design_contract_loop_module.DESIGN_CHECK_PENDING:
+            raise OSError("pending not written")
+        return original(self, path, content, **kwargs)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(LoopArtifactStore, "write_bytes_artifact", interrupt)
+        result = check_design_contract_loop(options)
+    assert result.status == "blocked"
+    assert "publication-write-failed" in result.blocker
+    assert "--decision-mode adaptive-quantified" in result.next_action
+    assert "--decision-capability stage-simulation-v1" in result.next_action
+    assert check_design_contract_loop(options).status == "ready"
 
 
 @pytest.mark.parametrize(

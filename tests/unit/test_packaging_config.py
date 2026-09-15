@@ -58,6 +58,7 @@ def test_editable_wheel_includes_browser_gate_probe_runner_runtime_asset(
     wheel_path = tmp_path / wheel_name
 
     with zipfile.ZipFile(wheel_path) as archive:
+        assert archive.read("ai_sdlc/LICENSE") == (REPO_ROOT / "LICENSE").read_bytes()
         assert (
             "ai_sdlc/runtime_assets/frontend_browser_gate_probe_runner.mjs"
             in archive.namelist()
@@ -72,6 +73,14 @@ def test_sdist_includes_browser_gate_probe_runner_source(
 
     with tarfile.open(sdist_path, "r:gz") as archive:
         members = archive.getnames()
+        license_path = next(
+            member
+            for member in members
+            if member.count("/") == 1 and member.endswith("/LICENSE")
+        )
+        license_file = archive.extractfile(license_path)
+        assert license_file is not None
+        assert license_file.read() == (REPO_ROOT / "LICENSE").read_bytes()
     assert any(
         member.endswith("/scripts/frontend_browser_gate_probe_runner.mjs")
         for member in members

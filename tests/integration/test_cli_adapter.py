@@ -14,10 +14,85 @@ from typer.testing import CliRunner
 from ai_sdlc.cli import adapter_cmd
 from ai_sdlc.cli.main import app
 from ai_sdlc.core.config import load_project_config
+from ai_sdlc.core.loop_models import LoopStatus, LoopType
+from ai_sdlc.core.loop_router import LoopRouteItem, LoopRouteResult, LoopRouteStatus
 from ai_sdlc.integrations.ide_adapter import IDEKind
 from ai_sdlc.models.project import ActivationState, AdapterSupportTier, PreferredShell
+from ai_sdlc.rules import RulesLoader
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize(
+    ("target", "canonical_path"),
+    [
+        ("codex", "AGENTS.md"),
+        ("claude_code", ".claude/CLAUDE.md"),
+        ("cursor", ".cursor/rules/ai-sdlc.mdc"),
+        ("vscode", ".github/copilot-instructions.md"),
+        ("generic", ".ai-sdlc/memory/ide-adapter-hint.md"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("loop_type", "rule_name", "required_text"),
+    [
+        (LoopType.DESIGN_CONTRACT, "quality-gate", "--verification-contract"),
+        (LoopType.IMPLEMENTATION, "verification", "反例合同由宿主准备"),
+    ],
+)
+def test_adapter_run_consumes_same_bounded_counterexample_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    canonical_path: str,
+    loop_type: LoopType,
+    rule_name: str,
+    required_text: str,
+) -> None:
+    initialized = runner.invoke(app, ["init", str(tmp_path), "--agent-target", target])
+    assert initialized.exit_code == 0, initialized.output
+    canonical = (tmp_path / canonical_path).read_text(encoding="utf-8")
+    if target == "generic":
+        assert "请手动在所用 AI 助手中引用" in canonical
+        assert load_project_config(tmp_path).adapter_ingress_state == "degraded"
+    else:
+        assert "Applicable Rules" in canonical
+    assert "ai-sdlc run" in canonical
+    monkeypatch.chdir(tmp_path)
+    routed = LoopRouteResult(
+        status=LoopRouteStatus.ROUTED,
+        result="Render current candidate rules.",
+        current_loop=LoopRouteItem(
+            loop_type=loop_type,
+            loop_id="render-fixture",
+            status=LoopStatus.NEEDS_REVIEW,
+        ),
+    )
+    # 仅隔离路由状态；适配器安装、内置规则加载和 CLI 渲染使用真实实现。
+    monkeypatch.setattr(
+        "ai_sdlc.cli.run_cmd.route_five_loops", lambda *_args, **_kwargs: routed
+    )
+    rendered = runner.invoke(app, ["run", "--json"])
+    assert rendered.exit_code == 0, rendered.output
+    payload = json.loads(rendered.output)
+    assert payload["rule_context_error"] is None
+    expected = RulesLoader().get_normal_path_context(str(loop_type))
+    assert payload["applicable_rules"] == [
+        {"name": item.name, "title": item.title, "content": item.content}
+        for item in expected.excerpts
+    ]
+    excerpt = next(
+        item["content"]
+        for item in payload["applicable_rules"]
+        if item["name"] == rule_name
+    )
+    assert required_text in excerpt
+    assert len(excerpt.encode("utf-8")) <= 1200
+    human = runner.invoke(app, ["run"])
+    assert human.exit_code == 0, human.output
+    assert "Applicable Rules" in human.output
+    assert required_text in human.output
+
 
 IDE_ENV_KEYS = [
     "CURSOR_TRACE_ID",

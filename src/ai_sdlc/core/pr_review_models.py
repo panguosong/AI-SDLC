@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from enum import StrEnum
 from typing import Literal
@@ -14,7 +16,11 @@ from ai_sdlc.core.loop_models import (
     LoopType,
     utc_now_iso,
 )
-from ai_sdlc.core.quality_command import QualityCommandResult
+from ai_sdlc.core.quality_command import (
+    QualityCommandResult,
+    controlled_raw_original,
+    validate_controlled_receipts,
+)
 
 
 class ReviewVerdict(StrEnum):
@@ -50,6 +56,14 @@ class ProviderIsolationStatus(StrEnum):
     ISOLATED_PROCESS = "isolated_process"
     ISOLATED_SESSION = "isolated_session"
     NOT_PROVEN = "not_proven"
+
+
+class ProviderLaunchStatus(StrEnum):
+    """区分未启动证明、已启动调用及不含启动证明的旧记录。"""
+
+    UNKNOWN = "unknown"
+    NEVER_STARTED = "never_started"
+    STARTED = "started"
 
 
 class ProviderMode(StrEnum):
@@ -236,6 +250,68 @@ class ModelResolution(LoopArtifactModel):
         return self
 
 
+class RepairScopeDependency(BaseModel):
+    """本次修复新增的精确普通文件，不接受目录或路径模式。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    path: str
+    blob_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    finding_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+    @field_validator("path")
+    @classmethod
+    def _canonical_file(cls, value: str) -> str:
+        if (
+            any(part in {"", ".", ".."} for part in value.split("/"))
+            or any(char in value for char in "\\:*?[]")
+            or any(ord(char) < 32 for char in value)
+        ):
+            raise ValueError("repair scope requires a canonical relative file")
+        return value
+
+    @field_validator("finding_id", "reason")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("repair scope text is required")
+        return value
+
+
+
+
+
+
+class RepairScopeInput(BaseModel):
+    """对原 REQUIRED 修复依赖的精确确认；不证明操作者身份或语义正确性。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal["1"] = "1"
+    artifact_kind: Literal["pr-repair-scope-input"] = "pr-repair-scope-input"
+    request_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+    review_id: str = Field(min_length=1)
+    loop_id: str = Field(min_length=1)
+    head_commit: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    review_pack_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    findings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resolution_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resolution_round: int = Field(ge=1)
+    staged_tree_oid: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+    dependencies: list[RepairScopeDependency] = Field(default_factory=list)
+    workspace_adoption: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def _unique_paths(self) -> RepairScopeInput:
+        if self.workspace_adoption is not None:
+            raise ValueError("workspace adoption is unsupported")
+        if not self.dependencies:
+            raise ValueError("repair dependencies are required")
+        paths = [item.path for item in self.dependencies]
+        if len(set(paths)) != len(paths):
+            raise ValueError("repair scope dependency paths must be unique")
+        return self
+
+
 class FindingResolution(LoopArtifactModel):
     """Resolution record for one review finding."""
 
@@ -389,9 +465,13 @@ class ReviewPack(LoopArtifactModel):
     code_egress: bool = False
     redaction_report_path: str = ""
     reviewer_allowlist: list[str] = Field(default_factory=list)
+    workspace_adoption_ref: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    rejected_feedback_ref: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _require_commit_scope(self) -> ReviewPack:
+        if self.rejected_feedback_ref is not None or self.workspace_adoption_ref is not None:
+            raise ValueError("historical provider recovery references are unsupported")
         required = {
             "review_id": self.review_id,
             "loop_id": self.loop_id,
@@ -422,6 +502,138 @@ class ReviewPack(LoopArtifactModel):
         return self
 
 
+class ProviderWorkspaceCheck(BaseModel):
+    """原调用的工作区检查证据；只约束 reviewer 实际改过的边界。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    snapshot_mode: Literal["bounded-metadata-v1", "complete-metadata-v1"] = Field(
+        default="bounded-metadata-v1", exclude_if=lambda value: value == "bounded-metadata-v1"
+    )
+    snapshot_max_entries: int = Field(default=4096, strict=True, exclude_if=lambda value: value == 4096)
+    workspace_adoption_ref: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    status: Literal["unchanged", "mutated", "unproven"]
+    review_pack_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    original_values: dict[str, str | None] = Field(default_factory=dict)
+    host_artifact_mutations: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_workspace_check(self) -> ProviderWorkspaceCheck:
+        if (self.snapshot_mode != "bounded-metadata-v1" or self.snapshot_max_entries != 4096
+                or self.workspace_adoption_ref is not None):
+            raise ValueError("workspace adoption and complete recovery snapshots are unsupported")
+        for key in [*self.original_values, *self.host_artifact_mutations]:
+            if key in {"<git:HEAD>", "<git:INDEX>"}:
+                if key in self.host_artifact_mutations:
+                    raise ValueError("host artifact must be a relative file path")
+                continue
+            if (
+                not key
+                or key.startswith("/")
+                or "\\" in key
+                or ":" in key
+                or any(part in {"", ".", ".."} for part in key.rstrip("/").split("/"))
+            ):
+                raise ValueError("workspace boundary must be a canonical relative path")
+        changed = bool(self.original_values or self.host_artifact_mutations)
+        if self.status == "unchanged" and changed:
+            raise ValueError("unchanged workspace cannot contain mutation boundaries")
+        if self.status == "mutated" and not changed:
+            raise ValueError("mutated workspace requires an original boundary")
+        if self.status == "unproven":
+            if not self.reason or not self.reason.strip():
+                raise ValueError("unproven workspace requires a reason")
+        elif self.reason is not None:
+            raise ValueError("only unproven workspace may contain a reason")
+        if len(set(self.host_artifact_mutations)) != len(self.host_artifact_mutations):
+            raise ValueError("host artifact mutations must be unique")
+        return self
+
+
+class ProviderCompletionProof(BaseModel):
+    """原调用的进程原件随 invocation 归档；不为旧缺证调用补写证明。"""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1] = 1
+    ownership_nonce: str = Field(min_length=1)
+    originals: dict[str, str]
+    sha256: dict[str, str]
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _strict_completion_version(cls, value: object) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("provider-completion-schema-version-invalid")
+        return value
+
+    def verified_receipts(
+        self,
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        names = {"process.json", "raw-result.json", "cleanup.json"}
+        present = set(self.originals)
+        if (
+            "cleanup.json" not in present
+            or not present <= names
+            or set(self.sha256) != present
+        ):
+            raise ValueError("provider-completion-original-set-incomplete")
+        documents = {}
+        for name in sorted(present):
+            content = self.originals[name].encode("utf-8")
+            if hashlib.sha256(content).hexdigest() != self.sha256[name]:
+                raise ValueError("provider-completion-original-drift")
+            document = json.loads(content)
+            if not isinstance(document, dict):
+                raise ValueError("provider-completion-original-not-object")
+            documents[name] = document
+        # 未启动没有 process 原件；保留缺席事实，不生成空文件冒充原始回执。
+        process = documents.get("process.json", {})
+        cleanup = documents["cleanup.json"]
+        raw = controlled_raw_original(
+            documents.get("raw-result.json", {}), cleanup,
+            raw_present="raw-result.json" in documents,
+        )
+        validate_controlled_receipts(
+            process, raw, cleanup, ownership_nonce=self.ownership_nonce
+        )
+        return process, raw, cleanup
+
+    def require_complete(self) -> dict[str, object]:
+        _, raw, cleanup = self.verified_receipts()
+        if cleanup["status"] != "complete":
+            raise ValueError("provider-owned-process-cleanup-incomplete")
+        return raw
+
+
+class ProviderExecutionFailure(BaseModel):
+    """已启动调用的异常事实与诊断输出；不提供评审判断。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    exception_type: str = Field(min_length=1)
+    message: str
+    findings_status: Literal["absent", "present", "unavailable"]
+    findings_sha256: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    findings_error: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def _require_diagnostic_identity(self) -> ProviderExecutionFailure:
+        if not self.exception_type.strip():
+            raise ValueError("provider execution exception type is required")
+        if self.findings_status == "present":
+            if (self.findings_sha256 is None
+                    or re.fullmatch(r"[0-9a-f]{64}", self.findings_sha256) is None
+                    or self.findings_error is not None):
+                raise ValueError("present provider diagnostics require their original digest")
+        elif self.findings_status == "absent":
+            if self.findings_sha256 is not None or self.findings_error is not None:
+                raise ValueError("absent provider diagnostics cannot claim original bytes")
+        elif (self.findings_sha256 is not None or not self.findings_error
+              or not self.findings_error.strip()):
+            raise ValueError("unavailable provider diagnostics require an actual read error")
+        return self
+
+
 class ProviderRunnerInvocation(LoopArtifactModel):
     """Persistent audit record for one reviewer provider invocation."""
 
@@ -439,10 +651,40 @@ class ProviderRunnerInvocation(LoopArtifactModel):
     output_path: str
     allowlist: list[str] = Field(default_factory=list)
     isolation_status: ProviderIsolationStatus = ProviderIsolationStatus.NOT_PROVEN
+    launch_status: ProviderLaunchStatus = ProviderLaunchStatus.UNKNOWN
+    completion_proof: ProviderCompletionProof | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     exit_code: int | None = None
     started_at: str = Field(default_factory=utc_now_iso)
     completed_at: str = ""
+    preflight_incomplete: bool = Field(default=False, exclude_if=lambda value: value is False)
+    execution_failure: ProviderExecutionFailure | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     status: LoopStatus = LoopStatus.CREATED
+    workspace_check: ProviderWorkspaceCheck | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def _require_preflight_failure(self) -> ProviderRunnerInvocation:
+        if self.execution_failure is not None and (
+            self.launch_status != ProviderLaunchStatus.STARTED
+            or self.status != LoopStatus.BLOCKED or self.preflight_incomplete
+        ):
+            raise ValueError("provider execution failure requires a started blocked invocation")
+        if self.preflight_incomplete and (
+            self.launch_status != ProviderLaunchStatus.NEVER_STARTED
+            or self.isolation_status != ProviderIsolationStatus.NOT_PROVEN
+            or self.exit_code is not None or self.completion_proof is not None
+            or self.status != LoopStatus.BLOCKED or not self.completed_at
+            or self.started_at != self.completed_at
+            or self.workspace_check is None or self.workspace_check.status != "unproven"
+            or self.workspace_check.original_values or self.workspace_check.host_artifact_mutations
+        ):
+            raise ValueError("incomplete preflight cannot claim execution or a proven workspace")
+        return self
 
     @field_validator(
         "provider_id",
@@ -595,8 +837,10 @@ __all__ = [
     "ModelResolutionSource",
     "ModelResolutionStatus",
     "ProviderIsolationStatus",
+    "ProviderLaunchStatus",
     "ProviderMode",
     "ProviderRunnerInvocation",
+    "ProviderWorkspaceCheck",
     "ReviewFinding",
     "ReviewFindings",
     "ReviewPack",

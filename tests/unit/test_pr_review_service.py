@@ -546,13 +546,16 @@ def test_start_local_agent_without_command_returns_needs_user(tmp_path) -> None:
 
     assert result.status == PRReviewCommandStatus.NEEDS_USER
     assert "not configured" in result.blocker
-    assert result.review_pack_path
+    # 尚无可执行调用，不能发布无法绑定执行原件的新评审；配置后仍可使用同一 ID。
+    assert result.review_pack_path == result.review_run_path == ""
+    assert not (tmp_path / CURRENT_REVIEW_PATH).exists()
+    assert not (tmp_path / ".ai-sdlc/reviews/pr/review-local/review-pack.json").exists()
 
     close = close_pr_review(tmp_path)
-    assert close.status == PRReviewCommandStatus.NEEDS_USER
-    assert close.verdict == "blocked"
-    assert "not closeable" in close.blocker
+    assert close.status == PRReviewCommandStatus.NO_REVIEW
+    assert close.blocker and close.next_action
     assert close.final_report_path == ""
+    assert not (tmp_path / CURRENT_REVIEW_PATH).exists()
 
 
 def test_start_blocks_local_agent_missing_findings_without_traceback(tmp_path) -> None:
@@ -1054,7 +1057,8 @@ def test_close_blocks_tampered_review_pack_policy_decision(tmp_path) -> None:
         review_id="review-tampered-pack-waiver",
     )
     pack_path = Path(start.review_pack_path)
-    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    original = pack_path.read_bytes()
+    pack = json.loads(original)
     assert pack["policy_decisions"]["incomplete_review_waiver"] is True
     pack["policy_decisions"]["incomplete_review_waiver"] = False
     pack_path.write_text(json.dumps(pack), encoding="utf-8")
@@ -1063,8 +1067,14 @@ def test_close_blocks_tampered_review_pack_policy_decision(tmp_path) -> None:
 
     assert result.status == PRReviewCommandStatus.BLOCKED
     assert result.verdict == "blocked"
-    assert "review-pack.json changed" in result.blocker
-    assert result.next_action == "Rerun PR review before closing."
+    # 完整性可以在共享读取时提前拒绝；验收绑定实际篡改及恢复，不依赖晚期错误文案。
+    assert result.blocker and result.next_action
+    assert result.final_report_path == ""
+    assert json.loads(pack_path.read_bytes())["policy_decisions"]["incomplete_review_waiver"] is False
+    pack_path.write_bytes(original)
+    recovered = close_pr_review(tmp_path)
+    assert recovered.status == PRReviewCommandStatus.CLOSED
+    assert recovered.verdict == "risk_accepted"
 
 
 def test_close_blocks_when_provider_verdict_is_blocked(tmp_path) -> None:
@@ -1867,13 +1877,22 @@ def test_rerun_blocks_tampered_findings_before_reset(tmp_path) -> None:
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings), encoding="utf-8")
 
+    # 拒绝必须保留损坏现场，不能因提示文案变化掩盖原件被重置。
+    originals = {
+        path: path.read_bytes()
+        for path in (tmp_path / ".ai-sdlc").rglob("*")
+        if path.is_file()
+    }
+
     result = rerun_pr_review(tmp_path, mock_fixture=MockReviewerFixture.CLEAN)
 
     assert result.status == PRReviewCommandStatus.BLOCKED
     assert "findings.json changed" in result.blocker
-    assert (
-        result.next_action == "Rerun PR review before resetting resolution artifacts."
-    )
+    assert {
+        path: path.read_bytes()
+        for path in (tmp_path / ".ai-sdlc").rglob("*")
+        if path.is_file()
+    } == originals
 
 
 def test_rerun_blocks_malformed_review_pack(tmp_path) -> None:
@@ -2060,7 +2079,8 @@ def _append_advisory_finding(findings_path: Path) -> None:
         {
             "id": "ADV-001",
             "severity": "ADVISORY",
-            "file": "src/docs.py",
+            # 合法 advisory 必须指向当前评审范围，不能用范围外反馈测试忽略建议项。
+            "file": "src/app.py",
             "claim": "Optional cleanup.",
             "evidence": "Fixture advisory.",
             "risk": "Low maintainability risk.",
@@ -2198,3 +2218,82 @@ def _git(path: Path, *args: str) -> str:
     if result.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+@pytest.mark.parametrize("source_mode", ["filesystem", "head", "base", "deleted"])
+@pytest.mark.parametrize("sample_kind", ["placeholder", "environment", "comparison", "pattern"])
+@pytest.mark.parametrize("line_prefix", ["# 中文前缀\n", "# 中文前缀\f\n"])
+def test_redaction_exact_code_samples_remain_complete(tmp_path, source_mode, sample_kind, line_prefix) -> None:
+    from ai_sdlc.core.pr_review_redaction import SECRET_PATTERNS, analyze_redaction
+
+    marker = SECRET_PATTERNS[0].pattern.split("*", 1)[1]
+    samples = {
+        "placeholder": repr('api_key = "abcdefghijklmnop"\n'),
+        "environment": repr("api_key = get_from_env()\n"),
+        "comparison": "if " + repr(marker) + " in text:\n    pass\n",
+        "pattern": "import re\nre.compile(" + repr(SECRET_PATTERNS[0].pattern) + ")\n",
+    }
+    # 多字节前缀验证 AST 字节列与 tokenizer 字符列转换。
+    source = line_prefix + ("标记 = '中文'; " + samples[sample_kind] if sample_kind in {"placeholder", "environment"}
+                            else samples[sample_kind])
+    path = "src/review_sample.py"
+    target = tmp_path / path
+    target.parent.mkdir()
+    target.write_text(source, encoding="utf-8")
+    options = {}
+    if source_mode == "head":
+        options["head_file_bytes"] = {path: source.encode()}
+    elif source_mode == "base":
+        options["head_file_bytes"] = {path: b"print('safe')\n"}
+        options["base_file_bytes"] = {path: source.encode()}
+    elif source_mode == "deleted":
+        target.unlink()
+        options["deleted_file_bytes"] = {path: source.encode()}
+    report = analyze_redaction(tmp_path, [path], **options)
+    assert report.included_files == [path]
+    assert report.redacted_files == report.omitted_files == report.high_risk_secret_files == []
+
+
+@pytest.mark.parametrize("source_mode", ["filesystem", "head", "base", "deleted"])
+@pytest.mark.parametrize("sample_kind", [
+    "direct", "different_value", "extra_statement", "concatenated", "interpolated", "parse_failure",
+    "mixed", "pem", "marker_assignment", "marker_concatenated", "private_path", "non_python",
+])
+def test_redaction_code_sample_corrections_preserve_rejections(tmp_path, source_mode, sample_kind) -> None:
+    from ai_sdlc.core.pr_review_redaction import SECRET_PATTERNS, analyze_redaction
+
+    marker = SECRET_PATTERNS[0].pattern.split("*", 1)[1]
+    assignment = "api_key = " + repr("abcdefghijklmnop")
+    other = "api_key = " + repr("opaque-value-not-a-placeholder")
+    benign = repr(assignment)
+    samples = {
+        "direct": assignment,
+        "different_value": repr(other),
+        "extra_statement": repr(assignment + "; print('extra')"),
+        "concatenated": benign + " + ''",
+        "interpolated": "f" + benign,
+        "parse_failure": benign + "\nif:",
+        "mixed": benign + "\n" + other,
+        "pem": repr("-----BEGIN " + marker + "\nopaque material\n-----END " + marker),
+        "marker_assignment": "marker = " + repr(marker),
+        "marker_concatenated": "if " + repr(marker) + " + '' in text:\n    pass",
+        "private_path": benign,
+        "non_python": benign,
+    }
+    source = samples[sample_kind]
+    path = ".env" if sample_kind == "private_path" else "sample.txt" if sample_kind == "non_python" else "sample.py"
+    target = tmp_path / path
+    target.write_text(source, encoding="utf-8")
+    options = {}
+    if source_mode == "head":
+        options["head_file_bytes"] = {path: source.encode()}
+    elif source_mode == "base":
+        options["head_file_bytes"] = {path: b"print('safe')\n"}
+        options["base_file_bytes"] = {path: source.encode()}
+    elif source_mode == "deleted":
+        target.unlink()
+        options["deleted_file_bytes"] = {path: source.encode()}
+    report = analyze_redaction(tmp_path, [path], **options)
+    assert report.included_files == []
+    assert report.redacted_files + report.omitted_files == [path]
+    assert report.high_risk_secret_files == [path]

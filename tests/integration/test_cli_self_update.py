@@ -340,6 +340,10 @@ def test_self_update_install_completes_without_manual_followup(
 
     assert result.exit_code == 0
     assert [call[0] for call in calls] == ["download", "extract", "install"]
+    assert calls[0][1] == (
+        "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v1.0.1/"
+        f"{calls[1][1]}"
+    )
     assert "更新完成" in result.output
     assert "Update completed" in result.output
     assert "不需要继续执行升级命令" in result.output

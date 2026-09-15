@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the public AI-SDLC 3.1.0 release identity."""
+"""Validate the public AI-SDLC 3.2.0 release identity."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-CURRENT_REPOSITORY_URL = "https://github.com/SinclairPan/Ai_AutoSDLC"
-CURRENT_VERSION = "3.1.0"
+CURRENT_REPOSITORY_URL = "https://github.com/sinclairpan0720/Ai_AutoSDLC"
+CURRENT_VERSION = "3.2.0"
 STABLE_SOURCE_CLONE = (
-    "git clone --branch v3.1.0 --depth 1 https://github.com/SinclairPan/Ai_AutoSDLC.git"
+    "git clone --branch v3.2.0 --depth 1 https://github.com/sinclairpan0720/Ai_AutoSDLC.git"
 )
 
 REQUIRED_SURFACES: dict[str, tuple[str, ...]] = {
@@ -23,9 +23,9 @@ REQUIRED_SURFACES: dict[str, tuple[str, ...]] = {
         CURRENT_VERSION,
         "## 第一章：全新用户 + 全新空项目",
         "## 第二章：全新用户 + 已有项目",
-        "releases/download/v3.1.0/ai-sdlc-offline-3.1.0-windows-amd64.zip",
-        "releases/download/v3.1.0/ai-sdlc-offline-3.1.0-macos-arm64.tar.gz",
-        "releases/download/v3.1.0/ai-sdlc-offline-3.1.0-linux-amd64.tar.gz",
+        "releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip",
+        "releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz",
+        "releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
         "Get-FileHash -Algorithm SHA256",
         "shasum -a 256 -c",
         "sha256sum -c",
@@ -61,11 +61,11 @@ REQUIRED_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "packaging/install_online.ps1": (
         CURRENT_REPOSITORY_URL,
-        "git+https://github.com/SinclairPan/Ai_AutoSDLC.git@v3.1.0",
+        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
     ),
     "packaging/install_online.sh": (
         CURRENT_REPOSITORY_URL,
-        "git+https://github.com/SinclairPan/Ai_AutoSDLC.git@v3.1.0",
+        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
     ),
     "docs/v3-migration.zh-CN.md": (
         "v3.0.0",

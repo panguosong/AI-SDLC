@@ -15,6 +15,8 @@ on:
       - "src/**"
       - "tests/integration/test_github_workflows.py"
       - "tests/integration/test_offline_bundle_scripts.py"
+      - "tests/unit/test_counterexample_execution.py"
+      - "tests/unit/test_counterexample_models.py"
 
 permissions:
   contents: read
@@ -173,4 +175,47 @@ jobs:
         with:
           name: windows-offline-smoke-evidence
           path: ${{ runner.temp }}/ai-sdlc-windows-smoke-evidence
+          if-no-files-found: error
+
+
+  counterexample-native:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --dev --locked
+      - name: Verify native resource junction rejection and normal nested resources
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          $ErrorActionPreference = "Stop"
+          $testRoot = Join-Path $env:RUNNER_TEMP "counterexample-native-tests"
+          $report = Join-Path $env:RUNNER_TEMP "counterexample-native-junit.xml"
+          uv run --no-sync pytest -q `
+            tests/unit/test_counterexample_execution.py::test_v24_native_windows_junction_rejected_without_target_changes `
+            tests/unit/test_counterexample_execution.py::test_first_subject_and_later_subject_accept_declared_initial_tree `
+            --basetemp=$testRoot --junitxml=$report
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native counterexample resource checks failed with exit code $LASTEXITCODE"
+          }
+      - name: Upload native resource evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: counterexample-native-windows-evidence
+          path: ${{ runner.temp }}/counterexample-native-junit.xml
           if-no-files-found: error

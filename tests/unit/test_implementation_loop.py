@@ -44,6 +44,235 @@ from ai_sdlc.core.requirement_loop import (
 from ai_sdlc.core.review_kernel import ReviewInput
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"argv": (sys.executable, "-c", "raise RuntimeError('must not run')")},
+        {"cwd": "nested"},
+        {"timeout_seconds": 1.0},
+        {"command_options_explicit": True},
+    ],
+)
+def test_counterexample_plan_cannot_override_frozen_execution(tmp_path, overrides):
+    options = dict(
+        root=tmp_path, task_id="T01", cwd=".", argv=(), counterexample_plan="plan.json"
+    )
+    result = verify_implementation_task(
+        ImplementationVerifyOptions(**(options | overrides))
+    )
+    assert result.status == "blocked"
+    assert "cannot be combined" in result.blocker
+    assert not (tmp_path / ".ai-sdlc").exists()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["--cwd", "."],
+        ["--timeout-seconds", "300"],
+        ["--", "python", "-c", "print('no')"],
+    ],
+)
+def test_counterexample_cli_rejects_even_explicit_default_overrides(
+    tmp_path, monkeypatch, overrides
+):
+    from typer.testing import CliRunner
+
+    from ai_sdlc.cli import loop_cmd
+
+    monkeypatch.setattr(loop_cmd, "_run_project_writer_adapter", lambda **kwargs: None)
+    monkeypatch.setattr(loop_cmd, "_project_root_or_exit", lambda **kwargs: tmp_path)
+    result = CliRunner().invoke(
+        loop_cmd.implementation_app,
+        [
+            "verify",
+            "--task-id",
+            "T01",
+            "--counterexample-plan",
+            "plan.json",
+            "--json",
+            *overrides,
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "cannot be combined" in json.loads(result.output)["blocker"]
+    assert not (tmp_path / ".ai-sdlc").exists()
+
+
+def test_counterexample_new_plan_cannot_reset_original_limits(tmp_path):
+    from ai_sdlc.core import counterexample_execution as execution
+    from ai_sdlc.core.counterexample_models import counterexample_digest
+    from tests.unit.test_counterexample_execution import execution_case
+
+    root, _, plan = execution_case.__wrapped__(tmp_path)
+    folder, _ = execution._plan_history(root, plan)
+    execution._write_json(root, folder / f"{counterexample_digest(plan)}.json", plan)
+    for replacement in (
+        {"max_execution_attempts": plan.max_execution_attempts + 1},
+        {"required_reserve_seconds": plan.required_reserve_seconds - 1},
+        {"protected_paths": ("different.py",)},
+        {"v0_digest": "e" * 64},
+    ):
+        with pytest.raises(ValueError, match="original-plan-scope-or-budget"):
+            execution._plan_history(root, plan.model_copy(update=replacement))
+    with pytest.raises(ValueError, match="reinforcement-batch-exhausted"):
+        execution._plan_history(root, plan.model_copy(update={"v1_digest": "e" * 64}))
+    assert execution._plan_history(root, plan)[1] == [plan]
+
+
+@pytest.mark.parametrize(
+    ("scope", "path", "allowed"),
+    [
+        ("src/*.py", "src/save.py", True),
+        ("src/*.py", "src/private/save.py", False),
+        ("src/**/save.py", "src/save.py", True),
+        ("src/**/save.py", "src/deep/nested/save.py", True),
+        ("src/storage", "src/storage/save.py", True),
+        ("src/storage", "src/storage-other/save.py", False),
+    ],
+)
+def test_counterexample_repair_scope_preserves_original_directory_boundaries(
+    scope, path, allowed
+):
+    from types import SimpleNamespace
+
+    from ai_sdlc.core.counterexample_execution import _original_task_allows
+
+    original = SimpleNamespace(task_scopes={"T01": [scope]}, declared_scope=["**"])
+    assert _original_task_allows(original, "T01", path) is allowed
+
+
+def test_counterexample_repair_proof_requires_real_original_scope_code_delta(tmp_path):
+    from types import SimpleNamespace
+
+    from ai_sdlc.core import counterexample_execution as execution
+    from ai_sdlc.core.counterexample_models import ArtifactRef
+    from tests.unit.test_counterexample_models import make_plan
+
+    plan = make_plan()
+    initial_ref = execution._write_json(
+        tmp_path, tmp_path / "initial.json", {"schema_version": 1, "files": []}
+    )
+    plan = plan.model_copy(
+        update={
+            "steps": tuple(
+                step.model_copy(
+                    update={
+                        "binding": step.binding.model_copy(
+                            update={
+                                "resources": tuple(
+                                    resource.model_copy(
+                                        update={"initial_state": initial_ref}
+                                    )
+                                    for resource in step.binding.resources
+                                )
+                            }
+                        )
+                    }
+                )
+                for step in plan.steps
+            )
+        }
+    )
+    original = SimpleNamespace(
+        task_scopes={plan.task_id: ["src/save.py"]}, declared_scope=[]
+    )
+    before_bytes, after_bytes = b"COMMIT = False\n", b"COMMIT = True\n"
+    (tmp_path / "old.py").write_bytes(before_bytes)
+    (tmp_path / "new.py").write_bytes(after_bytes)
+    old_content = execution._ref(tmp_path, tmp_path / "old.py")
+    new_content = execution._ref(tmp_path, tmp_path / "new.py")
+    old_entry = {
+        "path": "src/save.py",
+        "sha256": old_content.sha256,
+        "mode": "100644",
+        "content_ref": old_content.model_dump(),
+    }
+    new_entry = {
+        **old_entry,
+        "sha256": new_content.sha256,
+        "content_ref": new_content.model_dump(),
+    }
+    before_ref = execution._write_json(
+        tmp_path, tmp_path / "before.json", {"files": [old_entry]}
+    )
+    after_ref = execution._write_json(
+        tmp_path, tmp_path / "after.json", {"files": [new_entry]}
+    )
+    current = next(subject for subject in plan.subjects if subject.role == "current")
+    old_plan = plan.model_copy(
+        update={"subjects": (current.model_copy(update={"snapshot": before_ref}),)}
+    )
+    new_plan = plan.model_copy(
+        update={
+            "candidate_digest": "f" * 64,
+            "subjects": (current.model_copy(update={"snapshot": after_ref}),),
+        }
+    )
+    failed = SimpleNamespace(status="FAIL", evidence_refs=(before_ref,))
+    passed = SimpleNamespace(status="PASS", evidence_refs=(after_ref,))
+    previous = SimpleNamespace(
+        plan=old_plan, assessment=SimpleNamespace(current_result=failed)
+    )
+    assessment = SimpleNamespace(current_result=passed)
+    record_ref = ArtifactRef(path="record.json", sha256="a" * 64)
+    new_plan_ref = ArtifactRef(path="plan.json", sha256="b" * 64)
+    proof = execution._repair_proof_payload(
+        tmp_path, original, record_ref, previous, new_plan_ref, new_plan, assessment
+    )
+    assert proof["changes"] == [
+        {"path": "src/save.py", "before": old_entry, "after": new_entry}
+    ]
+    witness = new_plan.witnesses[0]
+    with pytest.raises(ValueError, match="original-defect-path-not-retested"):
+        execution._repair_proof_payload(
+            tmp_path,
+            original,
+            record_ref,
+            previous,
+            new_plan_ref,
+            new_plan.model_copy(
+                update={
+                    "witnesses": (
+                        witness.model_copy(
+                            update={
+                                "input_ref": ArtifactRef(
+                                    path="different-input.json", sha256="c" * 64
+                                )
+                            }
+                        ),
+                    )
+                }
+            ),
+            assessment,
+        )
+    with pytest.raises(ValueError, match="outside-original-task"):
+        execution._repair_proof_payload(
+            tmp_path,
+            original,
+            record_ref,
+            previous,
+            new_plan_ref,
+            new_plan.model_copy(update={"protected_paths": ("src/save.py",)}),
+            assessment,
+        )
+    with pytest.raises(ValueError, match="has-no-code-change"):
+        execution._repair_proof_payload(
+            tmp_path,
+            original,
+            record_ref,
+            previous,
+            new_plan_ref,
+            new_plan.model_copy(update={"subjects": old_plan.subjects}),
+            assessment,
+        )
+    previous.assessment.current_result = passed
+    with pytest.raises(ValueError, match="actual-business-before-and-after"):
+        execution._repair_proof_payload(
+            tmp_path, original, record_ref, previous, new_plan_ref, new_plan, assessment
+        )
+
+
 def test_non_git_implementation_lock_dir_is_user_scoped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -68,6 +297,84 @@ def test_non_git_implementation_lock_dir_is_user_scoped(
     assert first.name == "ai-sdlc-loop-locks-1001"
     assert second.name == "ai-sdlc-loop-locks-1002"
     assert first != second
+
+
+@pytest.mark.parametrize(
+    "acceptance_label,verification_label",
+    [
+        ("- **验收标准**：", "- **验证**："),
+        ("- acceptance criteria:", "- verification:"),
+        ("- **验收标准（AC）**：", "- **Verification Commands**:"),
+    ],
+)
+def test_task_labels_ignore_prose_and_file_names_across_consumers(
+    tmp_path: Path, acceptance_label: str, verification_label: str
+) -> None:
+    from ai_sdlc.core.design_contract_store import _verification_task_entry
+
+    work_item = _write_ready_work_item(tmp_path)
+    tasks = work_item / "tasks.md"
+    content = "\n".join(
+        [
+            "# 任务分解：Implementation Demo",
+            "### Task 1.1 Verification and acceptance report",
+            "正文讨论验证合同和 acceptance，不是字段。",
+            "- **任务编号**：T11",
+            "- **优先级**：P0",
+            "- **文件**：src/verification.py",
+            acceptance_label,
+            "  1. FR-IMPL-001 and SC-IMPL-001 are covered.",
+            verification_label + " `python verify_result.py`",
+            "- notes: This is not an acceptance item.",
+            "  - This belongs to notes, not verification.",
+        ]
+    )
+    tasks.write_text(content, encoding="utf-8")
+    _close_design_contract_for_work_item(tmp_path, work_item)
+    result = start_implementation_loop(
+        ImplementationStartOptions(
+            root=tmp_path, work_item="specs/demo-implementation-loop", loop_id="impl-labels"
+        )
+    )
+    assert result.status == "ready"
+    path = tmp_path / ".ai-sdlc/loops/implementation/impl-labels/implementation-tasks.json"
+    original = path.read_bytes()
+    item = json.loads(original)["items"][0]
+    assert item["files"] == ["src/verification.py"]
+    assert item["acceptance"] == ["1. FR-IMPL-001 and SC-IMPL-001 are covered."]
+    assert item["verification_hints"] == ["python verify_result.py"]
+    assert _verification_task_entry(content.encode(), "T11", "T11/acceptance/1") == (
+        b"1. FR-IMPL-001 and SC-IMPL-001 are covered."
+    )
+    # 已冻结任务作为原快照读取，标签修复不回填旧工件。
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "label,body,expected",
+    [
+        ("- **验证**：", "`python check.py`", ["python check.py"]),
+        ("* verification:", "\n  - python check.py\n  - python legal.py", ["python check.py", "python legal.py"]),
+        ("**Verification**:", "python check.py", ["python check.py"]),
+        ("验证：", "\n  1. python check.py", ["1. python check.py"]),
+    ],
+)
+def test_task_verification_labels_keep_legal_formats_and_field_boundaries(
+    label: str, body: str, expected: list[str]
+) -> None:
+    section = "\n".join(
+        [
+            "### Task 1 普通任务",
+            label + body,
+            "- files: src/verification.py",
+            "  - src/extra.py",
+            "### Notes",
+            "- not-a-command",
+        ]
+    )
+    assert implementation_loop_module._task_list_after_label(
+        section, "验证", "verification"
+    ) == expected
 
 
 def test_start_implementation_loop_writes_artifacts(tmp_path: Path) -> None:
@@ -1188,7 +1495,10 @@ def test_start_implementation_loop_rejects_design_artifact_blockers(
     assert "still contains blockers" in result.blocker.lower()
 
 
-def test_b1_core_close_requires_actual_guard_not_only_done_tasks(tmp_path: Path):
+@pytest.mark.parametrize("missing", ["digest", "validator", "both"])
+def test_b1_core_close_requires_actual_guard_not_only_done_tasks(
+    tmp_path: Path, missing
+):
     from ai_sdlc.core.loop_decision_models import DecisionPrepareInput
     from ai_sdlc.core.loop_decision_service import prepare_implementation_decision
     from tests.integration.test_quantified_implementation import (
@@ -1225,8 +1535,27 @@ def test_b1_core_close_requires_actual_guard_not_only_done_tasks(tmp_path: Path)
         )
     )
     assert _record_successful_quality_result(root, loop_id, "T11").done_count == 1
+    reviewed = resolve_review_input(
+        root, loop_type="implementation", loop_id=loop_id, review_round_number=1
+    )
+    directory = root / ".ai-sdlc/loops/implementation" / loop_id
+    original = {
+        path: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
     result = close_implementation_loop(
-        ImplementationCloseOptions(root=root, loop_id=loop_id, yes=True)
+        ImplementationCloseOptions(
+            root=root,
+            loop_id=loop_id,
+            yes=True,
+            expected_review_digest=""
+            if missing in {"digest", "both"}
+            else reviewed.input_digest,
+        ),
+        review_input_validator=(
+            None
+            if missing in {"validator", "both"}
+            else validate_review_input_for_close
+        ),
     )
     assert result.status == "blocked"
     assert "review" in result.blocker
@@ -1234,6 +1563,9 @@ def test_b1_core_close_requires_actual_guard_not_only_done_tasks(tmp_path: Path)
     assert not (
         root / ".ai-sdlc/loops/implementation" / loop_id / "implementation-close.json"
     ).exists()
+    assert original == {
+        path: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
 
 
 def _write_ready_work_item(

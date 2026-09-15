@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -37,7 +37,10 @@ from ai_sdlc.core.loop_decision_service import (
     validate_implementation_source_boundary,
 )
 from ai_sdlc.core.loop_models import LoopRun
-from ai_sdlc.core.loop_resource_lock import _stage_write_guard
+from ai_sdlc.core.loop_resource_lock import (
+    _ImplementationWriteLockError,
+    _stage_write_guard,
+)
 from ai_sdlc.core.loop_simulation_context import (
     SimulationContext,
     SimulationPreparation,
@@ -75,6 +78,7 @@ class StageReviewSnapshot(B1ReviewSnapshot):
     source_digest: str = ""
     observed_at_ms: int = field(default=0, compare=False)
     context_path: str = ""
+    closed_review: ClosedStageReviewReplay | None = None
 
 
 class StageActualDecision(DecisionValue):
@@ -88,6 +92,28 @@ class StageReviewData(B1ReviewData):
     decision: StageActualDecision
     source_digest: Digest
     observed_at_ms: int = Field(strict=True, ge=0)
+
+
+@dataclass(frozen=True)
+class ClosedStageReviewReplay:
+    """宿主验证原生关闭后提供的内存回放绑定；不写入历史 outcome。"""
+
+    round_number: int
+    data: StageReviewData
+    receipt_digest: str
+
+
+def _closed_review_data(context, replay):
+    if (
+        not isinstance(replay, ClosedStageReviewReplay)
+        or context.loop_type not in {"requirement", "design-contract"}
+        or not isinstance(replay.data, StageReviewData)
+        or replay.data.context_digest != context.context_digest
+        or replay.data.selected_route_id != context.initial_selection_id
+        or not re.fullmatch(r"[0-9a-f]{64}", replay.receipt_digest)
+    ):
+        raise DecisionPreparationError("simulation-closed-review-binding-mismatch")
+    return replay.data
 
 
 def stage_decision_write_guard(root: Path, stage_kind: str, loop_id: str):
@@ -235,7 +261,50 @@ def stage_material_digest(root: Path, host: StageDecisionHost) -> str:
         if context is not None
         else {}
     )
-    return _material_digest(source, _actual_manifest(root, host), references)
+    actual = _actual_manifest(root, host)
+    current = _material_digest(source, actual, references)
+    if host.stage_kind != "implementation" or _stage_run(root, host).status != "closed":
+        return current
+    # 已验源仍一致时保持原行为；既有 PR 不能使后续正常阶段反向采用旧 parent。
+    for number in (2, 1):
+        previous = _optional_bytes(
+            root, host.loop_dir / f"review-outcome-round-{number}.json"
+        )
+        if previous is not None:
+            from ai_sdlc.core.loop_review_models import LoopReviewOutcome
+
+            outcome = LoopReviewOutcome.model_validate_json(previous)
+            expected = getattr(outcome.simulation, "source_digest", None)
+            if expected == current:
+                return current
+            break
+    else:
+        return current
+    from ai_sdlc.core.implementation_loop import (
+        _closed_implementation_delivery_proof,
+        _require_unchanged_delivery_proof,
+    )
+
+    proof = _closed_implementation_delivery_proof(root, host.loop_id)
+    if proof is None:
+        return current
+    # 重新计算当前 index/文件及原阶段材料，仅接受原完整交付证明绑定的 HEAD 转换。
+    delivered = _material_digest(
+        {**source, "head": proof.reviewed_head}, actual, references
+    )
+    if (
+        _source_boundary(root) != source
+        or _actual_manifest(root, host) != actual
+        or _optional_bytes(root, host.loop_dir / "decision-context.json") != content
+        or {
+            path: _bytes_digest(read_stable_bytes(root, root / path))
+            for path in references
+        }
+        != references
+    ):
+        raise ValueError("delivery-stage-material-drift")
+    _require_unchanged_delivery_proof(root, host.loop_id, proof)
+    return delivered if delivered == expected else current
 
 
 def _material_digest(source, actual, references):
@@ -260,6 +329,7 @@ def read_stage_simulation_context(
     *,
     purpose: str = "read",
     round_number: int = 1,
+    closed_review: ClosedStageReviewReplay | None = None,
 ) -> SimulationContext:
     root = root.resolve(strict=True)
     host = _checked_host(root, host.stage_kind, host.loop_id, lambda: host)
@@ -279,7 +349,13 @@ def read_stage_simulation_context(
         if context.phase != "review_sealed":
             raise DecisionPreparationError("simulation-review-not-sealed")
         if round_number == 1 and not revision:
-            _baseline_matches(context, stage_material_digest(root, host))
+            # 已关闭文档的全仓摘要只回放原比较依据；宿主仍验证其当前完整材料。
+            _baseline_matches(
+                context,
+                _closed_review_data(context, closed_review).source_digest
+                if closed_review is not None
+                else stage_material_digest(root, host),
+            )
     elif purpose == "execute" and context.phase != "review_sealed":
         require_simulation_time_admission(
             context, execution_started=host.execution_started
@@ -361,7 +437,11 @@ def prepare_stage_simulation_decision(
     guard = write_guard or (
         lambda: stage_decision_write_guard(root, stage_kind, loop_id)
     )
-    with guard():
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(guard())
+        except _ImplementationWriteLockError as exc:
+            raise DecisionPreparationError(str(exc)) from exc
         current = _prepare_stage(root, stage_kind, loop_id, request, host_resolver)
         if current.status == "existing":
             return current
@@ -478,7 +558,9 @@ def _prepare_stage(root, stage_kind, loop_id, request, resolver):
         before["actual"],
         # 初始批次额外来源由声明 SHA 及封存 manifest 核对，新增引用不改变源码。
         {}
-        if context is None or context.phase == "initial_search"
+        if context is None
+        or context.phase == "initial_search"
+        or request.operation == "correct-input"
         else before["referenced_sources"],
     )
     if context is not None and context.phase == "improvement_search":
@@ -498,6 +580,7 @@ def _prepare_stage(root, stage_kind, loop_id, request, resolver):
         now_ms=run.decision_started_at_ms if recovering else now_ms,
         actual_ready=host.actual_ready,
         review_started=host.review_started,
+        execution_started=host.execution_started,
     )
     _check_context_identity(host, result)
     validate_simulation_context(result)
@@ -560,9 +643,33 @@ def _checked_stage_snapshot(snapshot):
         or observed < 0
     ):
         raise DecisionPreparationError("simulation-current-source-observation-required")
-    return StageReviewSnapshot(
-        review, context, dict(snapshot.manifest), source_digest, observed, path
+    checked = StageReviewSnapshot(
+        review,
+        context,
+        dict(snapshot.manifest),
+        source_digest,
+        observed,
+        path,
+        getattr(snapshot, "closed_review", None),
     )
+    stage_review_source_digest(checked)
+    return checked
+
+
+def stage_review_source_digest(snapshot: StageReviewSnapshot) -> str:
+    """回放仅替换原判据的来源输入；snapshot.source_digest 始终是当前观测。"""
+    replay = snapshot.closed_review
+    if replay is None:
+        return snapshot.source_digest
+    data = _closed_review_data(snapshot.context, replay)
+    if (
+        snapshot.review_input.loop_type not in {"requirement", "design-contract"}
+        or snapshot.review_input.round_number != replay.round_number
+        or data.input_digest != snapshot.review_input.input_digest
+        or data.manifest != snapshot.manifest
+    ):
+        raise DecisionPreparationError("simulation-closed-review-binding-mismatch")
+    return data.source_digest
 
 
 def _stage_assessment_input(snapshot, assessments):
@@ -686,10 +793,18 @@ def validate_stage_review_data(
 ) -> StageReviewData:
     saved = StageReviewData.model_validate(saved.model_dump())
     snapshot = _checked_stage_snapshot(snapshot)
-    if snapshot.source_digest != saved.source_digest:
+    if snapshot.closed_review is not None and snapshot.closed_review.data != saved:
+        raise DecisionPreparationError("simulation-closed-review-binding-mismatch")
+    source_digest = stage_review_source_digest(snapshot)
+    if source_digest != saved.source_digest:
         raise DecisionPreparationError("simulation-actual-source-drift")
     rebuilt = build_stage_review_data(
-        replace(snapshot, observed_at_ms=saved.observed_at_ms),
+        replace(
+            snapshot,
+            source_digest=source_digest,
+            observed_at_ms=saved.observed_at_ms,
+            closed_review=None,
+        ),
         saved.assessments,
         has_actionable_findings=has_actionable_findings,
         baseline=baseline,

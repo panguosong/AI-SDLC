@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -1132,6 +1133,7 @@ def test_run_default_browser_gate_probe_kills_process_tree_on_timeout(
         returncode = None
         pid = 4321
         _timed_out = False
+        stdin = stdout = stderr = None
 
         def __init__(self, command, **kwargs):
             assert command == ["node", str(script_path)]
@@ -3393,3 +3395,64 @@ export const chromium = {
     assert result["runtime_status"] == "completed"
     assert result["shared_capture"]["capture_status"] == "captured"
     assert result["interaction_capture"]["classification_candidate"] == "pass"
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process query failure path")
+@pytest.mark.parametrize("query_failure", [True, False], ids=["failed-query", "normal-group"])
+def test_probe_timeout_reaps_owned_child_and_closes_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query_failure: bool
+) -> None:
+    from ai_sdlc.core import quality_command
+
+    ready = tmp_path / "child-ready.json"
+    body = (
+        "import json,pathlib,subprocess,sys,time; "
+        "child=None if sys.argv[2]=='single' else subprocess.Popen([sys.executable,'-B','-c','import time; time.sleep(60)']); "
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({'pid':__import__('os').getpid(),'descendant':None if child is None else child.pid})); "
+        "print('actual probe started',flush=True); time.sleep(60)"
+    )
+    command = [sys.executable, "-B", "-c", body, str(ready), "single" if query_failure else "group"]
+    original_popen, original_run = subprocess.Popen, subprocess.run
+    owned, failed_queries = [], []
+
+    def capture_process(argv, **kwargs):
+        process = original_popen(argv, **kwargs)
+        if argv == command:
+            owned.append(process)
+        return process
+
+    def query(argv, **kwargs):
+        if query_failure and argv == ["ps", "-axo", "pid=,pgid=,stat="]:
+            failed_queries.append(argv)
+            raise subprocess.CalledProcessError(1, argv, stderr="injected process query failure")
+        return original_run(argv, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime_module.subprocess, "Popen", capture_process)
+            patch.setattr(quality_command.subprocess, "run", query)
+            expected = RuntimeError if query_failure else subprocess.TimeoutExpired
+            match = "browser-probe-owned-process-cleanup-incomplete" if query_failure else None
+            with pytest.raises(expected, match=match):
+                runtime_module._run_probe_runner_process(command, cwd=tmp_path, stdin="{}", timeout=0.3)
+        assert ready.is_file(), "the real child must reach the intended timeout window"
+        assert len(owned) == 1
+        process = owned[0]
+        observed = {"returncode": process.poll(), "pipe_closed": {name: getattr(process, name).closed for name in ("stdin", "stdout", "stderr")}, "query_failures": len(failed_queries), "ready": json.loads(ready.read_text())}
+        (tmp_path / "observed-before-test-cleanup.json").write_text(json.dumps(observed, indent=2) + "\n")
+        assert bool(failed_queries) == query_failure
+        assert observed["returncode"] is not None, "caller must reap its own child even when group cleanup fails"
+        assert all(observed["pipe_closed"].values()), "caller must close all owned PIPE handles"
+        for pid in (observed["ready"]["pid"], observed["ready"]["descendant"]):
+            if pid is not None:
+                check = original_run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, check=False, timeout=2)
+                assert not check.stdout.strip() or all(row.startswith("Z") for row in check.stdout.split()), "owned benign process still running"
+    finally:
+        # 仅测试保全：旧实现失败时仍收尾本测试创建的 session，不将其记为产品成功。
+        for process in owned:
+            quality_command.cleanup_owned_process_group(process)
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=2)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()

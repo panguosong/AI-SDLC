@@ -21,6 +21,7 @@ from ai_sdlc.core.loop_simulation_context_models import (
     STAGE_CAPABILITY as STAGE_CAPABILITY,
 )
 from ai_sdlc.core.loop_simulation_context_models import (
+    InputCorrectionReceipt,
     RequestReceipt,
     SimulationBatch,
 )
@@ -108,6 +109,172 @@ def _check_sources(contracts, sources, candidates=()) -> None:
         refs.update(b.source_ref for b in candidate.basis if b.kind == "project_fact")
     if not refs <= ids:
         raise ValueError("simulation-external-source-unbound")
+
+
+def _check_candidate_time_conditions(contract, batch, candidates) -> None:
+    for candidate in candidates:
+        for field, expected, actual in (
+            (
+                "cost_decision_point",
+                batch.decision_point,
+                candidate.cost_decision_point,
+            ),
+            (
+                "future_cost_estimate.scope",
+                contract.time_plan.scope,
+                candidate.future_cost_estimate.scope
+                if candidate.future_cost_estimate is not None
+                else contract.time_plan.scope,
+            ),
+        ):
+            if actual != expected:
+                raise ValueError(
+                    "simulation-time-conditions-mismatch: "
+                    f"candidate={candidate.candidate_id}; field={field}; "
+                    f"expected={expected!r}; actual={actual!r}"
+                )
+
+
+def input_correction_available(context: SimulationContext) -> bool:
+    """只识别可用的原剩余批次；执行状态仍由原生宿主另行核验。"""
+    if (
+        context.capability != STAGE_CAPABILITY
+        or context.loop_type == "local-pr-review"
+        or context.phase != "initial_selected"
+        or context.pending_batch is not None
+        or len(context.comparisons) != 1
+        or context.initial_selection_id is not None
+        or context.review_seal is not None
+        or context.improvement is not None
+        or context.conditional_improvement is not None
+        or context.input_correction is not None
+    ):
+        return False
+    batch = context.comparisons[0]
+    selection = batch.selection
+    return bool(
+        batch.number == 1
+        and batch.decision_point == "before-execution"
+        and batch.outcome == "success"
+        and batch.candidates
+        and batch.elapsed_seconds is not None
+        and selection is not None
+        and selection.selected_id is None
+        and {item.candidate_id for item in selection.excluded}
+        == {candidate.candidate_id for candidate in batch.candidates}
+        and {item.reason for item in selection.excluded} == {"time_conditions_mismatch"}
+        # 时点错误可能遮住原核后续的时间分支，不能借纠错恢复本就超时的路线。
+        and all(
+            candidate.future_cost_estimate is not None
+            and Fraction(batch.elapsed_seconds)
+            + Fraction(candidate.future_cost_estimate.upper_seconds)
+            <= Fraction(context.plan.time_plan.window_seconds)
+            for candidate in batch.candidates
+        )
+    )
+
+
+def _check_corrected_candidates(context, candidates, sources) -> None:
+    originals = {c.candidate_id: c for c in context.comparisons[0].candidates}
+    if len(candidates) != len(originals) or {c.candidate_id for c in candidates} != set(
+        originals
+    ):
+        raise ValueError("simulation-correction-candidates-changed")
+    added_source_refs = set()
+    for candidate in candidates:
+        original = originals[candidate.candidate_id]
+        fixed = {"cost_decision_point", "future_cost_estimate", "basis"}
+        if candidate.model_dump(exclude=fixed) != original.model_dump(exclude=fixed):
+            raise ValueError("simulation-correction-candidate-changed")
+        if candidate.basis[: len(original.basis)] != original.basis:
+            raise ValueError("simulation-correction-basis-changed")
+        additions = candidate.basis[len(original.basis) :]
+        if any(item.kind != "project_fact" for item in additions):
+            raise ValueError("simulation-correction-cost-fact-required")
+        cost = candidate.future_cost_estimate
+        original_cost = original.future_cost_estimate
+        if cost is None or original_cost is None:
+            raise ValueError("simulation-correction-cost-required")
+        corrected_cost = original_cost.model_copy(
+            update={"scope": context.plan.time_plan.scope}
+        )
+        if cost != corrected_cost and (
+            not additions
+            or not {item.id for item in additions}.intersection(cost.basis_refs)
+            or not set(original_cost.basis_refs) <= set(cost.basis_refs)
+        ):
+            raise ValueError("simulation-correction-cost-fact-required")
+        added_source_refs.update(item.source_ref for item in additions)
+    correction = context.input_correction
+    assert correction is not None
+    if not {s.id for s in sources[correction.source_count :]}.issubset(
+        added_source_refs
+    ):
+        raise ValueError("simulation-correction-source-unbound")
+
+
+def _validate_input_correction(context, batches) -> None:
+    correction = context.input_correction
+    if correction is None:
+        return
+    if (
+        context.capability != STAGE_CAPABILITY
+        or context.loop_type == "local-pr-review"
+        or len(batches) != 2
+        or not context.comparisons
+        or context.improvement is not None
+        or context.conditional_improvement is not None
+        or correction.source_count > len(context.sources)
+        or correction.source_receipt_count >= len(context.receipts)
+        or not context.started_at_ms
+        <= correction.source_observed_at_ms
+        <= correction.corrected_at_ms
+        <= context.last_observed_at_ms
+    ):
+        raise ValueError("simulation-correction-reference-invalid")
+    first, second = batches
+    if (
+        correction.source_batch_digest != _digest(first.model_dump(mode="json"))
+        or second.number != 2
+        or second.decision_point != "before-execution"
+        or second.base_input_digest != correction.corrected_base_input_digest
+        or second.incumbent_id is not None
+        or second.judge_input_digest is not None
+        and second.judge_input_digest == first.judge_input_digest
+        or Fraction(correction.corrected_at_ms - context.started_at_ms, 1000)
+        >= Fraction(context.plan.time_plan.window_seconds)
+    ):
+        raise ValueError("simulation-correction-batch-invalid")
+    request = SimulationPrepareRequest(
+        operation="correct-input", request_id=correction.request_id
+    )
+    if context.receipts[correction.source_receipt_count] != RequestReceipt(
+        request_id=request.request_id, request_digest=request_digest(request)
+    ):
+        raise ValueError("simulation-correction-receipt-unbound")
+    # 用仍保留的原件重建旧摘要，不能只接受一个可随状态改写的恢复布尔值。
+    original = context.model_copy(
+        update={
+            "sources": context.sources[: correction.source_count],
+            "receipts": context.receipts[: correction.source_receipt_count],
+            "last_observed_at_ms": correction.source_observed_at_ms,
+            "phase": "initial_selected",
+            "pending_batch": None,
+            "comparisons": (first,),
+            "initial_selection_id": None,
+            "review_seal": None,
+            "input_correction": None,
+            "context_digest": correction.source_context_digest,
+        }
+    )
+    validate_simulation_context(original)
+    if not input_correction_available(original):
+        raise ValueError("simulation-correction-source-ineligible")
+    if second.candidates:
+        _check_candidate_time_conditions(context.plan, second, second.candidates)
+        _check_corrected_candidates(context, second.candidates, context.sources)
+    elif len(context.sources) != correction.source_count:
+        raise ValueError("simulation-correction-source-unbound")
 
 
 def _continuation_stop_reason(context, batch, selection, judgement, elapsed):
@@ -283,6 +450,7 @@ def validate_simulation_context(context: SimulationContext) -> SimulationContext
         raise ValueError("simulation-batch-sequence-invalid")
     if len({r.request_id for r in context.receipts}) != len(context.receipts):
         raise ValueError("simulation-request-ids-duplicate")
+    _validate_input_correction(context, batches)
     winner = None
     for batch in batches:
         improving = batch.decision_point == "before-improvement"
@@ -373,7 +541,10 @@ def validate_simulation_context(context: SimulationContext) -> SimulationContext
         improvement_next = (
             has_next and batches[previous.number].decision_point == "before-improvement"
         )
-        if has_next != (admitted or improvement_next):
+        correction_next = (
+            has_next and previous.number == 1 and context.input_correction is not None
+        )
+        if has_next != (admitted or improvement_next or correction_next):
             raise ValueError("simulation-continuation-sequence-invalid")
     if context.initial_selection_id != winner:
         raise ValueError("simulation-initial-selection-invalid")
@@ -417,6 +588,7 @@ def transition_simulation(
     now_ms: int,
     actual_ready: bool = False,
     review_started: bool = False,
+    execution_started: bool | None = None,
 ) -> SimulationContext:
     if type(now_ms) is not int or now_ms < 0:
         raise ValueError("simulation-clock-unavailable")
@@ -476,6 +648,36 @@ def transition_simulation(
     payload["receipts"].append(receipt)
     if context.capability == STAGE_CAPABILITY and review_started:
         raise ValueError("simulation-review-already-started")
+    if request.operation == "correct-input":
+        if execution_started is not False:
+            raise ValueError("simulation-correction-before-execution-required")
+        if not input_correction_available(context):
+            raise ValueError("simulation-input-correction-unavailable")
+        if Fraction(now_ms - context.started_at_ms, 1000) >= Fraction(
+            context.plan.time_plan.window_seconds
+        ):
+            raise ValueError("simulation-model-plan-not-feasible")
+        payload.update(
+            input_correction=InputCorrectionReceipt(
+                source_context_digest=context.context_digest,
+                source_batch_digest=_digest(
+                    context.comparisons[0].model_dump(mode="json")
+                ),
+                source_count=len(context.sources),
+                source_receipt_count=len(context.receipts),
+                source_observed_at_ms=context.last_observed_at_ms,
+                corrected_at_ms=now_ms,
+                request_id=request.request_id,
+                corrected_base_input_digest=source_digest,
+            ).model_dump(mode="json"),
+            phase="initial_search",
+            pending_batch=SimulationBatch(
+                number=2,
+                decision_point="before-execution",
+                base_input_digest=source_digest,
+            ).model_dump(mode="json"),
+        )
+        return _stamp(payload)
     if request.operation == "begin-improvement":
         if context.capability != STAGE_CAPABILITY:
             raise ValueError("simulation-d1-improvement-unsupported")
@@ -556,12 +758,19 @@ def transition_simulation(
     if request.operation == "freeze-comparison":
         if batch.candidates:
             raise ValueError("simulation-comparison-already-frozen")
+        _check_candidate_time_conditions(
+            context.contract_for_batch(batch), batch, request.candidates
+        )
         sources = {s.id: s for s in context.sources}
         for source in request.sources:
             if source.id in sources and source != sources[source.id]:
                 raise ValueError("simulation-source-id-conflict")
             sources[source.id] = source
         _check_sources(context.contracts, tuple(sources.values()), request.candidates)
+        if context.input_correction is not None:
+            _check_corrected_candidates(
+                context, request.candidates, tuple(sources.values())
+            )
         if batch.incumbent_id is not None:
             old = (
                 context.improvement.incumbent

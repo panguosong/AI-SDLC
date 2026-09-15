@@ -82,12 +82,24 @@ class DesignContractInput(LoopArtifactModel):
     decision_capability: Literal["stage-simulation-v1"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    verification_capability: Literal["counterexample-acceptance-v1"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    verification_contract_ref: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    verification_contract_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _decision_identity(self):
         validate_decision_identity(
             LoopType.DESIGN_CONTRACT, self.decision_mode, self.decision_capability
         )
+        from ai_sdlc.core.loop_stage_input import validate_verification_identity
+
+        validate_verification_identity(self)
         return self
 
     @field_validator(
@@ -260,6 +272,7 @@ class DesignContractCheckOptions:
     dry_run: bool = False
     decision_mode: str = "legacy"
     decision_capability: str | None = None
+    verification_contract: str = ""
 
 
 @dataclass(frozen=True, slots=True)

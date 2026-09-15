@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag that will receive the platform assets.
         required: true
-        default: v3.1.0
+        default: v3.2.0
       upload_to_release:
         description: Upload smoke-passed assets to the existing GitHub Release.
         required: true
@@ -49,7 +49,7 @@ jobs:
 
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      ALLOWED_RELEASE_TAG: v3.1.0
+      ALLOWED_RELEASE_TAG: v3.2.0
       DISPATCH_REF: ${{ github.ref }}
       DISPATCH_SHA: ${{ github.sha }}
       PYTHONUTF8: "1"
@@ -363,7 +363,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      ALLOWED_RELEASE_TAG: v3.1.0
+      ALLOWED_RELEASE_TAG: v3.2.0
       DISPATCH_REF: ${{ github.ref }}
       DISPATCH_SHA: ${{ github.sha }}
       GH_TOKEN: ${{ github.token }}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,9 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from ai_sdlc.core.stable_file_read import (
+    _REPARSE_POINT,
     _stable_regular_file_exists,
+    read_stable_bytes,
     read_stable_text,
 )
 from ai_sdlc.utils.helpers import AI_SDLC_DIR
@@ -40,7 +43,9 @@ class LoopArtifactStore:
     def review_run_dir(self, review_id: str) -> Path:
         """Return the stable directory for one local PR review run."""
 
-        return _artifact_child_dir(self.root / AI_SDLC_DIR / "reviews" / "pr", review_id)
+        return _artifact_child_dir(
+            self.root / AI_SDLC_DIR / "reviews" / "pr", review_id
+        )
 
     def create_loop_run_dir(
         self,
@@ -61,7 +66,9 @@ class LoopArtifactStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def write_json_artifact(self, path: Path, payload: BaseModel | dict[str, Any]) -> Path:
+    def write_json_artifact(
+        self, path: Path, payload: BaseModel | dict[str, Any]
+    ) -> Path:
         """Atomically write a JSON artifact."""
 
         data = _payload_to_data(payload)
@@ -73,7 +80,65 @@ class LoopArtifactStore:
         )
         return _atomic_write_text(path, serialized + "\n")
 
-    def write_yaml_artifact(self, path: Path, payload: BaseModel | dict[str, Any]) -> Path:
+    def write_bytes_artifact(
+        self, path: Path, content: bytes, *, immutable: bool = False
+    ) -> Path:
+        """严格原子保存原始字节；启动意图不能降级为直接覆盖目标。"""
+
+        root = self.root.resolve(strict=True)
+        target = path if path.is_absolute() else root / path
+        relative = target.relative_to(root)
+        if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+            raise ValueError("artifact-path-not-canonical")
+        parent = root
+        missing_parents = []
+        # 先检查整条已有路径，避免普通路径不符合策略时已经创建目录或临时文件。
+        for part in relative.parts[:-1]:
+            parent /= part
+            try:
+                _require_artifact_directory(root, parent)
+            except FileNotFoundError:
+                missing_parents.append(parent)
+        target_exists = _stable_regular_file_exists(root, target)
+        for parent in missing_parents:
+            _require_artifact_directory(root, parent.parent)
+            parent.mkdir(exist_ok=True)
+            _require_artifact_directory(root, parent)
+        if target_exists:
+            if read_stable_bytes(root, target) == content:
+                return target
+            if immutable:
+                raise ValueError("immutable-artifact-content-mismatch")
+        temporary = target.with_name(f".{target.name}.{secrets.token_hex(16)}.tmp")
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if immutable:
+                # hard link 的 no-replace 语义防止并发创建者覆盖先写入的历史。
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    if read_stable_bytes(root, target) != content:
+                        raise ValueError(
+                            "immutable-artifact-content-mismatch"
+                        ) from None
+            else:
+                _replace_with_retry(temporary, target)
+            if os.name != "nt":
+                directory_fd = os.open(target.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return target
+
+    def write_yaml_artifact(
+        self, path: Path, payload: BaseModel | dict[str, Any]
+    ) -> Path:
         """Atomically write a YAML artifact."""
 
         data = _payload_to_data(payload)
@@ -107,6 +172,17 @@ class LoopArtifactStore:
         return data
 
 
+def _require_artifact_directory(root: Path, path: Path) -> None:
+    metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT
+        or not path.resolve(strict=True).is_relative_to(root)
+    ):
+        raise ValueError("artifact-parent-not-owned-directory")
+
+
 def _payload_to_data(payload: BaseModel | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, BaseModel):
         data = payload.model_dump(mode="json")
@@ -117,13 +193,7 @@ def _payload_to_data(payload: BaseModel | dict[str, Any]) -> dict[str, Any]:
 
 def _artifact_child_dir(base: Path, identifier: str) -> Path:
     text = identifier.strip()
-    if (
-        not text
-        or text in {".", ".."}
-        or "/" in text
-        or "\\" in text
-        or ":" in text
-    ):
+    if not text or text in {".", ".."} or "/" in text or "\\" in text or ":" in text:
         raise ValueError(f"Unsafe artifact identifier: {identifier!r}")
     path = base / text
     base_resolved = base.resolve(strict=False)

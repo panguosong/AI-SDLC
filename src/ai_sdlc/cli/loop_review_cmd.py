@@ -9,7 +9,9 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Iterator, MutableMapping, Sequence
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -23,6 +25,7 @@ from ai_sdlc.core.loop_review_service import (
     LoopReviewPreparation,
     LoopReviewServiceError,
     RecordLoopReviewOptions,
+    _read_outcome,
     outcome_path,
     prepare_loop_review,
     record_loop_review,
@@ -36,9 +39,36 @@ from ai_sdlc.core.stable_file_read import consume_stable_chunks, read_stable_tex
 from ai_sdlc.utils.helpers import find_project_root
 
 if TYPE_CHECKING:
+    from ai_sdlc.core.counterexample_models import ArtifactRef
     from ai_sdlc.core.loop_decision_models import DecisionContext
     from ai_sdlc.core.loop_decision_service import B1ReviewSnapshot
     from ai_sdlc.core.loop_simulation_context import SimulationContext
+    from ai_sdlc.core.loop_stage_decision_service import StageDecisionHost
+
+_COUNTEREXAMPLE_EXECUTION_CAPTURE: ContextVar[bool] = ContextVar(
+    "counterexample_execution_capture", default=False
+)
+_COUNTEREXAMPLE_ACTIVE_PLAN: ContextVar[str | None] = ContextVar(
+    "counterexample_active_plan", default=None
+)
+
+
+@contextmanager
+def _counterexample_execution_capture(plan_digest: str | None = None) -> Iterator[None]:
+    """原执行授权只捕获已发生证据；正式评审默认仍要求业务及执行表完成。"""
+    capture_reset_handle = _COUNTEREXAMPLE_EXECUTION_CAPTURE.set(True)
+    plan_handle = (
+        _COUNTEREXAMPLE_ACTIVE_PLAN.set(plan_digest)
+        if plan_digest is not None
+        else None
+    )
+    try:
+        yield
+    finally:
+        if plan_handle is not None:
+            _COUNTEREXAMPLE_ACTIVE_PLAN.reset(plan_handle)
+        _COUNTEREXAMPLE_EXECUTION_CAPTURE.reset(capture_reset_handle)
+
 
 _STAGE_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "requirement": (
@@ -233,32 +263,56 @@ def validate_review_input_for_close(
             "review-input-unavailable",
             detail="Expected review input digest must be 64 lowercase hexadecimal characters.",
         )
+    from ai_sdlc.core.pr_review_service import verified_delivery_read_scope
+
     try:
-        prepared, _ = prepare_current_loop_review(root, loop_type, loop_id)
-        review_input = resolve_review_input(
-            root,
-            loop_type=loop_type,
-            loop_id=loop_id,
-            review_round_number=prepared.review_input.round_number,
-            captured_artifacts=captured_artifacts,
-        )
-        if review_input.input_digest != prepared.review_input.input_digest:
-            raise LoopReviewServiceError(
-                "review-input-drift",
-                expected_digest=prepared.review_input.input_digest,
-                actual_digest=review_input.input_digest,
-            )
-        fresh, _ = prepare_current_loop_review(root, loop_type, loop_id)
-        if (
-            fresh.review_input.round_number != prepared.review_input.round_number
-            or fresh.review_input.input_digest != review_input.input_digest
+        with (
+            verified_delivery_read_scope(root)
+            if loop_type == "implementation"
+            else nullcontext()
         ):
-            raise LoopReviewServiceError(
-                "review-input-drift",
-                expected_digest=prepared.review_input.input_digest,
-                actual_digest=fresh.review_input.input_digest,
+            safe_loop_id = _safe_identifier(loop_id)
+            loop_dir = resolve_review_directory(root, loop_type, safe_loop_id)
+            if loop_type == "implementation":
+                reject_retired_implementation_continuation(root, safe_loop_id)
+            first, second = (
+                _read_outcome(
+                    root,
+                    outcome_path(loop_dir, n),
+                    cast(LoopReviewType, loop_type),
+                    safe_loop_id,
+                    n,
+                )
+                for n in (1, 2)
             )
-        validate_prepared_outcome_for_close(fresh, expected_digest=expected)
+            if second is not None and first is None:
+                raise LoopReviewServiceError("review-outcome-sequence-invalid")
+            # 原件只提示捕获轮次；资格由捕获后的完整 prepare 判断，不能据文件存在放行。
+            round_number = 2 if second is not None else 1
+            review_input = resolve_review_input(
+                root,
+                loop_type=loop_type,
+                loop_id=loop_id,
+                review_round_number=round_number,
+                captured_artifacts=captured_artifacts,
+            )
+            fresh, _ = prepare_current_loop_review(root, loop_type, loop_id)
+            validate_prepared_outcome_for_close(fresh, expected_digest=expected)
+            current_history = (
+                (fresh.current_outcome, None)
+                if fresh.review_input.round_number == 1
+                else (fresh.baseline_outcome, fresh.current_outcome)
+            )
+            if (
+                fresh.review_input.round_number != round_number
+                or fresh.review_input.input_digest != review_input.input_digest
+                or current_history != (first, second)
+            ):
+                raise LoopReviewServiceError(
+                    "review-input-drift",
+                    expected_digest=expected,
+                    actual_digest=fresh.review_input.input_digest,
+                )
     except LoopReviewServiceError as exc:
         raise ReviewInputGuardError(
             exc.reason,
@@ -489,7 +543,7 @@ def loop_review_record(
         root = find_project_root()
         if root is None:
             raise ValueError("Project is not initialized; .ai-sdlc is missing.")
-        prepared, loop_dir = prepare_current_loop_review(root, loop_type, loop_id)
+        loop_dir = resolve_review_directory(root, loop_type, _safe_identifier(loop_id))
         overlay = record_loop_review(
             RecordLoopReviewOptions(
                 root=root,
@@ -528,8 +582,10 @@ def loop_review_record(
     payload = overlay.model_dump(mode="json")
     payload.update(
         {
-            "input_digest": prepared.review_input.input_digest,
-            "outcome_path": prepared.outcome_path.relative_to(root).as_posix(),
+            "input_digest": expect_digest.strip().lower(),
+            "outcome_path": outcome_path(loop_dir, overlay.round_number)
+            .relative_to(root)
+            .as_posix(),
         }
     )
     _emit(payload, json_output=json_output)
@@ -542,26 +598,33 @@ def prepare_current_loop_review(
 ) -> tuple[LoopReviewPreparation, Path]:
     """Resolve current Loop identity and derive its bounded review state."""
 
-    safe_loop_id = _safe_identifier(loop_id)
-    loop_dir = resolve_review_directory(root, loop_type, safe_loop_id)
-    prepared = prepare_loop_review(
-        root,
-        loop_type=cast(LoopReviewType, loop_type),
-        loop_id=safe_loop_id,
-        loop_dir=loop_dir,
-        input_resolver=lambda round_number: resolve_review_input(
+    from ai_sdlc.core.pr_review_service import verified_delivery_read_scope
+
+    with (
+        verified_delivery_read_scope(root)
+        if loop_type == "implementation"
+        else nullcontext()
+    ):
+        safe_loop_id = _safe_identifier(loop_id)
+        loop_dir = resolve_review_directory(root, loop_type, safe_loop_id)
+        prepared = prepare_loop_review(
             root,
-            loop_type=loop_type,
+            loop_type=cast(LoopReviewType, loop_type),
             loop_id=safe_loop_id,
-            review_round_number=round_number,
-        ),
-        b1_snapshot_resolver=(
-            lambda round_number: resolve_b1_review_snapshot(
-                root, safe_loop_id, round_number, loop_type=loop_type
-            )
-        ),
-    )
-    return prepared, loop_dir
+            loop_dir=loop_dir,
+            input_resolver=lambda round_number: resolve_review_input(
+                root,
+                loop_type=loop_type,
+                loop_id=safe_loop_id,
+                review_round_number=round_number,
+            ),
+            b1_snapshot_resolver=(
+                lambda round_number: resolve_b1_review_snapshot(
+                    root, safe_loop_id, round_number, loop_type=loop_type
+                )
+            ),
+        )
+        return prepared, loop_dir
 
 
 def resolve_review_directory(root: Path, loop_type: str, loop_id: str) -> Path:
@@ -588,20 +651,61 @@ def resolve_review_input(
 ) -> ReviewInput:
     """Resolve existing substantive artifacts without creating a parallel Loop."""
 
+    return _resolve_review_input(
+        root,
+        loop_type=loop_type,
+        loop_id=loop_id,
+        review_round_number=review_round_number,
+        captured_artifacts=captured_artifacts,
+        capture_paths=capture_paths,
+        capture_all=capture_all,
+    )
+
+
+def _resolve_review_input(
+    root: Path,
+    *,
+    loop_type: str,
+    loop_id: str,
+    review_round_number: int | None = None,
+    captured_artifacts: MutableMapping[str, bytes] | None = None,
+    capture_paths: Sequence[str | Path] | None = None,
+    capture_all: bool = False,
+    stage_host: StageDecisionHost | None = None,
+) -> ReviewInput:
     safe_loop_id = _safe_identifier(loop_id)
     b1_context = None
     upstream_context = []
+    recovery_originals = None
+    authority_only_paths = []
     if loop_type == "local-pr-review":
         loop_dir, pointer_path, run_path = _find_local_review_dir(root, safe_loop_id)
         review_pack_path = loop_dir / "review-pack.json"
         review_pack_payload = _read_json_object(root, review_pack_path)
         _require_local_review_verification(root, loop_dir, review_pack_payload)
+        from ai_sdlc.core.pr_review_models import ReviewPack, ReviewRun
+        from ai_sdlc.core.pr_review_service import (
+            pr_review_requires_original_capture,
+            read_pr_recovery_originals,
+        )
+
+        review_run_payload = _read_json_object(root, run_path)
+        # 原生正式评审包括旧模式和模拟提供方；缺件时仍由 pack 引用进入同一读取入口。
+        if pr_review_requires_original_capture(review_run_payload, review_pack_payload):
+            recovery_originals = read_pr_recovery_originals(
+                root, ReviewRun.model_validate(review_run_payload),
+                ReviewPack.model_validate(review_pack_payload),
+            )
         artifacts = [
             *(loop_dir / name for name in _LOCAL_REQUIRED),
         ]
         artifacts.extend(
             loop_dir / name for name in _LOCAL_OPTIONAL if (loop_dir / name).is_file()
         )
+        if recovery_originals is not None:
+            authority_paths = [root / key for key in recovery_originals.originals if root / key not in artifacts]
+            # 普通评审的摘要集合不变；权威原件仍须同次捕获并复核稳定性。
+            authority_only_paths = authority_paths
         diff_path = _local_review_diff(root, review_pack_path)
         artifacts.append(diff_path)
         _, b1_context = _read_pr_stage_context(root, run_path)
@@ -612,6 +716,8 @@ def resolve_review_input(
                     *(root / source.path for source in b1_context.sources),
                 ]
             )
+        # 恢复原件与量化绑定可能共同引用同一 context，按原顺序只读入一次。
+        artifacts = _unique_paths(artifacts)
         risk_signals = [
             *_content_risk_signals(root, artifacts),
             *_local_review_source_risk_signals(root, review_pack_path),
@@ -638,18 +744,36 @@ def resolve_review_input(
             loop_type,
             safe_loop_id,
         )
-        stage_source_material = _stage_source_material(root, loop_type, loop_dir)
-        from ai_sdlc.cli.loop_stage_cmd import read_stage_decision_context
-
-        b1_context = read_stage_decision_context(
-            root,
-            loop_type,
-            safe_loop_id,
-            purpose="review",
-            round_number=review_round_number or 1,
+        stage_source_material = _stage_source_material(
+            root, loop_type, loop_dir, review_round_number=review_round_number or 1
         )
+        if stage_host is None:
+            from ai_sdlc.cli.loop_stage_cmd import read_stage_decision_context
+
+            b1_context = read_stage_decision_context(
+                root,
+                loop_type,
+                safe_loop_id,
+                purpose="review",
+                round_number=review_round_number or 1,
+            )
+        else:
+            from ai_sdlc.cli.loop_stage_cmd import _read_stage_decision_context
+
+            b1_context = _read_stage_decision_context(
+                root,
+                loop_type,
+                safe_loop_id,
+                purpose="review",
+                round_number=review_round_number or 1,
+                stage_host=stage_host,
+            )
         if loop_type == "implementation":
             reject_retired_implementation_continuation(root, safe_loop_id)
+            first_outcome_path = loop_dir / "review-outcome-round-1.json"
+            if captured_artifacts is not None and first_outcome_path.is_file():
+                # R1 原件证明当前阶段；仅捕获，不加入它自身的评审输入摘要。
+                authority_only_paths.append(first_outcome_path)
         if b1_context is not None:
             stage_source_material = _unique_paths(
                 [
@@ -704,6 +828,17 @@ def resolve_review_input(
             else []
         )
         if (
+            loop_type == "implementation"
+            and captured_artifacts is not None
+            and capture_paths is None
+        ):
+            # 旧输入也要核对上游未启用新能力，不能只信本阶段删空的字段。
+            capture_artifact_paths.extend(
+                path
+                for path in (*artifacts, *upstream_context)
+                if path.name == "design-contract-input.json"
+            )
+        if (
             b1_context is not None
             and captured_artifacts is not None
             and capture_paths is None
@@ -725,9 +860,14 @@ def resolve_review_input(
             *(upstream_context if loop_type != "local-pr-review" else []),
         ]
         capture_only_paths = [run_path]
+    capture_only_paths = _unique_paths([*capture_only_paths, *authority_only_paths])
     # 量化模式以生成摘要的同次读取校验身份；不在读取后另开文件拼证据。
     target_captures = captured_artifacts
-    if b1_context is not None:
+    if (
+        b1_context is not None
+        or (recovery_originals is not None and recovery_originals.originals)
+        or (capture_paths is not None and captured_artifacts is not None)
+    ):
         target_captures = {}
     reviewed = build_review_input(
         root,
@@ -741,16 +881,25 @@ def resolve_review_input(
         risk_signals=risk_signals,
         capture_artifact_paths=(
             [*artifacts, *upstream_context, *capture_artifact_paths]
-            if b1_context is not None
+            if b1_context is not None or (recovery_originals is not None and recovery_originals.originals)
             else capture_artifact_paths
         ),
         capture_only_paths=(
             _unique_paths([run_path, *capture_only_paths])
-            if b1_context is not None
+            if b1_context is not None or (recovery_originals is not None and recovery_originals.originals)
             else capture_only_paths
         ),
         captured_artifacts=target_captures,
     )
+    if recovery_originals is not None and recovery_originals.originals:
+        assert target_captures is not None
+        material_run = ReviewRun.model_validate_json(target_captures[run_path.relative_to(root).as_posix()])
+        material_pack = ReviewPack.model_validate_json(target_captures[review_pack_path.relative_to(root).as_posix()])
+        captured_recovery = read_pr_recovery_originals(root, material_run, material_pack, reviewed_artifacts=target_captures)
+        if (captured_recovery.originals != recovery_originals.originals
+                or captured_recovery.directories != recovery_originals.directories):
+            raise ValueError("recovery-original-capture-drift")
+        captured_recovery.assert_unchanged()
     if b1_context is not None:
         assert target_captures is not None
         context = _captured_quantified_context(
@@ -761,17 +910,35 @@ def resolve_review_input(
         material = {*reviewed.artifact_paths, *reviewed.upstream_context_paths}
         if any(source.path not in material for source in context.sources):
             raise ValueError("decision-source-missing-from-snapshot")
-        if captured_artifacts is not None:
-            requested = [*capture_artifact_paths, *capture_only_paths]
-            for path in requested:
-                relative = (
-                    _lexical_path(
-                        Path(path) if Path(path).is_absolute() else root / path
-                    )
-                    .relative_to(root.resolve())
-                    .as_posix()
-                )
-                captured_artifacts[relative] = target_captures[relative]
+    if captured_artifacts is not None and target_captures is not captured_artifacts:
+        assert target_captures is not None
+        # 内部完整校验仍用同次原件；显式读取只返回请求的材料，统一普通及量化出口。
+        requested = (
+            list(capture_paths)
+            if capture_paths is not None
+            else [*capture_artifact_paths, *capture_only_paths]
+        )
+        if recovery_originals is not None and capture_paths is None:
+            # 默认 Close 需要完整恢复原件，包括旧捕获集合排除的 diff；只返回同次已认证字节。
+            # 显式 read-path 仍保持单项读取契约，不扩展其对外返回集合。
+            requested = _unique_paths(
+                [*requested, *(root / key for key in recovery_originals.originals)]
+            )
+        if b1_context is not None and loop_type == "implementation" and capture_paths is None:
+            from ai_sdlc.core.implementation_models import ImplementationInput
+
+            input_key = (loop_dir / "implementation-input.json").relative_to(root).as_posix()
+            captured_input = ImplementationInput.model_validate_json(target_captures[input_key])
+            if captured_input.verification_capability is not None:
+                # 新能力的 Close 读取完整原件链；全部字节来自本次摘要捕获。
+                requested = _unique_paths([*requested, *artifacts, *upstream_context])
+        for path in requested:
+            relative = (
+                _lexical_path(Path(path) if Path(path).is_absolute() else root / path)
+                .relative_to(root.resolve())
+                .as_posix()
+            )
+            captured_artifacts[relative] = target_captures[relative]
     return reviewed
 
 
@@ -1080,18 +1247,105 @@ def _stage_upstream_context(
     return _unique_paths([*inherited, *predecessor_artifacts])
 
 
-def _stage_source_material(root: Path, loop_type: str, loop_dir: Path) -> list[Path]:
+def _stage_source_material(
+    root: Path,
+    loop_type: str,
+    loop_dir: Path,
+    *,
+    review_round_number: int = 1,
+) -> list[Path]:
     if loop_type == "requirement":
         return []
+    from ai_sdlc.core.design_contract_store import require_design_check_published
+
     if loop_type == "design-contract":
+        # 发布完整性独立于可选验收能力；旧映射也不能把未完成写入用作当前依据。
+        require_design_check_published(loop_dir)
         payload = _read_json_object(root, loop_dir / "design-contract-input.json")
+        material = {}
+        # 旧输入仍可用于诊断；任一非 None 声明都不能降级绕过完整能力校验。
+        binding_fields = (
+            "verification_capability",
+            "verification_contract_ref",
+            "verification_contract_digest",
+        )
+        if any(payload.get(name) is not None for name in binding_fields):
+            from ai_sdlc.core.design_contract_models import DesignContractInput
+            from ai_sdlc.core.design_contract_store import read_verification_contract
+
+            _, material = read_verification_contract(
+                root, DesignContractInput.model_validate(payload)
+            )
         return [
-            _repo_path(root, value, field_name)
-            for field_name in ("spec_path", "plan_path", "tasks_path")
-            if isinstance((value := payload.get(field_name)), str) and value.strip()
+            *(root / path for path in material),
+            *(
+                _repo_path(root, value, field_name)
+                for field_name in ("spec_path", "plan_path", "tasks_path")
+                if isinstance((value := payload.get(field_name)), str) and value.strip()
+            ),
         ]
     if loop_type == "implementation":
         payload = _read_json_object(root, loop_dir / "implementation-input.json")
+        binding_fields = (
+            "verification_capability",
+            "verification_contract_ref",
+            "verification_contract_digest",
+        )
+        legacy_binding = False
+        if all(payload.get(name) is None for name in binding_fields):
+            predecessor = payload.get("design_contract_loop_id")
+            if isinstance(predecessor, str) and predecessor.strip():
+                upstream_dir = (
+                    root / ".ai-sdlc/loops/design-contract"
+                    / _safe_identifier(predecessor)
+                )
+                require_design_check_published(upstream_dir)
+                upstream = _read_json_object(
+                    root, upstream_dir / "design-contract-input.json",
+                )
+                legacy_binding = all(
+                    upstream.get(name) is None for name in binding_fields
+                )
+        # 双方都明确未启用才沿旧映射诊断；下游删空字段不能取消上游能力。
+        material = {}
+        counterexample_refs: tuple[ArtifactRef, ...] = ()
+        if not legacy_binding:
+            from ai_sdlc.core.implementation_models import (
+                ImplementationInput,
+                ImplementationProgress,
+            )
+            from ai_sdlc.core.implementation_store import (
+                validate_implementation_verification_contract,
+            )
+
+            impl_input = ImplementationInput.model_validate(payload)
+            contract, material = validate_implementation_verification_contract(
+                root, impl_input
+            )
+            if contract is not None:
+                from ai_sdlc.core.counterexample_execution import (
+                    counterexample_verification_state,
+                )
+                from ai_sdlc.core.stable_file_read import read_stable_bytes
+
+                progress = ImplementationProgress.model_validate_json(
+                    read_stable_bytes(root, loop_dir / "implementation-progress.json")
+                )
+                blockers, _, counterexample_refs = counterexample_verification_state(
+                    root,
+                    impl_input,
+                    progress,
+                    # R1 不能把自己稍后写出的 outcome 纳入自己的输入摘要。
+                    require_r2=False
+                    if review_round_number == 1 or _COUNTEREXAMPLE_EXECUTION_CAPTURE.get()
+                    else None,
+                    require_completion=not _COUNTEREXAMPLE_EXECUTION_CAPTURE.get(),
+                    active_plan_digest=_COUNTEREXAMPLE_ACTIVE_PLAN.get(),
+                )
+                if blockers:
+                    raise ValueError(
+                        "counterexample-review-evidence-incomplete: " + "; ".join(blockers)
+                    )
         declared_scope = payload.get("declared_scope", [])
         if not isinstance(declared_scope, list) or not all(
             isinstance(item, str) for item in declared_scope
@@ -1103,6 +1357,8 @@ def _stage_source_material(root: Path, loop_type: str, loop_dir: Path) -> list[P
             [
                 *_expand_repo_patterns(root, declared_scope),
                 *_implementation_evidence_material(root, loop_dir),
+                *(root / path for path in material),
+                *(root / reference.path for reference in counterexample_refs),
             ]
         )
     if loop_type == "frontend-evidence":
@@ -1459,6 +1715,9 @@ def _matching_risk_signals(
     detected: set[str] = set()
     for risk, terms in _RISK_TERMS.items():
         for term in terms:
+            # 原文没有完整字面词时无需扫描词边界，流式尾部与最终判定仍保持原规则。
+            if term not in content:
+                continue
             pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
             for match in re.finditer(pattern, content):
                 if left_truncated and match.start() == 0:

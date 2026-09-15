@@ -5,29 +5,51 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
+import shutil
 import subprocess
+import sys
+import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from types import TracebackType
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
 from ai_sdlc.core.loop_artifacts import LoopArtifactStore
-from ai_sdlc.core.loop_models import LoopStatus, SchemaValidationStatus
+from ai_sdlc.core.loop_models import LoopStatus, SchemaValidationStatus, utc_now_iso
 from ai_sdlc.core.pr_review_models import (
     DiffSourceKind,
     FindingSeverity,
     ModelResolutionSource,
+    ProviderCompletionProof,
+    ProviderExecutionFailure,
     ProviderIsolationStatus,
+    ProviderLaunchStatus,
     ProviderMode,
     ProviderRunnerInvocation,
+    ProviderWorkspaceCheck,
     ReviewFinding,
     ReviewFindings,
     ReviewPack,
     ReviewVerdict,
 )
 from ai_sdlc.core.pr_review_schema import validate_artifact_file
+from ai_sdlc.core.quality_command import (
+    _PROCESS_OWNER_ENV,
+    ControlledQualityOptions,
+    QualityCommandOptions,
+    quality_command_environment,
+    run_controlled_process,
+)
 from ai_sdlc.core.source_snapshot import SourceSnapshotOptions, build_source_snapshot
+from ai_sdlc.core.stable_file_read import (
+    _stable_regular_file_exists,
+    read_stable_bytes,
+)
 
 EXIT_SUCCESS = 0
 EXIT_CHANGES_REQUIRED = 10
@@ -66,6 +88,11 @@ class ProviderCommandOptions:
     provider_id: str = "local-agent"
     timeout_seconds: float = 60.0
     isolation_status: ProviderIsolationStatus = ProviderIsolationStatus.ISOLATED_PROCESS
+    pre_launch_guard: Callable[[], None] | None = None
+    snapshot_max_entries: int = 4096
+    snapshot_require_complete: bool = False
+    workspace_adoption_ref: dict[str, str] | None = None
+    on_execution_failure: Callable[[ProviderRunResult], None] | None = None
 
 
 class ProviderRunResult(BaseModel):
@@ -87,6 +114,15 @@ class ProviderRunResult(BaseModel):
 def run_provider_command(options: ProviderCommandOptions) -> ProviderRunResult:
     """Run a configured local reviewer command and validate findings output."""
 
+    # 不支持的恢复能力必须在写回执、清旧输出及创建子进程之前拒绝。
+    if (options.snapshot_require_complete or options.snapshot_max_entries != 4096
+            or options.workspace_adoption_ref is not None):
+        return ProviderRunResult(
+            status=ProviderRunStatus.BLOCKED,
+            blocker="Historical provider recovery and workspace adoption are unsupported.",
+            next_action="Preserve the failed invocation; use only supported normal provider execution.",
+        )
+
     if not options.command:
         return ProviderRunResult(
             status=ProviderRunStatus.NEEDS_USER,
@@ -101,230 +137,355 @@ def run_provider_command(options: ProviderCommandOptions) -> ProviderRunResult:
 
     root = options.root.resolve()
     review_pack = _load_review_pack(options.review_pack_path)
-    allowlist_blocker = _reviewer_allowlist_launch_blocker(review_pack)
-    if allowlist_blocker:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            blocker=allowlist_blocker,
-            next_action="Regenerate a complete review pack before running local-agent.",
-        )
-    head_blocker = _reviewed_head_launch_blocker(root, review_pack)
-    if head_blocker:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            blocker=head_blocker,
-            next_action=(
-                "Check out the reviewed head commit or rerun PR review for the "
-                "current worktree HEAD."
-            ),
-        )
-    source_blocker = _reviewed_diff_source_launch_blocker(root, review_pack)
-    if source_blocker:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            blocker=source_blocker,
-            next_action=(
-                "Restore the reviewed patch file or regenerate the review pack "
-                "from the current diff source."
-            ),
-        )
     store = LoopArtifactStore(root)
     review_dir = store.create_review_run_dir(review_pack.review_id)
     findings_path = review_dir / "findings.json"
     invocation_path = review_dir / "reviewer-invocation.json"
     schema_validation_path = review_dir / "schema-validation.json"
-    argv = _expand_command(
-        options.command, review_pack, options.review_pack_path, findings_path
-    )
-    _remove_previous_provider_outputs(findings_path, schema_validation_path)
+    argv = _expand_command(options.command, review_pack, options.review_pack_path, findings_path)
+
+    def prelaunch_failure(blocker: str, next_action: str = "Restore the reported preflight condition and rerun the same review.") -> ProviderRunResult:
+        # 尚未创建子进程；现场读取失败不能写成工作区未变化，也不能留下旧调用冒充本次。
+        check = ProviderWorkspaceCheck(
+            status="unproven", reason=blocker,
+            review_pack_digest=hashlib.sha256(read_stable_bytes(root, options.review_pack_path)).hexdigest(),
+        )
+        invocation = _write_invocation(
+            store=store, path=invocation_path, review_pack=review_pack,
+            provider_id=options.provider_id, argv=argv, input_path=options.review_pack_path,
+            output_path=findings_path, cwd=root, isolation_status=ProviderIsolationStatus.NOT_PROVEN,
+            launch_status=ProviderLaunchStatus.NEVER_STARTED, exit_code=None,
+            status=LoopStatus.BLOCKED, workspace_check=check, preflight_incomplete=True,
+        )
+        _remove_previous_provider_outputs(findings_path, schema_validation_path)
+        return ProviderRunResult(status=ProviderRunStatus.BLOCKED, findings_path=str(findings_path),
+                                 invocation_path=str(invocation_path), invocation=invocation,
+                                 blocker=blocker, next_action=next_action)
+
+    def check_prelaunch_guard(stage: str) -> ProviderRunResult | None:
+        if options.pre_launch_guard is not None:
+            try:
+                options.pre_launch_guard()
+            except (ValueError, OSError, WorktreeSnapshotError) as exc:
+                # 首次准备与最终启动检查共用未启动分类，包括 accepted 层归一后的读取错误。
+                return prelaunch_failure(f"Accepted workspace {stage}: {exc}")
+        return None
+
+    for check in (
+        lambda: _reviewer_allowlist_launch_blocker(review_pack),
+        lambda: _reviewed_head_launch_blocker(root, review_pack),
+        lambda: _reviewed_diff_source_launch_blocker(root, review_pack),
+    ):
+        blocker = check()
+        if blocker:
+            return prelaunch_failure(blocker)
+    guard_failure = check_prelaunch_guard("changed before provider preparation")
+    if guard_failure is not None:
+        return guard_failure
     dirty_blocker = _preexisting_dirty_worktree_blocker(
         root,
-        frozenset(
-            {
-                review_dir.resolve(),
-                (review_dir.parent / "current-review.json").resolve(),
-                *_provider_command_entry_paths(root, argv),
-            }
-        ),
+        frozenset({review_dir.resolve(), (review_dir.parent / "current-review.json").resolve(),
+                   *_provider_command_entry_paths(root, argv)}),
         _reviewed_dirty_paths_for_launch(root, review_pack),
         DiffSourceKind(review_pack.diff_source.source_kind),
     )
     if dirty_blocker:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            findings_path=str(findings_path),
-            blocker=dirty_blocker,
-            next_action=(
-                "Commit or discard unreviewed worktree changes, then rerun PR review."
-            ),
-        )
+        return prelaunch_failure(dirty_blocker, "Commit or discard unreviewed worktree changes, then rerun PR review.")
+    _remove_previous_provider_outputs(findings_path, schema_validation_path)
     mutable_provider_outputs = frozenset({findings_path.resolve()})
     try:
+        pack_digest = hashlib.sha256(
+            read_stable_bytes(root, options.review_pack_path)
+        ).hexdigest()
+        host_paths = _provider_host_artifact_paths(root, review_pack.review_id)
         before_snapshot = _worktree_snapshot(root, mutable_provider_outputs)
-    except WorktreeSnapshotError as exc:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            findings_path=str(findings_path),
-            blocker=_snapshot_failure_blocker(exc),
-            next_action="Fix git status access, then rerun local PR review.",
+        before_recovery = _worktree_snapshot(
+            root, mutable_provider_outputs | host_paths
         )
+        before_host = _host_artifact_snapshot(root, host_paths)
+    except (WorktreeSnapshotError, ValueError, OSError) as exc:
+        return prelaunch_failure(_snapshot_failure_blocker(exc), "Fix git status access, then rerun local PR review.")
+
+    launch_status = ProviderLaunchStatus.NEVER_STARTED
+    completion_proof = None
+    exit_code: int | None = None
+    execution_blocker = ""
+    execution_exception: BaseException | None = None
+    execution_traceback: TracebackType | None = None
+    rethrow_execution_exception = False
+    proof_root: Path | None = None
+    proof_captured = False
+    preserve_temporary = False
+    try:
+        # 预检只保留确定的未启动错误；通过后的启动竞态不能猜成 never_started。
+        _require_provider_executable(argv[0], root)
+        # 唯一临时原件只在持久化完成后删除；保存失败时保留实际目录供诊断。
+        proof_root = Path(tempfile.mkdtemp(prefix="ai-sdlc-provider-owned-")).resolve()
+        originals: dict[str, str] = {}
+        for name in ("stdout", "stderr"):
+            (proof_root / name).touch(exist_ok=False)
+        nonce = secrets.token_hex(32)
+        environment = quality_command_environment(os.environ)
+        # 外层进程的内部归属标记不代表本次调用；核心仍为本次分配独立身份。
+        environment.pop(_PROCESS_OWNER_ENV, None)
+        prelaunch_return = False
+
+        def persist(name: str):
+            def write(payload: dict[str, object]) -> None:
+                nonlocal launch_status
+                if name == "process.json" or payload.get("launch_status") == "started":
+                    launch_status = ProviderLaunchStatus.STARTED
+                content = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+                assert proof_root is not None
+                LoopArtifactStore(proof_root).write_bytes_artifact(
+                    proof_root / name, content.encode("utf-8"), immutable=True
+                )
+            return write
+
+        try:
+            # 创建临时收尾原件也占用时间，实际启动前再次核对接受的现场。
+            guard_failure = check_prelaunch_guard("could not be verified before provider launch")
+            if guard_failure is not None:
+                prelaunch_return = True
+                return guard_failure
+            try:
+                run_controlled_process(
+                    QualityCommandOptions(
+                        root=root, cwd=root, argv=tuple(argv),
+                        timeout_seconds=options.timeout_seconds,
+                        controlled=ControlledQualityOptions(
+                            environment=environment,
+                            stdout_path=proof_root / "stdout", stderr_path=proof_root / "stderr",
+                            # provider 原来不截断标准输出；这里只改为持久流式收集。
+                            max_output_bytes=sys.maxsize, ownership_nonce=nonce,
+                            on_started=persist("process.json"),
+                            on_raw_result=persist("raw-result.json"),
+                            on_cleanup=persist("cleanup.json"),
+                        ),
+                    )
+                )
+            except BaseException as exc:
+                execution_exception, execution_traceback = exc, exc.__traceback__
+                rethrow_execution_exception = not isinstance(exc, (OSError, ValueError))
+                raise
+        finally:
+            # 发布可能在文件已落盘后抛错；只保存终止后实际存在的稳定原件。
+            # 缺失 raw 不补造，cleanup 内保全的原始事实由共享读取判据核验。
+            try:
+                for name in ("process.json", "raw-result.json", "cleanup.json"):
+                    original_path = proof_root / name
+                    if _stable_regular_file_exists(proof_root, original_path):
+                        originals[name] = read_stable_bytes(proof_root, original_path).decode("utf-8")
+                proof_captured = True
+            except BaseException as capture_error:
+                preserve_temporary = True
+                if execution_exception is None:
+                    execution_exception, execution_traceback = capture_error, capture_error.__traceback__
+                    rethrow_execution_exception = not isinstance(capture_error, (OSError, ValueError))
+                    raise
+                execution_exception.add_note(
+                    f"Provider original capture failed: {type(capture_error).__name__}: {capture_error}"
+                )
+            finally:
+                if originals:
+                    completion_proof = ProviderCompletionProof(
+                        ownership_nonce=nonce, originals=originals,
+                        sha256={name: hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                                for name, raw in originals.items()},
+                    )
+                if prelaunch_return:
+                    shutil.rmtree(proof_root)
+    except FileNotFoundError as exc:
+        execution_blocker = (
+            f"Reviewer command not found: {argv[0]}"
+            if launch_status == ProviderLaunchStatus.NEVER_STARTED
+            else f"Reviewer command failed after launch: {argv[0]}: {exc}"
+        )
+    except (OSError, ValueError) as exc:
+        execution_blocker = (
+            f"Reviewer command could not be started: {argv[0]}: {exc}"
+            if launch_status == ProviderLaunchStatus.NEVER_STARTED
+            else f"Reviewer command failed after launch: {argv[0]}: {exc}"
+        )
+    except BaseException as exc:
+        if execution_exception is None:
+            execution_exception, execution_traceback = exc, exc.__traceback__
+            rethrow_execution_exception = True
+        elif exc is not execution_exception:
+            preserve_temporary = True
+            execution_exception.add_note(f"Provider original capture failed: {type(exc).__name__}: {exc}")
+    if (execution_exception is not None and not rethrow_execution_exception
+            and launch_status == ProviderLaunchStatus.NEVER_STARTED):
+        execution_exception = None
+    if execution_exception is not None and launch_status == ProviderLaunchStatus.NEVER_STARTED:
+        # 未启动的未知程序异常仍原样传播，不借保全回调伪造一次 provider 调用。
+        if proof_root is not None:
+            try:
+                shutil.rmtree(proof_root)
+            except BaseException as cleanup_error:
+                execution_exception.add_note(f"Provider temporary cleanup failed at {proof_root}: {cleanup_error}")
+        raise execution_exception.with_traceback(execution_traceback)
+    if execution_exception is not None:
+        execution_blocker = f"Reviewer command failed after launch: {type(execution_exception).__name__}: {execution_exception}"
+
+    mutation_blocker = ""
+    workspace_check = ProviderWorkspaceCheck(
+        status="unproven", review_pack_digest=pack_digest,
+        reason="Provider workspace check has not completed.",
+    )
+
+    def finalize_result() -> ProviderRunResult:
+        # 执行与后处理失败共用真实原件、诊断及回调；全部后处理结束后才删除临时副本。
+        nonlocal preserve_temporary
+        if execution_exception is not None and workspace_check.status == "unproven":
+            preserve_temporary = True
+            execution_exception.add_note(f"Provider workspace could not be proven: {workspace_check.reason}")
+        execution_failure = None
+        if execution_exception is not None:
+            try:
+                present = _stable_regular_file_exists(root, findings_path)
+                diagnostic_digest = hashlib.sha256(read_stable_bytes(root, findings_path)).hexdigest() if present else None
+                execution_failure = ProviderExecutionFailure(
+                    exception_type=type(execution_exception).__name__, message=str(execution_exception),
+                    findings_status="present" if present else "absent", findings_sha256=diagnostic_digest,
+                )
+            except BaseException as diagnostic_error:
+                preserve_temporary = True
+                reason = f"{type(diagnostic_error).__name__}: {diagnostic_error}"
+                execution_exception.add_note(f"Provider diagnostic capture failed: {reason}")
+                execution_failure = ProviderExecutionFailure(
+                    exception_type=type(execution_exception).__name__, message=str(execution_exception),
+                    findings_status="unavailable", findings_error=reason,
+                )
+        blocker = mutation_blocker or execution_blocker
+        invocation = _write_invocation(
+            store=store, path=invocation_path, review_pack=review_pack,
+            provider_id=options.provider_id, argv=argv,
+            input_path=options.review_pack_path, output_path=findings_path, cwd=root,
+            isolation_status=(ProviderIsolationStatus.NOT_PROVEN
+                              if launch_status == ProviderLaunchStatus.NEVER_STARTED else options.isolation_status),
+            launch_status=launch_status, completion_proof=completion_proof, exit_code=exit_code,
+            status=LoopStatus.BLOCKED if blocker else _loop_status_for_exit_code(exit_code),
+            workspace_check=workspace_check, execution_failure=execution_failure,
+        )
+        if proof_root is not None and (preserve_temporary or not proof_captured):
+            blocker = f"{blocker} Provider originals retained at {proof_root}".strip()
+        blocked_result = ProviderRunResult(
+            status=ProviderRunStatus.BLOCKED, exit_code=exit_code,
+            invocation_path=str(invocation_path), findings_path=str(findings_path), blocker=blocker,
+            next_action=_next_action_for_mutation_blocker(mutation_blocker) if mutation_blocker
+            else "Fix the local reviewer command and rerun review.", invocation=invocation,
+        )
+        if (execution_exception is not None and rethrow_execution_exception
+                and options.on_execution_failure is not None):
+            options.on_execution_failure(blocked_result)
+        result = blocked_result
+        if not blocker:
+            if exit_code not in {EXIT_SUCCESS, EXIT_CHANGES_REQUIRED, EXIT_BLOCKED}:
+                result = ProviderRunResult(
+                    status=ProviderRunStatus.BLOCKED, exit_code=exit_code,
+                    invocation_path=str(invocation_path), findings_path=str(findings_path),
+                    blocker=f"Reviewer command failed with exit code {exit_code}.",
+                    next_action="Fix the local reviewer command and rerun review.", invocation=invocation,
+                )
+            else:
+                result = _validate_findings_output(
+                    store=store, review_pack=review_pack, review_pack_path=options.review_pack_path,
+                    findings_path=findings_path, schema_validation_path=schema_validation_path,
+                    invocation_path=invocation_path, exit_code=exit_code, invocation=invocation,
+                )
+        if proof_root is not None and proof_captured and not preserve_temporary:
+            shutil.rmtree(proof_root)
+        elif proof_root is not None and execution_exception is not None:
+            execution_exception.add_note(f"Provider originals retained at {proof_root}")
+        return result
 
     try:
-        process = subprocess.run(
-            argv,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=options.timeout_seconds,
-        )
-        exit_code: int | None = process.returncode
-        mutation_blocker = _worktree_mutation_blocker(
-            root,
-            mutable_provider_outputs,
-            before_snapshot,
-        )
-    except FileNotFoundError:
-        exit_code = None
-        invocation = _write_invocation(
-            store=store,
-            path=invocation_path,
-            review_pack=review_pack,
-            provider_id=options.provider_id,
-            argv=argv,
-            input_path=options.review_pack_path,
-            output_path=findings_path,
-            cwd=root,
-            isolation_status=ProviderIsolationStatus.NOT_PROVEN,
-            exit_code=exit_code,
-            status=LoopStatus.BLOCKED,
-        )
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            invocation_path=str(invocation_path),
-            findings_path=str(findings_path),
-            blocker=f"Reviewer command not found: {argv[0]}",
-            next_action="Configure a valid local reviewer command.",
-            invocation=invocation,
-        )
-    except OSError as exc:
-        exit_code = None
-        mutation_blocker = _worktree_mutation_blocker(
-            root,
-            mutable_provider_outputs,
-            before_snapshot,
-        )
-        invocation = _write_invocation(
-            store=store,
-            path=invocation_path,
-            review_pack=review_pack,
-            provider_id=options.provider_id,
-            argv=argv,
-            input_path=options.review_pack_path,
-            output_path=findings_path,
-            cwd=root,
-            isolation_status=ProviderIsolationStatus.NOT_PROVEN,
-            exit_code=exit_code,
-            status=LoopStatus.BLOCKED,
-        )
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            invocation_path=str(invocation_path),
-            findings_path=str(findings_path),
-            blocker=(
-                mutation_blocker
-                or f"Reviewer command could not be started: {argv[0]}: {exc}"
-            ),
-            next_action=(
-                _next_action_for_mutation_blocker(mutation_blocker)
-                if mutation_blocker
-                else "Configure an executable local reviewer command and rerun review."
-            ),
-            invocation=invocation,
-        )
-    except subprocess.TimeoutExpired:
-        exit_code = None
-        mutation_blocker = _worktree_mutation_blocker(
-            root,
-            mutable_provider_outputs,
-            before_snapshot,
-        )
-        invocation = _write_invocation(
-            store=store,
-            path=invocation_path,
-            review_pack=review_pack,
-            provider_id=options.provider_id,
-            argv=argv,
-            input_path=options.review_pack_path,
-            output_path=findings_path,
-            cwd=root,
-            isolation_status=options.isolation_status,
-            exit_code=exit_code,
-            status=LoopStatus.BLOCKED,
-        )
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            invocation_path=str(invocation_path),
-            findings_path=str(findings_path),
-            blocker=mutation_blocker or "Reviewer command timed out.",
-            next_action=(
-                _next_action_for_mutation_blocker(mutation_blocker)
-                if mutation_blocker
-                else "Rerun with a healthy local reviewer command."
-            ),
-            invocation=invocation,
-        )
+        try:
+            # 输出尾部读取可在真实收尾原件保存后失败；正常与异常路径只信同一严格完成证明。
+            if completion_proof is not None or not execution_blocker:
+                try:
+                    if completion_proof is None:
+                        raise ValueError("provider-completion-originals-missing")
+                    raw = completion_proof.require_complete()
+                except (OSError, ValueError) as exc:
+                    # 元数据已读取不等于输出已稳定；保留无法证明完成的实际临时原件。
+                    preserve_temporary = True
+                    proof_blocker = f"Reviewer completion could not be verified: {exc}"
+                    execution_blocker = f"{execution_blocker} {proof_blocker}".strip()
+                else:
+                    launch_status = ProviderLaunchStatus(raw["launch_status"])
+                    exit_code = cast(int | None, raw["exit_code"])
+                    # 已发生的读取/执行错误仍阻断判定，真实退出码只保留事实，不把失败改成成功。
+                    if not execution_blocker:
+                        if raw["launch_error"] or raw["output_io_error"] or raw["output_truncated"]:
+                            execution_blocker = (
+                                f"Reviewer command could not be started: {argv[0]}: {raw['launch_error']}"
+                                if launch_status == ProviderLaunchStatus.NEVER_STARTED
+                                else "Reviewer command execution is incomplete: " + str(raw["launch_error"])
+                            )
+                        elif raw["timed_out"]:
+                            execution_blocker = "Reviewer command timed out."
+            try:
+                mutation_blocker, workspace_check = _check_provider_workspace(
+                    root, mutable_provider_outputs, before_snapshot, before_recovery, before_host, pack_digest,
+                )
+            except BaseException as workspace_error:
+                if execution_exception is None:
+                    raise
+                preserve_temporary = True
+                mutation_blocker = f"Provider workspace capture failed: {type(workspace_error).__name__}: {workspace_error}"
+                execution_exception.add_note(mutation_blocker)
+                workspace_check = ProviderWorkspaceCheck(
+                    status="unproven", review_pack_digest=pack_digest, reason=mutation_blocker,
+                )
+            result = finalize_result()
+        except BaseException as postprocessing_error:
+            if execution_exception is not None or launch_status == ProviderLaunchStatus.NEVER_STARTED:
+                raise
+            # 首次工作区、持久化或 findings 后处理异常也属于本次已启动调用。
+            # 只保存失败结果，不重做执行或 findings 判断；未知工作区仍保持 unproven。
+            execution_exception, execution_traceback = postprocessing_error, postprocessing_error.__traceback__
+            rethrow_execution_exception = True
+            execution_blocker = (
+                f"Reviewer postprocessing failed after launch: {type(postprocessing_error).__name__}: {postprocessing_error}"
+            )
+            result = finalize_result()
+    except BaseException as preservation_error:
+        if execution_exception is not None:
+            if preservation_error is not execution_exception:
+                execution_exception.add_note(
+                    f"Provider failure persistence failed: {type(preservation_error).__name__}: {preservation_error}"
+                )
+            if proof_root is not None:
+                execution_exception.add_note(f"Provider originals retained at {proof_root}")
+            # 二次保全错误已进入备注；重抛保留原执行异常及它原有的显式原因。
+            raise execution_exception.with_traceback(execution_traceback) from execution_exception.__cause__
+        if proof_root is not None:
+            preservation_error.add_note(f"Provider originals retained at {proof_root}")
+        raise
+    if execution_exception is not None and rethrow_execution_exception:
+        raise execution_exception.with_traceback(execution_traceback)
+    return result
 
-    invocation = _write_invocation(
-        store=store,
-        path=invocation_path,
-        review_pack=review_pack,
-        provider_id=options.provider_id,
-        argv=argv,
-        input_path=options.review_pack_path,
-        output_path=findings_path,
-        cwd=root,
-        isolation_status=options.isolation_status,
-        exit_code=exit_code,
-        status=LoopStatus.BLOCKED
-        if mutation_blocker
-        else _loop_status_for_exit_code(exit_code),
-    )
 
-    if mutation_blocker:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            exit_code=exit_code,
-            invocation_path=str(invocation_path),
-            findings_path=str(findings_path),
-            blocker=mutation_blocker,
-            next_action=_next_action_for_mutation_blocker(mutation_blocker),
-            invocation=invocation,
+def _require_provider_executable(command: str, root: Path) -> None:
+    """只读确认明确的入口缺失/执行权限；不把检查通过当作启动证明。"""
+    candidate = Path(command)
+    if candidate.is_absolute() or os.path.dirname(command):
+        candidate = candidate if candidate.is_absolute() else root / candidate
+        if not candidate.exists():
+            raise FileNotFoundError(command)
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise PermissionError("permission denied")
+    else:
+        # 相对 PATH 项与显式 ./ 入口都按实际子进程 cwd 解释，预检不改原 argv。
+        search_path = os.pathsep.join(
+            str(Path(entry) if Path(entry).is_absolute() else root / entry)
+            for entry in os.get_exec_path()
         )
-
-    if exit_code not in {EXIT_SUCCESS, EXIT_CHANGES_REQUIRED, EXIT_BLOCKED}:
-        return ProviderRunResult(
-            status=ProviderRunStatus.BLOCKED,
-            exit_code=exit_code,
-            invocation_path=str(invocation_path),
-            findings_path=str(findings_path),
-            blocker=f"Reviewer command failed with exit code {exit_code}.",
-            next_action="Fix the local reviewer command and rerun review.",
-            invocation=invocation,
-        )
-
-    return _validate_findings_output(
-        store=store,
-        review_pack=review_pack,
-        review_pack_path=options.review_pack_path,
-        findings_path=findings_path,
-        schema_validation_path=schema_validation_path,
-        invocation_path=invocation_path,
-        exit_code=exit_code,
-        invocation=invocation,
-    )
+        if shutil.which(command, path=search_path) is None:
+            raise FileNotFoundError(command)
 
 
 def run_mock_reviewer(
@@ -758,9 +919,12 @@ def _worktree_mutation_blocker(
     root: Path,
     mutable_provider_outputs: frozenset[Path],
     before: dict[str, str],
+    *,
+    after: dict[str, str] | None = None,
 ) -> str:
     try:
-        after = _worktree_snapshot(root, mutable_provider_outputs)
+        if after is None:
+            after = _worktree_snapshot(root, mutable_provider_outputs)
     except WorktreeSnapshotError as exc:
         return _snapshot_failure_blocker(exc)
     if after == before:
@@ -778,8 +942,103 @@ def _worktree_mutation_blocker(
     )
 
 
+def _provider_host_artifact_paths(root: Path, review_id: str) -> frozenset[Path]:
+    # 只在恢复比较中转移三个宿主后写文件；运行期间仍由完整快照保护。
+    from ai_sdlc.core.pr_review_service import CURRENT_REVIEW_PATH
+
+    directory = LoopArtifactStore(root).review_run_dir(review_id)
+    return frozenset(
+        {
+            directory / "reviewer-invocation.json",
+            directory / "review-run.json",
+            root / CURRENT_REVIEW_PATH,
+        }
+    )
+
+
+def _host_artifact_snapshot(
+    root: Path, paths: frozenset[Path]
+) -> dict[str, str | None]:
+    return {
+        path.relative_to(root).as_posix(): (
+            hashlib.sha256(read_stable_bytes(root, path)).hexdigest()
+            if _stable_regular_file_exists(root, path)
+            else None
+        )
+        for path in paths
+    }
+
+
+def _check_provider_workspace(
+    root: Path,
+    outputs: frozenset[Path],
+    before: dict[str, str],
+    before_recovery: dict[str, str],
+    before_host: dict[str, str | None],
+    pack_digest: str,
+) -> tuple[str, ProviderWorkspaceCheck]:
+    try:
+        host_paths = frozenset(root / name for name in before_host)
+        after = _worktree_snapshot(root, outputs)
+        after_recovery = _worktree_snapshot(root, outputs | host_paths)
+        after_host = _host_artifact_snapshot(root, host_paths)
+        original_values = {
+            key: before_recovery.get(key)
+            for key in before_recovery.keys() | after_recovery.keys()
+            if before_recovery.get(key) != after_recovery.get(key)
+        }
+        host_mutations = sorted(
+            name for name in before_host if before_host[name] != after_host[name]
+        )
+        full_changes = {
+            key
+            for key in before.keys() | after.keys()
+            if before.get(key) != after.get(key)
+        }
+
+        def host_boundary(key: str, names: list[str]) -> bool:
+            return any(
+                key == name or name.startswith(key.rstrip("/") + "/") for name in names
+            )
+
+        # 两次观察中未被精确宿主排除影响的键必须一致，不能补造安全的旧基线。
+        for full, recovery in ((before, before_recovery), (after, after_recovery)):
+            if any(
+                full.get(key) != recovery.get(key)
+                and not host_boundary(key, list(before_host))
+                for key in full.keys() | recovery.keys()
+            ):
+                raise WorktreeSnapshotError(
+                    "workspace observations changed during capture"
+                )
+        if any(
+            key not in original_values and not host_boundary(key, host_mutations)
+            for key in full_changes
+        ):
+            raise WorktreeSnapshotError(
+                "full workspace mutation has no proven recovery boundary"
+            )
+        check = ProviderWorkspaceCheck(
+            status="mutated" if original_values or host_mutations else "unchanged",
+            review_pack_digest=pack_digest,
+            original_values=original_values,
+            host_artifact_mutations=host_mutations,
+        )
+        blocker = _worktree_mutation_blocker(root, outputs, before, after=after)
+        if check.status == "mutated" and not blocker:
+            blocker = "Reviewer command modified files outside expected provider output artifacts."
+        return blocker, check
+    except (WorktreeSnapshotError, ValueError, OSError) as exc:
+        return _snapshot_failure_blocker(exc), ProviderWorkspaceCheck(
+            status="unproven", review_pack_digest=pack_digest, reason=str(exc)
+        )
+
+
 def _worktree_snapshot(
-    root: Path, mutable_provider_outputs: frozenset[Path]
+    root: Path, mutable_provider_outputs: frozenset[Path], *,
+    exact_host_entries: Mapping[Path, str] | None = None,
+    ignored_max_entries: int = 4096,
+    require_complete: bool = False,
 ) -> dict[str, str]:
     try:
         result = subprocess.run(
@@ -817,14 +1076,20 @@ def _worktree_snapshot(
         ):
             continue
         path = root / normalized
+        if exact_host_entries and path in exact_host_entries and exact_host_entries[path] == "file":
+            if path.is_symlink() or not path.is_file():
+                raise WorktreeSnapshotError("expected host output is not an ordinary file")
+            continue
         if status_code == "!!" and path.is_dir():
-            snapshot[normalized] = f"{status_code}:{_ignored_dir_digest(path)}"
+            snapshot[normalized] = (
+                f"{status_code}:{_ignored_dir_digest(path, max_entries=ignored_max_entries, require_complete=require_complete, mutable_provider_outputs=mutable_provider_outputs, exact_host_entries=exact_host_entries)}"
+            )
             continue
         snapshot[normalized] = f"{status_code}:{_path_digest(path)}"
     return snapshot
 
 
-def _snapshot_failure_blocker(exc: WorktreeSnapshotError) -> str:
+def _snapshot_failure_blocker(exc: Exception) -> str:
     return f"Unable to verify reviewer worktree isolation: {exc}"
 
 
@@ -868,12 +1133,14 @@ def _git_head_index_snapshot(root: Path) -> dict[str, str]:
                 check=False,
                 timeout=30,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise WorktreeSnapshotError(f"git {name} snapshot is unavailable") from exc
         if result.returncode == 0:
             snapshot[f"<git:{name}>"] = result.stdout.strip()
         else:
-            snapshot[f"<git:{name}>"] = f"error:{result.stderr.strip()}"
+            raise WorktreeSnapshotError(
+                f"git {name} snapshot failed: {result.stderr.strip()}"
+            )
     return snapshot
 
 
@@ -881,10 +1148,14 @@ def _is_mutable_provider_output(
     root: Path, mutable_provider_outputs: frozenset[Path], rel_path: str
 ) -> bool:
     try:
-        path = (root / rel_path).resolve()
+        path = root / rel_path
+        return (
+            path in mutable_provider_outputs
+            and path.is_file()
+            and not path.is_symlink()
+        )
     except OSError:
         return False
-    return path in mutable_provider_outputs
 
 
 def _path_digest(path: Path) -> str:
@@ -894,8 +1165,10 @@ def _path_digest(path: Path) -> str:
         digest = hashlib.sha256()
         try:
             children = sorted(path.rglob("*"))
-        except OSError:
-            return "unreadable-dir"
+        except OSError as exc:
+            raise WorktreeSnapshotError(
+                f"directory snapshot is unreadable: {path}"
+            ) from exc
         for child in children:
             try:
                 relative = child.relative_to(path).as_posix()
@@ -907,39 +1180,76 @@ def _path_digest(path: Path) -> str:
             digest.update(f"F:{relative}\0".encode())
             try:
                 digest.update(child.read_bytes())
-            except OSError:
-                digest.update(b"unreadable")
+            except OSError as exc:
+                raise WorktreeSnapshotError(
+                    f"file snapshot is unreadable: {child}"
+                ) from exc
             digest.update(b"\0")
         return digest.hexdigest()
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return "unreadable"
+    except OSError as exc:
+        raise WorktreeSnapshotError(f"file snapshot is unreadable: {path}") from exc
 
 
-def _ignored_dir_digest(path: Path, *, max_entries: int = 4096) -> str:
+def _ignored_dir_digest(
+    path: Path,
+    *,
+    max_entries: int = 4096,
+    mutable_provider_outputs: frozenset[Path] = frozenset(),
+    exact_host_entries: Mapping[Path, str] | None = None,
+    require_complete: bool = False,
+) -> str:
     if not path.exists():
         return "missing"
     digest = hashlib.sha256()
     entries_seen = 0
     pending = [path]
-    while pending and entries_seen < max_entries:
+    while pending and (require_complete or entries_seen < max_entries):
         current = pending.pop(0)
         try:
             entries = sorted(os.scandir(current), key=lambda entry: entry.name)
-        except OSError:
-            digest.update(f"unreadable:{current}\0".encode())
-            continue
+        except OSError as exc:
+            raise WorktreeSnapshotError(
+                f"ignored directory snapshot is unreadable: {current}"
+            ) from exc
         for entry in entries:
-            entries_seen += 1
             child = Path(entry.path)
+            if require_complete:
+                entries_seen += 1
+                if entries_seen > max_entries:
+                    raise WorktreeSnapshotError("complete workspace metadata scan exceeds entry limit")
+            # 精确允许的普通输出不占受保护条目的限额；不追随软链接排除其他路径。
+            if child in mutable_provider_outputs:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    pass
+            # 发布前的宿主条目仍计入扫描限额，目录继续遍历，未知子项不能被忽略。
+            if exact_host_entries and child in exact_host_entries:
+                if not require_complete:
+                    entries_seen += 1
+                    if entries_seen > max_entries:
+                        raise WorktreeSnapshotError("accepted workspace exceeds ignored-entry scan limit")
+                expected = exact_host_entries[child]
+                if entry.is_symlink() or (expected == "directory") != entry.is_dir(follow_symlinks=False):
+                    raise WorktreeSnapshotError("expected host entry changed type")
+                if expected == "directory":
+                    pending.append(child)
+                elif not entry.is_file(follow_symlinks=False):
+                    raise WorktreeSnapshotError("expected host output is not an ordinary file")
+                continue
+            if not require_complete:
+                entries_seen += 1
             try:
                 relative = child.relative_to(path).as_posix()
                 stat = entry.stat(follow_symlinks=False)
                 is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                digest.update(f"unreadable:{entry.name}\0".encode())
-                continue
+            except OSError as exc:
+                raise WorktreeSnapshotError(
+                    f"ignored entry snapshot is unreadable: {child}"
+                ) from exc
             if is_dir:
                 digest.update(f"D:{relative}\0".encode())
             else:
@@ -948,7 +1258,7 @@ def _ignored_dir_digest(path: Path, *, max_entries: int = 4096) -> str:
                 )
             if is_dir:
                 pending.append(child)
-            if entries_seen >= max_entries:
+            if entries_seen >= max_entries and not require_complete:
                 digest.update(b"truncated")
                 break
     if pending:
@@ -972,13 +1282,21 @@ def _write_invocation(
     output_path: Path,
     cwd: Path,
     isolation_status: ProviderIsolationStatus,
+    launch_status: ProviderLaunchStatus,
     exit_code: int | None,
     status: LoopStatus,
+    workspace_check: ProviderWorkspaceCheck | None = None,
+    completion_proof: ProviderCompletionProof | None = None,
+    preflight_incomplete: bool = False,
+    execution_failure: ProviderExecutionFailure | None = None,
 ) -> ProviderRunnerInvocation:
     source = review_pack.model_resolution_source
     if source is None:
         source = ModelResolutionSource.PROJECT_POLICY
+    recorded_at = utc_now_iso()
     invocation = ProviderRunnerInvocation(
+        started_at=recorded_at,
+        completed_at=recorded_at if preflight_incomplete else "",
         provider_id=provider_id,
         provider_mode=review_pack.provider_mode,
         model_selector=review_pack.model_selector,
@@ -992,8 +1310,13 @@ def _write_invocation(
         output_path=str(output_path),
         allowlist=list(review_pack.reviewer_allowlist),
         isolation_status=isolation_status,
+        launch_status=launch_status,
+        completion_proof=completion_proof,
+        preflight_incomplete=preflight_incomplete,
+        execution_failure=execution_failure,
         exit_code=exit_code,
         status=status,
+        workspace_check=workspace_check,
     )
     store.write_json_artifact(path, invocation)
     return invocation
@@ -1065,7 +1388,7 @@ def _validate_findings_output(
             blocker=scope_blocker,
             next_action="Regenerate findings.json for the current review pack.",
             invocation=invocation,
-            findings=findings,
+            # 原错误正文与摘要保留；被拒身份或范围不能成为已判断的修复依据。
         )
     verdict_blocker = _exit_code_verdict_blocker(exit_code, findings.verdict)
     if verdict_blocker:
@@ -1080,7 +1403,7 @@ def _validate_findings_output(
                 "Fix the reviewer command so its exit code matches findings.verdict."
             ),
             invocation=invocation,
-            findings=findings,
+            # 原输出仍保留在磁盘；协议不一致不能成为已判断的修复依据。
         )
     provider_status = _provider_status(exit_code, findings.verdict)
     return ProviderRunResult(
@@ -1151,14 +1474,14 @@ def _exit_code_verdict_blocker(
     exit_code: int | None,
     verdict: ReviewVerdict,
 ) -> str:
-    if exit_code is None:
-        return ""
     expected = {
         EXIT_SUCCESS: ReviewVerdict.CLEAN,
         EXIT_CHANGES_REQUIRED: ReviewVerdict.CHANGES_REQUIRED,
         EXIT_BLOCKED: ReviewVerdict.BLOCKED,
     }.get(exit_code)
-    if expected is None or verdict == expected:
+    if expected is None:
+        return f"Reviewer command exit code cannot authorize findings: {exit_code}."
+    if verdict == expected:
         return ""
     return (
         "Reviewer command exit code does not match findings.verdict: "

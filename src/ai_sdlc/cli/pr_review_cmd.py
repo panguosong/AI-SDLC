@@ -92,6 +92,12 @@ def pr_review_doctor(
         "--confirm-code-egress",
         help="Confirm policy-gated remote code egress.",
     ),
+    max_diff_bytes: int = typer.Option(
+        500_000,
+        "--max-diff-bytes",
+        min=1,
+        help="Maximum UTF-8 diff bytes for this invocation; defaults to 500000. Pass again on rerun.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
     """Check local PR review readiness without writing review artifacts."""
@@ -106,6 +112,7 @@ def pr_review_doctor(
     result = doctor_pr_review(
         root=root,
         base_ref=resolved_base,
+        max_diff_bytes=max_diff_bytes,
         head_ref=head_ref,
         diff_source=diff_source,
         patch_file=patch_file,
@@ -200,6 +207,12 @@ def pr_review_start(
         "--decision-capability",
         help="Explicit stage-simulation-v1 for quantified current-tree review.",
     ),
+    max_diff_bytes: int = typer.Option(
+        500_000,
+        "--max-diff-bytes",
+        min=1,
+        help="Maximum UTF-8 diff bytes for this invocation; defaults to 500000. Pass again on rerun.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
     """Start or preview a local adversarial PR review."""
@@ -215,6 +228,7 @@ def pr_review_start(
         PRReviewStartOptions(
             root=root,
             base_ref=resolved_base,
+            max_diff_bytes=max_diff_bytes,
             head_ref=head_ref,
             diff_source=diff_source,
             patch_file=patch_file,
@@ -374,6 +388,22 @@ def pr_review_rerun(
         "--mock-fixture",
         help="Mock reviewer fixture.",
     ),
+    max_diff_bytes: int = typer.Option(
+        500_000,
+        "--max-diff-bytes",
+        min=1,
+        help="Maximum UTF-8 diff bytes for this invocation; defaults to 500000. Pass again on rerun.",
+    ),
+    repair_scope_input: str = typer.Option(
+        "",
+        "--repair-scope-input",
+        help="Local JSON confirming exact REQUIRED fix dependencies.",
+    ),
+    repair_scope_sha256: str = typer.Option(
+        "",
+        "--repair-scope-sha256",
+        help="SHA256 of the exact repair scope request bytes.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON output."),
 ) -> None:
     """Regenerate review pack and rerun the local review provider."""
@@ -381,6 +411,9 @@ def pr_review_rerun(
     root = _project_root_or_exit(json_output=json_output)
     result = rerun_pr_review(
         root,
+        repair_scope_input=repair_scope_input,
+        repair_scope_sha256=repair_scope_sha256,
+        max_diff_bytes=max_diff_bytes,
         provider_command=parse_provider_command(provider_command),
         provider_timeout_seconds=provider_timeout_seconds,
         mock_fixture=mock_fixture,

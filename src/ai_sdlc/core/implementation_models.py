@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ai_sdlc.core.counterexample_models import ArtifactRef
 from ai_sdlc.core.loop_models import (
     DecisionCapability,
     LoopArtifactModel,
@@ -74,12 +75,24 @@ class ImplementationInput(LoopArtifactModel):
     decision_capability: DecisionCapability | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    verification_capability: Literal["counterexample-acceptance-v1"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    verification_contract_ref: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    verification_contract_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _decision_identity(self) -> ImplementationInput:
         validate_decision_identity(
             LoopType.IMPLEMENTATION, self.decision_mode, self.decision_capability
         )
+        from ai_sdlc.core.loop_stage_input import validate_verification_identity
+
+        validate_verification_identity(self)
         return self
 
     @field_validator("loop_id", "work_item_id", "work_item_path")
@@ -131,6 +144,9 @@ class ImplementationTaskProgress(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     verification_commands: list[str] = Field(default_factory=list)
     quality_results: list[QualityCommandResult] = Field(default_factory=list)
+    counterexample_results: list[ArtifactRef] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     note: str = ""
     updated_at: str = Field(default_factory=utc_now_iso)
 
@@ -311,6 +327,8 @@ class ImplementationVerifyOptions:
     argv: tuple[str, ...]
     loop_id: str = ""
     timeout_seconds: float = 300.0
+    counterexample_plan: str = ""
+    command_options_explicit: bool = False
 
 
 @dataclass(frozen=True, slots=True)

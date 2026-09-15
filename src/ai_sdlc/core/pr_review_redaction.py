@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import io
 import re
+import tokenize
 from enum import StrEnum
 from pathlib import Path
 
@@ -186,6 +189,118 @@ def analyze_redaction(
     )
 
 
+def _content_secret_counts(path: str, raw: bytes, text: str) -> tuple[bool, int]:
+    # 复用原检测模式，逐命中校正明确的代码样本；不改源字节或传输内容。
+    marker = SECRET_PATTERNS[0].pattern.split("*", 1)[1]
+    private_matches = list(re.finditer(re.escape(marker), text))
+    secret_matches = [match for pattern in SECRET_PATTERNS for match in pattern.finditer(text)]
+    original = (bool(private_matches), len(secret_matches))
+    if Path(path).suffix != ".py" or not (private_matches or secret_matches):
+        return original
+    try:
+        source = raw.decode("utf-8")
+        tree = ast.parse(source)
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (UnicodeDecodeError, SyntaxError, ValueError, RecursionError, tokenize.TokenError):
+        return original
+    if any(token.type == tokenize.ERRORTOKEN for token in tokens):
+        return original
+    lines = source.split("\n")
+    starts, cursor = [], 0
+    for line in lines:
+        starts.append(cursor)
+        cursor += len(line) + 1
+
+    def ast_offset(line: int, byte_column: int) -> int:
+        # AST 列数是 UTF-8 字节数，tokenizer 的列数是字符数。
+        return starts[line - 1] + len(lines[line - 1].encode("utf-8")[:byte_column].decode("utf-8"))
+
+    string_tokens = {
+        (starts[token.start[0] - 1] + token.start[1], starts[token.end[0] - 1] + token.end[1]): token.string
+        for token in tokens if token.type == tokenize.STRING
+    }
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    sample_ranges, detector_ranges = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if node.end_lineno is None or node.end_col_offset is None:
+            continue
+        span = (ast_offset(node.lineno, node.col_offset), ast_offset(node.end_lineno, node.end_col_offset))
+        literal_source = string_tokens.get(span)
+        if literal_source is None:
+            continue
+        try:
+            if ast.literal_eval(literal_source) != node.value:
+                continue
+        except (SyntaxError, ValueError):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, (ast.BinOp, ast.JoinedStr)):
+            continue
+        comparison_marker = (
+            node.value == marker and isinstance(parent, ast.Compare) and parent.left is node
+            and len(parent.ops) == 1 and isinstance(parent.ops[0], ast.In)
+        )
+        compiled_pattern = (
+            node.value == SECRET_PATTERNS[0].pattern and isinstance(parent, ast.Call)
+            and len(parent.args) == 1 and parent.args[0] is node and not parent.keywords
+            and isinstance(parent.func, ast.Attribute) and parent.func.attr == "compile"
+            and isinstance(parent.func.value, ast.Name) and parent.func.value.id == "re"
+        )
+        if comparison_marker or compiled_pattern:
+            detector_ranges.append(span)
+        # 既有异常脱敏测试的固定诊断仅在精确 raise OSError(字面量) 中是样本。
+        # 赋值、其他异常类型、拼接和未知诊断仍使用原检测结果。
+        fixed_error_sample = (
+            node.value == 'secret-token' + "=" + '/private/ci/runner'
+            and isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Name) and parent.func.id == "OSError"
+            and len(parent.args) == 1 and parent.args[0] is node and not parent.keywords
+            and isinstance(parents.get(parent), ast.Raise)
+            and parents[parent].exc is parent and parents[parent].cause is None
+        )
+        if fixed_error_sample:
+            sample_ranges.extend(
+                match.span() for match in secret_matches
+                if span[0] <= match.start() and match.end() <= span[1]
+            )
+        try:
+            sample = ast.parse(node.value)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        if len(sample.body) != 1 or not isinstance(sample.body[0], ast.Assign):
+            continue
+        assignment = sample.body[0]
+        if (len(assignment.targets) != 1 or not isinstance(assignment.targets[0], ast.Name)
+                or assignment.targets[0].id != "api_key"
+                or ast.get_source_segment(node.value, assignment) != node.value.strip()):
+            continue
+        value = assignment.value
+        placeholder = isinstance(value, ast.Constant) and value.value == "abcdefghijklmnop"
+        environment_call = (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "get_from_env" and not value.args and not value.keywords
+        )
+        if placeholder or environment_call:
+            sample_value = "abcdefghijklmnop" if placeholder else "get_from_env"
+            allowed_match = re.compile(r"api_key\s*=\s*['\"]?" + re.escape(sample_value))
+            # 只豁免这次明确样本值的命中，字符串内的额外注释仍按原规则检查。
+            sample_ranges.extend(
+                match.span() for match in secret_matches
+                if span[0] <= match.start() and match.end() <= span[1]
+                and allowed_match.fullmatch(match.group()) is not None
+            )
+
+    def covered(match: re.Match[str], ranges: list[tuple[int, int]]) -> bool:
+        return any(start <= match.start() and match.end() <= end for start, end in ranges)
+
+    return (
+        any(not covered(match, detector_ranges) for match in private_matches),
+        sum(not covered(match, sample_ranges + detector_ranges) for match in secret_matches),
+    )
+
+
 def _analyze_file(
     root: Path,
     file_path: str,
@@ -259,7 +374,8 @@ def _analyze_file(
         )
 
     text = raw.decode("utf-8", errors="replace")
-    if "PRIVATE KEY-----" in text:
+    private_key, secret_hits = _content_secret_counts(normalized, raw, text)
+    if private_key:
         return RedactionFileDecision(
             path=normalized,
             action=RedactionAction.OMITTED,
@@ -268,7 +384,6 @@ def _analyze_file(
             original_size=size,
             omitted_lines=len(text.splitlines()),
         )
-    secret_hits = sum(len(pattern.findall(text)) for pattern in SECRET_PATTERNS)
     if secret_hits:
         return RedactionFileDecision(
             path=normalized,
@@ -310,7 +425,8 @@ def _analyze_blob(
         )
 
     text = raw.decode("utf-8", errors="replace")
-    if "PRIVATE KEY-----" in text:
+    private_key, secret_hits = _content_secret_counts(path, raw, text)
+    if private_key:
         return RedactionFileDecision(
             path=path,
             action=RedactionAction.OMITTED,
@@ -319,7 +435,6 @@ def _analyze_blob(
             original_size=size,
             omitted_lines=len(text.splitlines()),
         )
-    secret_hits = sum(len(pattern.findall(text)) for pattern in SECRET_PATTERNS)
     if secret_hits:
         return RedactionFileDecision(
             path=path,

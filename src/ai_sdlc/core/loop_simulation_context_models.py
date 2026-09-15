@@ -42,6 +42,7 @@ class SimulationPrepareRequest(DecisionValue):
         "record-comparison",
         "seal-for-review",
         "begin-improvement",
+        "correct-input",
     ]
     request_id: Identifier
     contracts: tuple[StageScoreContract, ...] = Field(default=(), max_length=2)
@@ -62,6 +63,7 @@ class SimulationPrepareRequest(DecisionValue):
             "record-comparison": {"judgement", "failure", "continue_search", "reason"},
             "seal-for-review": set(),
             "begin-improvement": {"improvement"},
+            "correct-input": set(),
         }[self.operation]
         if supplied - allowed:
             raise ValueError("simulation-operation-fields-invalid")
@@ -106,6 +108,19 @@ class RequestReceipt(DecisionValue):
     request_digest: Digest
 
 
+class InputCorrectionReceipt(DecisionValue):
+    """引用纠错前的原上下文；第二批不覆盖第一次判断或重新起算。"""
+
+    source_context_digest: Digest
+    source_batch_digest: Digest
+    source_count: int = Field(strict=True, ge=1, le=256)
+    source_receipt_count: int = Field(strict=True, ge=1, le=12)
+    source_observed_at_ms: int = Field(strict=True, ge=0)
+    corrected_at_ms: int = Field(strict=True, ge=0)
+    request_id: Identifier
+    corrected_base_input_digest: Digest
+
+
 class SimulationContext(DecisionValue):
     schema_version: SimulationCapability = CAPABILITY
     capability: SimulationCapability = CAPABILITY
@@ -126,10 +141,13 @@ class SimulationContext(DecisionValue):
     context_digest: Digest
     improvement: ImprovementSearch | None = None
     conditional_improvement: ConditionalImprovement | None = None
+    input_correction: InputCorrectionReceipt | None = None
 
     @model_serializer(mode="wrap")
     def _preserve_d1_payload(self, handler):
         payload = handler(self)
+        if self.input_correction is None:
+            payload.pop("input_correction", None)
         if self.capability == CAPABILITY:
             payload.pop("last_observed_at_ms", None)
             payload.pop("improvement", None)

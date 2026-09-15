@@ -47,9 +47,11 @@ PRIMARY_REPAIR_TESTS = (
     "tests/architecture/test_removed_review_subsystems.py",
     "tests/unit/test_verify_constraints.py",
     "tests/unit/test_loop_resource_lock.py",
+    "tests/integration/test_cli_pr_review.py",
 )
 PRIMARY_SHARED_TESTS = frozenset((*PRIMARY_REPAIR_TESTS[:3],
     "tests/unit/test_loop_resource_lock.py",
+    "tests/integration/test_cli_pr_review.py",
 ))
 PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_SHARED_TESTS,
     "tests/unit/test_ci_static_assurance.py",
@@ -73,7 +75,7 @@ PRIMARY_REPAIR_SELECTION_PREVIOUS = '''  if [[ -f "ci-evidence/${CELL}/fresh-man
 PRIMARY_REPAIR_SELECTION = PRIMARY_REPAIR_SELECTION_PREVIOUS.replace(
     "tests/unit/test_verify_constraints.py)",
     "tests/unit/test_verify_constraints.py\n"
-    "               tests/unit/test_loop_resource_lock.py)",
+    "               tests/unit/test_loop_resource_lock.py tests/integration/test_cli_pr_review.py)",
 )
 
 
@@ -327,7 +329,7 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
             if step.get("name") == "Prepare unchanged primary evidence":
                 continue
             if step.get("name") == "Run selected pytest suite":
-                # 仅接受已冻结的十/十一文件选择块；重复或混合块不能被归一化吞掉。
+                # 仅接受已冻结的十/十二文件选择块；重复或混合块不能被归一化吞掉。
                 selections = (PRIMARY_REPAIR_SELECTION_PREVIOUS, PRIMARY_REPAIR_SELECTION)
                 if sum(step["run"].count(value) for value in selections) > 1:
                     raise AssuranceError("ambiguous primary repair selection")
@@ -381,9 +383,19 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
     (previous / "artifact.zip").write_bytes(raw)
     members = {"collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt"}
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-        if set(archive.namelist()) != members or len(archive.namelist()) != len(members):
+        names = archive.namelist()
+        if set(names) not in (members, members | {"reuse-plan.json"}) or len(names) != len(set(names)):
             raise AssuranceError("unexpected primary artifact members")
-        for name in members:
+        if "reuse-plan.json" in names:
+            # 完整主集也上传 fallback 页；只接受本次已验证的原始完整执行标记。
+            try:
+                plan = json.loads(archive.read("reuse-plan.json"), object_pairs_hook=list)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise AssuranceError("invalid original primary full plan") from exc
+            expected = [("reason", "inputs_changed"), ("status", "full_required")]
+            if plan != expected and plan != expected[::-1]:
+                raise AssuranceError("invalid original primary full plan")
+        for name in names:
             (previous / name).write_bytes(archive.read(name))
     manifest = _read_json(previous / "collection-manifest.json")
     if manifest.get("source_commit") != baseline or manifest.get("collection_command") != DEFAULT_COLLECTION_COMMAND:

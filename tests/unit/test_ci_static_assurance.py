@@ -303,6 +303,7 @@ _PRIMARY_REPAIR_NODES = (
     "tests/unit/test_release_identity.py::test_release_consumer",
     "tests/architecture/test_removed_review_subsystems.py::test_workflow_consumer",
     "tests/unit/test_verify_constraints.py::test_constraint_consumer",
+    "tests/integration/test_cli_pr_review.py::test_pr_review_provider_timeout_limits_start_subprocess",
     "tests/unit/test_loop_resource_lock.py::test_typed_lock_boundary",
 )
 _PRIMARY_PREVIOUS_SELECTION = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
@@ -313,10 +314,10 @@ _PRIMARY_PREVIOUS_SELECTION = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.
                tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py)
   fi
 '''
-_PRIMARY_LOCK_SELECTION = _PRIMARY_PREVIOUS_SELECTION.replace(
+_PRIMARY_CURRENT_SELECTION = _PRIMARY_PREVIOUS_SELECTION.replace(
     "tests/unit/test_verify_constraints.py)",
     "tests/unit/test_verify_constraints.py\n"
-    "               tests/unit/test_loop_resource_lock.py)",
+    "               tests/unit/test_loop_resource_lock.py tests/integration/test_cli_pr_review.py)",
 )
 _PRIMARY_UNCHANGED_NODES = (
     "tests/integration/test_business.py::test_original_case",
@@ -383,7 +384,7 @@ def test_primary_reuse_preserves_both_original_sources_and_exact_current_members
     assert result["status"] == "success" and result["source_commit"] == _COMMIT
     assert result["cell"] == _CELL
     assert result["collection_manifest_digest"] == current["manifest_digest"]
-    assert result["collected_count"] == result["executed_count"] == 13
+    assert result["collected_count"] == result["executed_count"] == 14
     assert result["duration_seconds"] == pytest.approx(5.0)
     for name, manifest in (("previous", previous), ("fresh", fresh)):
         assert result["provenance"][name]["source_commit"] == manifest["source_commit"]
@@ -448,7 +449,7 @@ def test_primary_cli_aggregates_both_sources_without_counting_previous_twice(tmp
         "--fast-gate-status", "success", "--output", str(report_path),
     ]) == 0
     report = json.loads(report_path.read_text())
-    assert report["case_count"] == report["execution_member_count"] == 13
+    assert report["case_count"] == report["execution_member_count"] == 14
     assert report["candidate_tree"] == "b" * 40
     assert report["reuse_provenance"][_CELL]["previous"]["source_commit"] == previous["source_commit"]
     assert report["report_digest"] == module._canonical_digest(report, "report_digest")
@@ -785,6 +786,110 @@ def test_prepare_primary_reuse_admits_real_git_test_fix_and_original_archive(tmp
     assert set(fresh["case_nodeids"].values()) == set(_PRIMARY_REPAIR_NODES)
 
 
+def _replace_primary_archive(endpoints, responses, entries):
+    import hashlib
+    import io
+    import warnings
+    import zipfile
+
+    buffer = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, raw in entries:
+                archive.writestr(name, raw)
+    raw = buffer.getvalue()
+    responses[endpoints["zip"]] = raw
+    responses[endpoints["artifacts"]]["artifacts"][0]["digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return raw
+
+
+@pytest.mark.parametrize("plan_bytes", [
+    b'{"reason":"inputs_changed","status":"full_required"}\n',
+    b'{"status": "full_required", "reason": "inputs_changed"}',
+])
+def test_prepare_primary_reuse_accepts_original_full_required_plan_without_relabeling(
+    tmp_path, monkeypatch, plan_bytes,
+):
+    module = _load_module()
+    failed_nodes = (_PRIMARY_REPAIR_NODES[4], *_PRIMARY_REPAIR_NODES[-2:])
+    root, baseline, _, _, endpoints, responses, _, members, _ = _primary_prepare_case(
+        module, tmp_path, monkeypatch, failed_nodes=failed_nodes,
+    )
+    entries = [*members.items(), ("reuse-plan.json", plan_bytes)]
+    raw = _replace_primary_archive(endpoints, responses, entries)
+    output = tmp_path / "prepared"
+
+    result = module.prepare_primary_reuse(root, "owner/repo", 42, baseline, output)
+
+    assert result["status"] == "reuse_eligible"
+    assert (output / "previous/artifact.zip").read_bytes() == raw
+    assert (output / "previous/reuse-plan.json").read_bytes() == plan_bytes
+    assert set(result["previous_file_digests"]) == set(module.PRIMARY_PREVIOUS_FILES)
+    assert not (output / "reuse-plan.json").exists()
+    previous = json.loads((output / "previous/previous-result.json").read_text())
+    fresh = json.loads((output / "fresh-manifest.json").read_text())
+    assert previous["status"] == "failed" and previous["source_commit"] == baseline
+    assert previous["failed_case_ids"] == sorted(module._stable_case_id(node) for node in failed_nodes)
+    assert all(fresh["case_nodeids"][module._stable_case_id(node)] == node for node in failed_nodes)
+
+
+@pytest.mark.parametrize("damage", [
+    "reuse-eligible", "composed", "unknown-status", "unknown-reason", "missing-key", "extra-key",
+    "duplicate-key", "malformed-json", "array-schema", "extra-member", "duplicate-member",
+    "missing-member", "archive-digest",
+])
+def test_prepare_primary_reuse_rejects_unproven_fifth_page_before_collection(
+    tmp_path, monkeypatch, damage,
+):
+    module = _load_module()
+    root, baseline, _, _, endpoints, responses, _, members, _ = _primary_prepare_case(
+        module, tmp_path, monkeypatch, failed_nodes=(_PRIMARY_REPAIR_NODES[0],),
+    )
+    page = b'{"reason":"inputs_changed","status":"full_required"}'
+    if damage == "reuse-eligible":
+        page = b'{"reason":"inputs_changed","status":"reuse_eligible"}'
+    elif damage == "composed":
+        page = b'{"reason":"inputs_changed","status":"success","provenance":{}}'
+    elif damage == "unknown-status":
+        page = b'{"reason":"inputs_changed","status":"unknown"}'
+    elif damage == "unknown-reason":
+        page = b'{"reason":"unknown","status":"full_required"}'
+    elif damage == "missing-key":
+        page = b'{"status":"full_required"}'
+    elif damage == "extra-key":
+        page = b'{"reason":"inputs_changed","status":"full_required","extra":false}'
+    elif damage == "duplicate-key":
+        page = b'{"reason":"inputs_changed","status":"full_required","status":"full_required"}'
+    elif damage == "malformed-json":
+        page = b'{'
+    elif damage == "array-schema":
+        page = b'[["reason","inputs_changed"],["status","full_required"]]'
+    entries = [*members.items(), ("reuse-plan.json", page)]
+    if damage == "extra-member":
+        entries.append(("composed-result.json", b'{}'))
+    elif damage == "duplicate-member":
+        entries.append(("reuse-plan.json", page))
+    elif damage == "missing-member":
+        entries = [item for item in entries if item[0] != "finished-at.txt"]
+    raw = _replace_primary_archive(endpoints, responses, entries)
+    if damage == "archive-digest":
+        responses[endpoints["zip"]] = raw + b"changed after API digest"
+    collected = []
+    monkeypatch.setattr(module, "_collect_nodeids", lambda *args: collected.append(args))
+    output = tmp_path / "prepared"
+
+    with pytest.raises(module.AssuranceError):
+        module.prepare_primary_reuse(root, "owner/repo", 42, baseline, output)
+
+    assert collected == []
+    assert not (output / "fresh-manifest.json").exists()
+    assert not (output / "previous/previous-result.json").exists()
+    assert not (output / "reuse-plan.json").exists()
+    if damage != "archive-digest":
+        assert (output / "previous/artifact.zip").read_bytes() == raw
+
+
 def test_prepare_primary_reuse_admits_locked_wrapper_fix_and_known_selection(
     tmp_path, monkeypatch,
 ):
@@ -797,7 +902,7 @@ def test_prepare_primary_reuse_admits_locked_wrapper_fix_and_known_selection(
     lock_path = "tests/unit/test_loop_resource_lock.py"
     commit(lock_path, "def test_typed_lock_boundary():\n    assert True\n")
     workflow["jobs"]["cross-platform-validation"]["steps"][-1]["run"] = (
-        _PRIMARY_LOCK_SELECTION + "uv run pytest -q"
+        _PRIMARY_CURRENT_SELECTION + "uv run pytest -q"
     )
     current = commit(".github/workflows/compatibility-gate.yml", json.dumps(workflow))
     output = tmp_path / "prepared"
@@ -812,6 +917,37 @@ def test_prepare_primary_reuse_admits_locked_wrapper_fix_and_known_selection(
     assert previous["failed_case_ids"] == [module._stable_case_id(lock_node)]
     assert fresh["source_commit"] == current
     assert set(fresh["case_nodeids"].values()) == set(_PRIMARY_REPAIR_NODES)
+
+
+def test_prepare_primary_reuse_keeps_three_original_failures_in_complete_fresh_files(
+    tmp_path, monkeypatch,
+):
+    module = _load_module()
+    failed_nodes = (_PRIMARY_REPAIR_NODES[4], *_PRIMARY_REPAIR_NODES[-2:])
+    root, baseline, commit, workflow, endpoints, _, calls, _, _ = _primary_prepare_case(
+        module, tmp_path, monkeypatch, failed_nodes=failed_nodes,
+        previous_selection=_PRIMARY_PREVIOUS_SELECTION,
+    )
+    for node in failed_nodes:
+        path, function = node.split("::", 1)
+        commit(path, f"def {function}():\n    assert True\n")
+    workflow["jobs"]["cross-platform-validation"]["steps"][-1]["run"] = (
+        _PRIMARY_CURRENT_SELECTION + "uv run pytest -q"
+    )
+    current = commit(".github/workflows/compatibility-gate.yml", json.dumps(workflow))
+    output = tmp_path / "prepared"
+
+    result = module.prepare_primary_reuse(root, "owner/repo", 42, baseline, output)
+
+    assert result["status"] == "reuse_eligible"
+    assert calls == list(endpoints.values())
+    previous = json.loads((output / "previous/previous-result.json").read_text())
+    fresh = json.loads((output / "fresh-manifest.json").read_text())
+    assert previous["status"] == "failed" and previous["source_commit"] == baseline
+    assert previous["failed_case_ids"] == sorted(module._stable_case_id(node) for node in failed_nodes)
+    assert fresh["source_commit"] == current
+    assert set(fresh["case_nodeids"].values()) == set(_PRIMARY_REPAIR_NODES)
+    assert set(node.split("::", 1)[0] for node in fresh["case_nodeids"].values()) == set(module.PRIMARY_REPAIR_TESTS)
 
 
 def test_primary_reuse_replaces_affected_lock_failure_without_rewriting_original(tmp_path):
@@ -836,8 +972,8 @@ def test_primary_reuse_replaces_affected_lock_failure_without_rewriting_original
 
 @pytest.mark.parametrize("change", [
     "src", "lock", "mode", "python", "dependencies", "env", "pytest-env", "environment-step",
-    "conftest", "shared-fixture", "test-prefixed-fixture", "lock-shared",
-    "selection-duplicate", "selection-mixed", "selection-extra-argument",
+    "conftest", "shared-fixture", "test-prefixed-fixture", "lock-shared", "pr-review-shared",
+    "selection-duplicate", "selection-mixed", "selection-extra-argument", "selection-intermediate-eleven",
 ])
 def test_prepare_primary_reuse_requires_full_before_artifact_fetch_for_changed_inputs(
     tmp_path, monkeypatch, change,
@@ -855,8 +991,9 @@ def test_prepare_primary_reuse_requires_full_before_artifact_fetch_for_changed_i
         commit(module.PRIMARY_REPAIR_TESTS[0], mode_change=True)
     elif change == "conftest":
         commit("tests/conftest.py", "SHARED_VALUE = 2\n")
-    elif change == "lock-shared":
-        path = "tests/unit/test_loop_resource_lock.py"
+    elif change in {"lock-shared", "pr-review-shared"}:
+        path = ("tests/unit/test_loop_resource_lock.py" if change == "lock-shared"
+                else "tests/integration/test_cli_pr_review.py")
         commit(path, (root / path).read_text() + "\nSHARED_LOCK_POLICY = 2\n")
         expected = "shared_test_inputs_changed"
     elif change in {"shared-fixture", "test-prefixed-fixture"}:
@@ -880,11 +1017,17 @@ def test_prepare_primary_reuse_requires_full_before_artifact_fetch_for_changed_i
                 "run": 'echo "PYTHONHASHSEED=1" >> "$GITHUB_ENV"',
             })
         elif change.startswith("selection-"):
-            selection = _PRIMARY_LOCK_SELECTION
+            selection = _PRIMARY_CURRENT_SELECTION
             if change == "selection-duplicate":
-                selection += _PRIMARY_LOCK_SELECTION
+                selection += _PRIMARY_CURRENT_SELECTION
             elif change == "selection-mixed":
                 selection += _PRIMARY_PREVIOUS_SELECTION
+            elif change == "selection-intermediate-eleven":
+                selection = _PRIMARY_PREVIOUS_SELECTION.replace(
+                    "tests/unit/test_verify_constraints.py)",
+                    "tests/unit/test_verify_constraints.py\n"
+                    "               tests/unit/test_loop_resource_lock.py)",
+                )
             else:
                 selection += "export PYTHONHASHSEED=1\n"
             job["steps"][-1]["run"] = selection + "uv run pytest -q"

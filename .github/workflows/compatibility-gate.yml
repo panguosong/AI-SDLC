@@ -178,7 +178,7 @@ jobs:
                          tests/unit/test_ci_static_assurance.py tests/unit/test_ci_candidate_execution.py
                          tests/integration/test_github_workflows.py tests/unit/test_release_identity.py
                          tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py
-                         tests/unit/test_loop_resource_lock.py)
+                         tests/unit/test_loop_resource_lock.py tests/integration/test_cli_pr_review.py)
             fi
           else
             while IFS= read -r node; do

@@ -447,17 +447,26 @@ def test_fix7_reader_still_running_cannot_publish_raw_original(repository, monke
     readers = []
 
     def chunks(pipe, stop):
+        observed = bytearray()
         for chunk in original_chunks(pipe, stop):
             yield chunk
-            if b"unsealed-output" in chunk:
+            # 管道分块不是消息边界；真实输出被拆开时也必须进入同一阻断点。
+            observed.extend(chunk)
+            if not held.is_set() and b"unsealed-output" in observed:
                 held.set()
                 release.wait(5)
 
     def thread(*args, **kwargs):
         reader = original_thread(*args, **kwargs)
         readers.append(reader)
+
+        def join(timeout=None):
+            # 先确认真实读线程已进入阻断，再让 join 返回；沿用调用方的等待窗口。
+            assert held.wait(timeout), "actual output reader did not reach the injected hold"
+            time.sleep(0.01)
+
         # 人为阻断本次 join 的等待效果；真实 is_alive 不能被成功返回值替代。
-        monkeypatch.setattr(reader, "join", lambda timeout=None: time.sleep(0.01))
+        monkeypatch.setattr(reader, "join", join)
         return reader
 
     output_streams = _adapt_owned_output(monkeypatch, options)

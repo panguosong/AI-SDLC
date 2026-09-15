@@ -954,7 +954,9 @@ def test_controlled_detached_helper_really_stops_writing(repository, mode):
             result,
             receipts,
         )
-        assert receipts["cleanup"]["status"] == "complete", receipts
+        assert receipts["cleanup"]["status"] == "complete", json.dumps(
+            receipts, ensure_ascii=False, indent=2
+        )
         helper_pid = int((folder / "helper-ready").read_text())
         assert helper_pid in {
             row[0] for row in receipts["cleanup"]["process_tracking"]["owned"]

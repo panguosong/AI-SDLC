@@ -553,6 +553,7 @@ def test_windows_job_setup_failure_closes_acquired_handle(repository, monkeypatc
     )
     monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: kernel, raising=False)
     monkeypatch.setattr(ctypes, "get_last_error", lambda: 183 if collision else 0, raising=False)
+    monkeypatch.setattr(ctypes, "set_last_error", Mock(), raising=False)
     kernel.CloseHandle.return_value = 1
     monkeypatch.setattr(quality, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     result = quality.run_controlled_process(options)
@@ -561,6 +562,72 @@ def test_windows_job_setup_failure_closes_acquired_handle(repository, monkeypatc
     assert receipts["cleanup"]["status"] == "complete"
     kernel.CloseHandle.assert_called_once_with(123)
     kernel.TerminateJobObject.assert_not_called()
+
+
+@pytest.mark.parametrize("previous_error", [0, 183])
+@pytest.mark.parametrize("creation", ["new", "collision", "unavailable"])
+def test_windows_job_creation_distinguishes_stale_error_from_current_result(
+    monkeypatch, previous_error, creation
+):
+    """模拟 Win32 成功时保留旧错误；真实冲突与创建失败仍必须拒绝。"""
+    last_error = [previous_error]
+
+    def create_job(_security, _name):
+        if creation == "collision":
+            last_error[0] = 183
+        elif creation == "unavailable":
+            last_error[0] = 5
+            return None
+        return 123
+
+    kernel = SimpleNamespace(
+        **{name: Mock(return_value=1) for name in (
+            "AssignProcessToJobObject", "TerminateJobObject", "QueryInformationJobObject",
+            "SetInformationJobObject", "CloseHandle",
+        )},
+        CreateJobObjectW=Mock(side_effect=create_job),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: kernel, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: last_error[0], raising=False)
+    monkeypatch.setattr(
+        ctypes, "set_last_error", lambda value: last_error.__setitem__(0, value), raising=False
+    )
+    job = quality._WindowsOwnedJob("current-job-result")
+    try:
+        if creation == "new":
+            job.open()
+            assert job.handle == 123
+            kernel.SetInformationJobObject.assert_called_once()
+        else:
+            with pytest.raises(OSError, match="owned-job-unavailable-or-colliding"):
+                job.open()
+            kernel.SetInformationJobObject.assert_not_called()
+    finally:
+        job.close()
+    if creation == "unavailable":
+        kernel.CloseHandle.assert_not_called()
+    else:
+        kernel.CloseHandle.assert_called_once_with(123)
+    kernel.TerminateJobObject.assert_not_called()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native named Job control")
+def test_windows_native_job_accepts_new_name_and_rejects_existing_name():
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    job = quality._WindowsOwnedJob(nonce)
+    duplicate = quality._WindowsOwnedJob(nonce)
+    try:
+        ctypes.set_last_error(183)
+        job.open()
+        with pytest.raises(OSError, match="owned-job-unavailable-or-colliding"):
+            duplicate.open()
+    finally:
+        try:
+            duplicate.close()
+        finally:
+            job.close()
 
 
 @pytest.mark.parametrize("closed", [True, False])
@@ -3040,6 +3107,7 @@ def test_fix7_job_setup_failure_and_failed_close_cannot_claim_cleanup(tmp_path, 
     )
     monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: kernel, raising=False)
     monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
+    monkeypatch.setattr(ctypes, "set_last_error", Mock(), raising=False)
     monkeypatch.setattr(quality, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     kernel.CloseHandle.return_value = closed
     original_open = quality._WindowsOwnedJob.open

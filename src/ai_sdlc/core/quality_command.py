@@ -1511,6 +1511,8 @@ class _WindowsOwnedJob:
         ctypes = self.ctypes
         from ctypes import wintypes
 
+        # 成功的新建调用可能保留线程旧错误；只判断本次调用产生的名称冲突。
+        ctypes.set_last_error(0)
         self.handle = self.kernel.CreateJobObjectW(None, self.name)
         if not self.handle or self.ctypes.get_last_error() == 183:
             # 名称冲突只释放本次取得的句柄，不能终止已有 Job。

@@ -1,21 +1,21 @@
-# AI-SDLC 3.1.0 中文用户指南
+# AI-SDLC 3.2.0 中文用户指南
 
-本指南面向第一次接触 AI-SDLC 的普通用户，对应 `v3.1.0` 发布版本。所有安装器、离线包、校验文件和安装后版本必须保持一致；仅在对应正式 Release 可用后使用这些下载链接，不用开发分支替代未就绪的制品。
+本指南面向第一次接触 AI-SDLC 的普通用户，对应 `v3.2.0` 发布版本。所有安装器、离线包、校验文件和安装后版本必须保持一致；仅在对应正式 Release 可用后使用这些下载链接，不用开发分支替代未就绪的制品。
 
-项目地址：<https://github.com/SinclairPan/Ai_AutoSDLC>
+项目地址：<https://github.com/panguosong/AI-SDLC>
 
 外部 stable shim 与 `python -m ai_sdlc` 是 Windows 支持即时更新和原命令重放的入口。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全替换：它只给出迁移提示、零安装并让当前业务命令继续一次；显式 direct self-update 不修改安装且返回非零。`-AddToPath` 或 `--add-to-path` 成功后，新终端中的裸 `ai-sdlc` 是日常入口；当前安装窗口使用路线内给出的 module 命令。
 
 初始化会让你选择实际用于聊天开发的 AI 代理入口和 Shell。可选代理包括 Claude Code、Codex、Cursor、VS Code、其他-通用；Shell 按当前系统选择 PowerShell、Bash、Zsh 或 Cmd。
 
-`v3.1.0` 正式 Release 应提供以下离线资产：
+`v3.2.0` 正式 Release 应提供以下离线资产：
 
-- <https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/ai-sdlc-offline-3.1.0-windows-amd64.zip>
-- <https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/ai-sdlc-offline-3.1.0-windows-amd64.zip.sha256>
-- <https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/ai-sdlc-offline-3.1.0-macos-arm64.tar.gz>
-- <https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/ai-sdlc-offline-3.1.0-macos-arm64.tar.gz.sha256>
-- <https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/ai-sdlc-offline-3.1.0-linux-amd64.tar.gz>
-- <https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/ai-sdlc-offline-3.1.0-linux-amd64.tar.gz.sha256>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip.sha256>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz.sha256>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz.sha256>
 
 每个归档旁都必须同时下载完全同名并追加 `.sha256` 的 sidecar。
 
@@ -66,9 +66,9 @@
 ```powershell
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Join-Path $HOME "projects\my-new-project"
-$InstallRoot = Join-Path $HOME "AI-SDLC\online-v3.1.0"
+$InstallRoot = Join-Path $HOME "AI-SDLC\online-v3.2.0"
 $VenvRoot = Join-Path $InstallRoot ".venv"
-$DownloadRoot = Join-Path $env:TEMP "ai-sdlc-v3.1.0-online"
+$DownloadRoot = Join-Path $env:TEMP "ai-sdlc-v3.2.0-online"
 New-Item -ItemType Directory -Force -Path $ProjectRoot, $InstallRoot, $DownloadRoot | Out-Null
 if ((Get-ChildItem -LiteralPath $ProjectRoot -Force).Count -ne 0) { throw "Project directory must be empty" }
 $GitCommand = Get-Command git -ErrorAction SilentlyContinue
@@ -81,7 +81,7 @@ git --version
 
 ```powershell
 $InstallerName = "install_online.ps1"
-$InstallerUrl = "https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.ps1"
 $InstallerPath = Join-Path $DownloadRoot $InstallerName
 Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
 ```
@@ -90,8 +90,8 @@ Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
 ### 3. 校验
 
 ```powershell
-$PinnedTag = "v3.1.0"
-if (-not (Select-String -LiteralPath $InstallerPath -SimpleMatch $PinnedTag -Quiet)) { throw "Installer is not pinned to v3.1.0" }
+$PinnedTag = "v3.2.0"
+if (-not (Select-String -LiteralPath $InstallerPath -SimpleMatch $PinnedTag -Quiet)) { throw "Installer is not pinned to v3.2.0" }
 Write-Host "After install verify with: python -m ai_sdlc --version"
 ```
 
@@ -123,12 +123,12 @@ Set-Location $ProjectRoot
 & $ModulePython -m ai_sdlc status
 ```
 
-必须看到 `3.1.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空项目不会出现示例业务代码。
+必须看到 `3.2.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空项目不会出现示例业务代码。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
 
-下载失败时停止并重试固定标签 URL，不要改用未发布分支。PowerShell 阻止脚本时继续使用上面的单次 Bypass 命令。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.1.0`）或新终端中的 stable `ai-sdlc`。裸命令不可用时运行 `& $ModulePython -m ai_sdlc status`；若出现 `No module named ai_sdlc`，重跑 `install_online.ps1 -AddToPath`。若显示 `open gates`，按 CLI 提示查看详情；代理或 Shell 选错时运行 `ai-sdlc adapter select`、`ai-sdlc adapter shell-select`。
+下载失败时停止并重试固定标签 URL，不要改用未发布分支。PowerShell 阻止脚本时继续使用上面的单次 Bypass 命令。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.2.0`）或新终端中的 stable `ai-sdlc`。裸命令不可用时运行 `& $ModulePython -m ai_sdlc status`；若出现 `No module named ai_sdlc`，重跑 `install_online.ps1 -AddToPath`。若显示 `open gates`，按 CLI 提示查看详情；代理或 Shell 选错时运行 `ai-sdlc adapter select`、`ai-sdlc adapter shell-select`。
 
 <a id="route-new-online-macos-arm64"></a>
 <!-- AI-SDLC-USER-GUIDE-ROUTE: new|online|macos-arm64 -->
@@ -142,7 +142,7 @@ Set-Location $ProjectRoot
 ```bash
 set -e
 PROJECT_ROOT="$HOME/projects/my-new-project"
-INSTALL_ROOT="$HOME/Applications/AI-SDLC/online-v3.1.0"
+INSTALL_ROOT="$HOME/Applications/AI-SDLC/online-v3.2.0"
 VENV_ROOT="$INSTALL_ROOT/.venv"
 DOWNLOAD_ROOT="$(mktemp -d)"
 mkdir -p "$PROJECT_ROOT" "$INSTALL_ROOT"
@@ -163,7 +163,7 @@ brew --version
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -172,8 +172,8 @@ curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ### 3. 校验
 
 ```bash
-PINNED_TAG="v3.1.0"
-grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.1.0"; exit 1; }
+PINNED_TAG="v3.2.0"
+grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.2.0"; exit 1; }
 echo 'After install verify with: python -m ai_sdlc --version'
 ```
 
@@ -205,7 +205,7 @@ cd "$PROJECT_ROOT"
 "$MODULE_PYTHON" -m ai_sdlc status
 ```
 
-必须看到 `3.1.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空目录不会出现示例业务文件。
+必须看到 `3.2.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空目录不会出现示例业务文件。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
@@ -219,12 +219,12 @@ cd "$PROJECT_ROOT"
 <!-- AI-SDLC-USER-GUIDE-STEP: prerequisites -->
 ### 1. 准备
 
-适用于 64 位 Linux（`linux-amd64`）和 bash。已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.1.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。需要联网访问 GitHub，当前用户应能写入 `$HOME/.local/share`；下载与在线 Git 安装源要求主机具备 CA 证书、curl 和 Git。
+适用于 64 位 Linux（`linux-amd64`）和 bash。已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.2.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。需要联网访问 GitHub，当前用户应能写入 `$HOME/.local/share`；下载与在线 Git 安装源要求主机具备 CA 证书、curl 和 Git。
 
 ```bash
 set -e
 PROJECT_ROOT="$HOME/projects/my-new-project"
-INSTALL_ROOT="$HOME/.local/share/AI-SDLC/online-v3.1.0"
+INSTALL_ROOT="$HOME/.local/share/AI-SDLC/online-v3.2.0"
 VENV_ROOT="$INSTALL_ROOT/.venv"
 DOWNLOAD_ROOT="$(mktemp -d)"
 mkdir -p "$PROJECT_ROOT" "$INSTALL_ROOT"
@@ -249,7 +249,7 @@ curl --version
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -258,8 +258,8 @@ curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ### 3. 校验
 
 ```bash
-PINNED_TAG="v3.1.0"
-grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.1.0"; exit 1; }
+PINNED_TAG="v3.2.0"
+grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.2.0"; exit 1; }
 echo 'After install verify with: python -m ai_sdlc --version'
 ```
 
@@ -291,12 +291,12 @@ cd "$PROJECT_ROOT"
 "$MODULE_PYTHON" -m ai_sdlc status
 ```
 
-必须看到 `3.1.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点，且空目录没有示例业务代码。
+必须看到 `3.2.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点，且空目录没有示例业务代码。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
 
-已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.1.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。
+已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.2.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。
 
 Git、curl 或 CA 证书不可用时执行：
 
@@ -328,7 +328,7 @@ git --version && curl --version
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Join-Path $HOME "projects\my-new-project"
 $InstallRoot = Join-Path $HOME "AI-SDLC"
-$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.1.0"
+$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
 New-Item -ItemType Directory -Force -Path $ProjectRoot, $InstallRoot, $DownloadRoot | Out-Null
 if ((Get-ChildItem -LiteralPath $ProjectRoot -Force).Count -ne 0) { throw "Project directory must be empty" }
 ```
@@ -340,10 +340,10 @@ if ((Get-ChildItem -LiteralPath $ProjectRoot -Force).Count -ne 0) { throw "Proje
 
 ```powershell
 $ErrorActionPreference = "Stop"
-$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.1.0"
+$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
 New-Item -ItemType Directory -Force -Path $DownloadRoot | Out-Null
-$PackageName = "ai-sdlc-offline-3.1.0-windows-amd64.zip"
-$PackageUrl = "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/$PackageName"
+$PackageName = "ai-sdlc-offline-3.2.0-windows-amd64.zip"
+$PackageUrl = "https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PackageName"
 Invoke-WebRequest -Uri $PackageUrl -OutFile (Join-Path $DownloadRoot $PackageName)
 Invoke-WebRequest -Uri "$PackageUrl.sha256" -OutFile (Join-Path $DownloadRoot "$PackageName.sha256")
 ```
@@ -355,8 +355,8 @@ Invoke-WebRequest -Uri "$PackageUrl.sha256" -OutFile (Join-Path $DownloadRoot "$
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Join-Path $HOME "projects\my-new-project"
 $InstallRoot = Join-Path $HOME "AI-SDLC"
-$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.1.0"
-$PackageName = "ai-sdlc-offline-3.1.0-windows-amd64.zip"
+$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
+$PackageName = "ai-sdlc-offline-3.2.0-windows-amd64.zip"
 New-Item -ItemType Directory -Force -Path $ProjectRoot, $InstallRoot, $DownloadRoot | Out-Null
 if ((Get-ChildItem -LiteralPath $ProjectRoot -Force).Count -ne 0) { throw "Project directory must be empty" }
 $PackagePath = Join-Path $DownloadRoot $PackageName
@@ -370,7 +370,7 @@ if ($Parts.Count -ne 2 -or $Parts[1] -ne $PackageName -or $Parts[0].ToLowerInvar
 
 ```powershell
 Expand-Archive -LiteralPath $PackagePath -DestinationPath $InstallRoot -Force
-$BundleRoot = Join-Path $InstallRoot "ai-sdlc-offline-3.1.0-windows-amd64"
+$BundleRoot = Join-Path $InstallRoot "ai-sdlc-offline-3.2.0-windows-amd64"
 Push-Location $BundleRoot
 try { powershell -NoProfile -ExecutionPolicy Bypass -File ".\install_offline.ps1" -AddToPath } finally { Pop-Location }
 $ModulePython = Join-Path $BundleRoot ".venv\Scripts\python.exe"
@@ -395,12 +395,12 @@ Set-Location $ProjectRoot
 & $ModulePython -m ai_sdlc status
 ```
 
-应看到 `Offline installation completed`、`3.1.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空项目没有示例业务代码。
+应看到 `Offline installation completed`、`3.2.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空项目没有示例业务代码。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
 
-出现 `SHA256 verification failed` 时停止，删除包和 sidecar 后重新获取。权限错误使用单次 Bypass。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.1.0`）或新终端中的 stable `ai-sdlc`。裸命令不可用时运行 `& $ModulePython -m ai_sdlc status`；`No module named ai_sdlc` 时重跑 `install_offline.ps1 -AddToPath`。`open gates`、代理和 Shell 问题分别按 CLI 指示、`ai-sdlc adapter select`、`ai-sdlc adapter shell-select` 处理。
+出现 `SHA256 verification failed` 时停止，删除包和 sidecar 后重新获取。权限错误使用单次 Bypass。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.2.0`）或新终端中的 stable `ai-sdlc`。裸命令不可用时运行 `& $ModulePython -m ai_sdlc status`；`No module named ai_sdlc` 时重跑 `install_offline.ps1 -AddToPath`。`open gates`、代理和 Shell 问题分别按 CLI 指示、`ai-sdlc adapter select`、`ai-sdlc adapter shell-select` 处理。
 
 <a id="route-new-offline-macos-arm64"></a>
 <!-- AI-SDLC-USER-GUIDE-ROUTE: new|offline|macos-arm64 -->
@@ -414,8 +414,8 @@ Set-Location $ProjectRoot
 ```bash
 set -e
 PROJECT_ROOT="$HOME/projects/my-new-project"
-INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$PROJECT_ROOT" "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; exit 1; }
 ```
@@ -427,10 +427,10 @@ test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; 
 
 ```bash
 set -e
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$DOWNLOAD_ROOT"
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-macos-arm64.tar.gz"
-PACKAGE_URL="https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/$PACKAGE_NAME"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-macos-arm64.tar.gz"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -441,9 +441,9 @@ curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" 
 ```bash
 set -e
 PROJECT_ROOT="$HOME/projects/my-new-project"
-INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-macos-arm64.tar.gz"
+INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-macos-arm64.tar.gz"
 mkdir -p "$PROJECT_ROOT" "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; exit 1; }
 (cd "$DOWNLOAD_ROOT" && shasum -a 256 -c "$PACKAGE_NAME.sha256")
@@ -456,7 +456,7 @@ test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; 
 
 ```bash
 tar xzf "$DOWNLOAD_ROOT/$PACKAGE_NAME" -C "$INSTALL_ROOT"
-BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.1.0-macos-arm64"
+BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.2.0-macos-arm64"
 (cd "$BUNDLE_ROOT" && ./install_offline.sh --add-to-path)
 MODULE_PYTHON="$BUNDLE_ROOT/.venv/bin/python"
 ```
@@ -480,7 +480,7 @@ cd "$PROJECT_ROOT"
 "$MODULE_PYTHON" -m ai_sdlc status
 ```
 
-应看到 `Offline installation completed`、`3.1.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点，项目目录仍只包含初始化工件。
+应看到 `Offline installation completed`、`3.2.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点，项目目录仍只包含初始化工件。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
@@ -530,16 +530,16 @@ detect_linux_libc() {
 ARCH="$(uname -m)"
 LIBC="$(detect_linux_libc)"
 if { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; } || [ "$LIBC" = "musl" ]; then
-  echo "停止：v3.1.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 if [ "$LIBC" != "glibc" ]; then
-  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 PROJECT_ROOT="$HOME/projects/my-new-project"
-INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$PROJECT_ROOT" "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; exit 1; }
 ```
@@ -551,7 +551,7 @@ test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; 
 
 ```bash
 set -e
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$DOWNLOAD_ROOT"
 run_as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; elif command -v sudo >/dev/null 2>&1; then sudo "$@"; else echo "Root or sudo is required to install download prerequisites." >&2; return 1; fi; }
 ca_bundle_available() { test -s "${CURL_CA_BUNDLE:-}" || test -s "${SSL_CERT_FILE:-}" || test -s /etc/ssl/certs/ca-certificates.crt || test -s /etc/pki/tls/certs/ca-bundle.crt || test -s /etc/ssl/ca-bundle.pem; }
@@ -563,8 +563,8 @@ if ! command -v curl >/dev/null 2>&1 || ! ca_bundle_available; then
 fi
 command -v curl >/dev/null 2>&1 || { echo "Prerequisite installation did not produce curl." >&2; exit 1; }
 ca_bundle_available || { echo "Prerequisite installation did not produce a readable CA bundle." >&2; exit 1; }
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
-PACKAGE_URL="https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/$PACKAGE_NAME"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -575,9 +575,9 @@ curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" 
 ```bash
 set -e
 PROJECT_ROOT="$HOME/projects/my-new-project"
-INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
+INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
 mkdir -p "$PROJECT_ROOT" "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; exit 1; }
 (cd "$DOWNLOAD_ROOT" && sha256sum -c "$PACKAGE_NAME.sha256")
@@ -590,7 +590,7 @@ test -z "$(ls -A "$PROJECT_ROOT")" || { echo "Project directory must be empty"; 
 
 ```bash
 tar xzf "$DOWNLOAD_ROOT/$PACKAGE_NAME" -C "$INSTALL_ROOT"
-BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.1.0-linux-amd64"
+BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.2.0-linux-amd64"
 (cd "$BUNDLE_ROOT" && ./install_offline.sh --add-to-path)
 MODULE_PYTHON="$BUNDLE_ROOT/.venv/bin/python"
 ```
@@ -614,7 +614,7 @@ cd "$PROJECT_ROOT"
 "$MODULE_PYTHON" -m ai_sdlc status
 ```
 
-应看到 `Offline installation completed`、`3.1.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空目录未写入示例业务文件。
+应看到 `Offline installation completed`、`3.2.0`、`Initialized AI-SDLC project`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；空目录未写入示例业务文件。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
@@ -652,11 +652,11 @@ detect_linux_libc() {
 ARCH="$(uname -m)"
 LIBC="$(detect_linux_libc)"
 if { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; } || [ "$LIBC" = "musl" ]; then
-  echo "停止：v3.1.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 if [ "$LIBC" != "glibc" ]; then
-  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 ```
@@ -691,9 +691,9 @@ command -v curl >/dev/null 2>&1 && ca_bundle_available
 ```powershell
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Get-Location).Path
-$InstallRoot = Join-Path $HOME "AI-SDLC\online-v3.1.0"
+$InstallRoot = Join-Path $HOME "AI-SDLC\online-v3.2.0"
 $VenvRoot = Join-Path $InstallRoot ".venv"
-$DownloadRoot = Join-Path $env:TEMP "ai-sdlc-v3.1.0-online"
+$DownloadRoot = Join-Path $env:TEMP "ai-sdlc-v3.2.0-online"
 New-Item -ItemType Directory -Force -Path $InstallRoot, $DownloadRoot | Out-Null
 $GitCommand = Get-Command git -ErrorAction SilentlyContinue
 if (-not $GitCommand) { throw "Git is required. Run: winget install --id Git.Git -e, then reopen PowerShell." }
@@ -707,7 +707,7 @@ if ($LASTEXITCODE -eq 0) { git status --short --untracked-files=all }
 
 ```powershell
 $InstallerName = "install_online.ps1"
-$InstallerUrl = "https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.ps1"
 $InstallerPath = Join-Path $DownloadRoot $InstallerName
 Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
 ```
@@ -716,8 +716,8 @@ Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
 ### 3. 校验
 
 ```powershell
-$PinnedTag = "v3.1.0"
-if (-not (Select-String -LiteralPath $InstallerPath -SimpleMatch $PinnedTag -Quiet)) { throw "Installer is not pinned to v3.1.0" }
+$PinnedTag = "v3.2.0"
+if (-not (Select-String -LiteralPath $InstallerPath -SimpleMatch $PinnedTag -Quiet)) { throw "Installer is not pinned to v3.2.0" }
 Write-Host "After install verify with: python -m ai_sdlc --version"
 ```
 
@@ -752,12 +752,12 @@ git rev-parse --is-inside-work-tree *> $null
 if ($LASTEXITCODE -eq 0) { git status --short --untracked-files=all }
 ```
 
-应看到 `3.1.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；Git 差异只应包含用户确认的 AI-SDLC 工件。
+应看到 `3.2.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点；Git 差异只应包含用户确认的 AI-SDLC 工件。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
 
-下载或安装错误时停止，不改用开发分支。PowerShell 受限时使用单次 Bypass。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.1.0`）或新终端中的 stable `ai-sdlc`。裸命令不可用时运行 `& $ModulePython -m ai_sdlc status`；`No module named ai_sdlc` 时重跑 `install_online.ps1 -AddToPath`。若 `git status --short --untracked-files=all` 出现未预期业务文件，停止并人工检查。`open gates`、代理和 Shell 问题分别按 CLI 指示、`ai-sdlc adapter select`、`ai-sdlc adapter shell-select` 处理。
+下载或安装错误时停止，不改用开发分支。PowerShell 受限时使用单次 Bypass。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.2.0`）或新终端中的 stable `ai-sdlc`。裸命令不可用时运行 `& $ModulePython -m ai_sdlc status`；`No module named ai_sdlc` 时重跑 `install_online.ps1 -AddToPath`。若 `git status --short --untracked-files=all` 出现未预期业务文件，停止并人工检查。`open gates`、代理和 Shell 问题分别按 CLI 指示、`ai-sdlc adapter select`、`ai-sdlc adapter shell-select` 处理。
 
 <a id="route-existing-online-macos-arm64"></a>
 <!-- AI-SDLC-USER-GUIDE-ROUTE: existing|online|macos-arm64 -->
@@ -771,7 +771,7 @@ if ($LASTEXITCODE -eq 0) { git status --short --untracked-files=all }
 ```bash
 set -e
 PROJECT_ROOT="$PWD"
-INSTALL_ROOT="$HOME/Applications/AI-SDLC/online-v3.1.0"
+INSTALL_ROOT="$HOME/Applications/AI-SDLC/online-v3.2.0"
 VENV_ROOT="$INSTALL_ROOT/.venv"
 DOWNLOAD_ROOT="$(mktemp -d)"
 mkdir -p "$INSTALL_ROOT"
@@ -792,7 +792,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -801,8 +801,8 @@ curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ### 3. 校验
 
 ```bash
-PINNED_TAG="v3.1.0"
-grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.1.0"; exit 1; }
+PINNED_TAG="v3.2.0"
+grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.2.0"; exit 1; }
 echo 'After install verify with: python -m ai_sdlc --version'
 ```
 
@@ -836,7 +836,7 @@ cd "$PROJECT_ROOT"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git status --short --untracked-files=all; fi
 ```
 
-输出应包含 `3.1.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
+输出应包含 `3.2.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
@@ -850,12 +850,12 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 <!-- AI-SDLC-USER-GUIDE-STEP: prerequisites -->
 ### 1. 准备
 
-适用于 `linux-amd64`。已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.1.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。在已有项目根目录使用 bash 并保存当前工作，确认当前用户可写安装目录。
+适用于 `linux-amd64`。已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.2.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。在已有项目根目录使用 bash 并保存当前工作，确认当前用户可写安装目录。
 
 ```bash
 set -e
 PROJECT_ROOT="$PWD"
-INSTALL_ROOT="$HOME/.local/share/AI-SDLC/online-v3.1.0"
+INSTALL_ROOT="$HOME/.local/share/AI-SDLC/online-v3.2.0"
 VENV_ROOT="$INSTALL_ROOT/.venv"
 DOWNLOAD_ROOT="$(mktemp -d)"
 mkdir -p "$INSTALL_ROOT"
@@ -880,7 +880,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -889,8 +889,8 @@ curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ### 3. 校验
 
 ```bash
-PINNED_TAG="v3.1.0"
-grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.1.0"; exit 1; }
+PINNED_TAG="v3.2.0"
+grep -F "$PINNED_TAG" "$INSTALLER_PATH" >/dev/null || { echo "Installer is not pinned to v3.2.0"; exit 1; }
 echo 'After install verify with: python -m ai_sdlc --version'
 ```
 
@@ -924,12 +924,12 @@ cd "$PROJECT_ROOT"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git status --short --untracked-files=all; fi
 ```
 
-应看到 `3.1.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
+应看到 `3.2.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
 
-已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.1.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。
+已存在 Python 3.11+ 时，保持发行版无关的在线兼容路径；缺少 Python 3.11+ 时，自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) 的 amd64/x86_64 + glibc 主机。其他无 Python 的 amd64/x86_64 + glibc 主机应使用路线 6/12 的 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机，v3.2.0 没有兼容的 Linux 发行资产；不得使用路线 6/12 的 AMD64 离线包。
 
 Git、curl 或 CA 证书不可用时执行：
 
@@ -961,7 +961,7 @@ git --version && curl --version
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Get-Location).Path
 $InstallRoot = Join-Path $HOME "AI-SDLC"
-$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.1.0"
+$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
 New-Item -ItemType Directory -Force -Path $InstallRoot, $DownloadRoot | Out-Null
 $GitCommand = Get-Command git -ErrorAction SilentlyContinue
 if ($GitCommand) {
@@ -977,10 +977,10 @@ if ($GitCommand) {
 
 ```powershell
 $ErrorActionPreference = "Stop"
-$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.1.0"
+$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
 New-Item -ItemType Directory -Force -Path $DownloadRoot | Out-Null
-$PackageName = "ai-sdlc-offline-3.1.0-windows-amd64.zip"
-$PackageUrl = "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/$PackageName"
+$PackageName = "ai-sdlc-offline-3.2.0-windows-amd64.zip"
+$PackageUrl = "https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PackageName"
 Invoke-WebRequest -Uri $PackageUrl -OutFile (Join-Path $DownloadRoot $PackageName)
 Invoke-WebRequest -Uri "$PackageUrl.sha256" -OutFile (Join-Path $DownloadRoot "$PackageName.sha256")
 ```
@@ -992,8 +992,8 @@ Invoke-WebRequest -Uri "$PackageUrl.sha256" -OutFile (Join-Path $DownloadRoot "$
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Get-Location).Path
 $InstallRoot = Join-Path $HOME "AI-SDLC"
-$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.1.0"
-$PackageName = "ai-sdlc-offline-3.1.0-windows-amd64.zip"
+$DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
+$PackageName = "ai-sdlc-offline-3.2.0-windows-amd64.zip"
 New-Item -ItemType Directory -Force -Path $InstallRoot, $DownloadRoot | Out-Null
 $GitCommand = Get-Command git -ErrorAction SilentlyContinue
 $PackagePath = Join-Path $DownloadRoot $PackageName
@@ -1007,7 +1007,7 @@ if ($Parts.Count -ne 2 -or $Parts[1] -ne $PackageName -or $Parts[0].ToLowerInvar
 
 ```powershell
 Expand-Archive -LiteralPath $PackagePath -DestinationPath $InstallRoot -Force
-$BundleRoot = Join-Path $InstallRoot "ai-sdlc-offline-3.1.0-windows-amd64"
+$BundleRoot = Join-Path $InstallRoot "ai-sdlc-offline-3.2.0-windows-amd64"
 Push-Location $BundleRoot
 try { powershell -NoProfile -ExecutionPolicy Bypass -File ".\install_offline.ps1" -AddToPath } finally { Pop-Location }
 $ModulePython = Join-Path $BundleRoot ".venv\Scripts\python.exe"
@@ -1037,12 +1037,12 @@ if ($GitCommand) {
 }
 ```
 
-必须看到 `Offline installation completed`、`3.1.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
+必须看到 `Offline installation completed`、`3.2.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
 
-`SHA256 verification failed` 时停止并重新获取包与 sidecar。权限错误使用单次 Bypass；Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.1.0`）或新终端中的 stable `ai-sdlc`。命令不可用时使用 `& $ModulePython -m ai_sdlc status`，`No module named ai_sdlc` 时重跑 `install_offline.ps1 -AddToPath`。若 Git 显示非预期业务变化，停止检查。`open gates`、代理和 Shell 问题分别按 CLI 指引、`ai-sdlc adapter select`、`ai-sdlc adapter shell-select` 处理。
+`SHA256 verification failed` 时停止并重新获取包与 sidecar。权限错误使用单次 Bypass；Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全原地替换；显式 direct self-update 零安装并返回非零，请改用 `python -m ai_sdlc`（本路线即 `& $ModulePython -m ai_sdlc self-update install --version 3.2.0`）或新终端中的 stable `ai-sdlc`。命令不可用时使用 `& $ModulePython -m ai_sdlc status`，`No module named ai_sdlc` 时重跑 `install_offline.ps1 -AddToPath`。若 Git 显示非预期业务变化，停止检查。`open gates`、代理和 Shell 问题分别按 CLI 指引、`ai-sdlc adapter select`、`ai-sdlc adapter shell-select` 处理。
 
 <a id="route-existing-offline-macos-arm64"></a>
 <!-- AI-SDLC-USER-GUIDE-ROUTE: existing|offline|macos-arm64 -->
@@ -1056,8 +1056,8 @@ if ($GitCommand) {
 ```bash
 set -e
 PROJECT_ROOT="$PWD"
-INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git status --short --untracked-files=all; fi
 ```
@@ -1069,10 +1069,10 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
 ```bash
 set -e
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$DOWNLOAD_ROOT"
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-macos-arm64.tar.gz"
-PACKAGE_URL="https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/$PACKAGE_NAME"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-macos-arm64.tar.gz"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -1083,9 +1083,9 @@ curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" 
 ```bash
 set -e
 PROJECT_ROOT="$PWD"
-INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-macos-arm64.tar.gz"
+INSTALL_ROOT="$HOME/Applications/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-macos-arm64.tar.gz"
 mkdir -p "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 (cd "$DOWNLOAD_ROOT" && shasum -a 256 -c "$PACKAGE_NAME.sha256")
 ```
@@ -1097,7 +1097,7 @@ mkdir -p "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 
 ```bash
 tar xzf "$DOWNLOAD_ROOT/$PACKAGE_NAME" -C "$INSTALL_ROOT"
-BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.1.0-macos-arm64"
+BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.2.0-macos-arm64"
 (cd "$BUNDLE_ROOT" && ./install_offline.sh --add-to-path)
 MODULE_PYTHON="$BUNDLE_ROOT/.venv/bin/python"
 ```
@@ -1123,7 +1123,7 @@ cd "$PROJECT_ROOT"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git status --short --untracked-files=all; fi
 ```
 
-应看到 `Offline installation completed`、`3.1.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
+应看到 `Offline installation completed`、`3.2.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
@@ -1173,16 +1173,16 @@ detect_linux_libc() {
 ARCH="$(uname -m)"
 LIBC="$(detect_linux_libc)"
 if { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; } || [ "$LIBC" = "musl" ]; then
-  echo "停止：v3.1.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 if [ "$LIBC" != "glibc" ]; then
-  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 PROJECT_ROOT="$PWD"
-INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git status --short --untracked-files=all; fi
 ```
@@ -1194,7 +1194,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
 ```bash
 set -e
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$DOWNLOAD_ROOT"
 run_as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; elif command -v sudo >/dev/null 2>&1; then sudo "$@"; else echo "Root or sudo is required to install download prerequisites." >&2; return 1; fi; }
 ca_bundle_available() { test -s "${CURL_CA_BUNDLE:-}" || test -s "${SSL_CERT_FILE:-}" || test -s /etc/ssl/certs/ca-certificates.crt || test -s /etc/pki/tls/certs/ca-bundle.crt || test -s /etc/ssl/ca-bundle.pem; }
@@ -1206,8 +1206,8 @@ if ! command -v curl >/dev/null 2>&1 || ! ca_bundle_available; then
 fi
 command -v curl >/dev/null 2>&1 || { echo "Prerequisite installation did not produce curl." >&2; exit 1; }
 ca_bundle_available || { echo "Prerequisite installation did not produce a readable CA bundle." >&2; exit 1; }
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
-PACKAGE_URL="https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/v3.1.0/$PACKAGE_NAME"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -1218,9 +1218,9 @@ curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" 
 ```bash
 set -e
 PROJECT_ROOT="$PWD"
-INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.1.0"
-DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.1.0"
-PACKAGE_NAME="ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
+INSTALL_ROOT="$HOME/.local/share/AI-SDLC/offline-v3.2.0"
+DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
+PACKAGE_NAME="ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
 mkdir -p "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 (cd "$DOWNLOAD_ROOT" && sha256sum -c "$PACKAGE_NAME.sha256")
 ```
@@ -1232,7 +1232,7 @@ mkdir -p "$INSTALL_ROOT" "$DOWNLOAD_ROOT"
 
 ```bash
 tar xzf "$DOWNLOAD_ROOT/$PACKAGE_NAME" -C "$INSTALL_ROOT"
-BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.1.0-linux-amd64"
+BUNDLE_ROOT="$INSTALL_ROOT/ai-sdlc-offline-3.2.0-linux-amd64"
 (cd "$BUNDLE_ROOT" && ./install_offline.sh --add-to-path)
 MODULE_PYTHON="$BUNDLE_ROOT/.venv/bin/python"
 ```
@@ -1258,7 +1258,7 @@ cd "$PROJECT_ROOT"
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git status --short --untracked-files=all; fi
 ```
 
-应看到 `Offline installation completed`、`3.1.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
+应看到 `Offline installation completed`、`3.2.0`、`Initialized AI-SDLC project`、`接入已有项目：已生成桥接结果`、`原任务文件不会被修改`、`当前结果 / Result`、`下一步 / Next` 和推荐继续点。
 
 <!-- AI-SDLC-USER-GUIDE-STEP: recover -->
 ### 7. 就地恢复
@@ -1296,11 +1296,11 @@ detect_linux_libc() {
 ARCH="$(uname -m)"
 LIBC="$(detect_linux_libc)"
 if { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; } || [ "$LIBC" = "musl" ]; then
-  echo "停止：v3.1.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产；不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 if [ "$LIBC" != "glibc" ]; then
-  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz。" >&2
+  echo "停止：无法确定此主机使用的 libc；为避免误装，未下载、解压或安装 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2
   exit 1
 fi
 ```
@@ -1343,7 +1343,7 @@ ai-sdlc run
 
 只有在 PATH 尚未刷新或 CLI 明确要求排障时，才使用路线保存的 module Python。不要移动或删除安装目录，也不要用开发分支、源码 worktree 或手工依赖安装替代正式路线。
 
-## 用 v3.1.0 推进量化 Loop
+## 用 v3.2.0 推进量化 Loop
 
 安装并完成 `init`（已有项目还需完成 `adopt`）后，在项目目录执行 `ai-sdlc run`，把需求交给你选择的 AI 代理。`run` 只读取当前状态，返回 `Result`、`Next` 和 `Applicable Rules`，不会自行创建 Loop、写代码或提交。宿主 Agent 按 `Next` 新建量化 Loop，并消费返回的规则；没有新建动作时就沿当前实例继续，不重复初始化。
 
@@ -1374,3 +1374,21 @@ ai-sdlc run
 时间计划包含实施、评审、验证、已知返工及直接下游交接。候选须满足“首次开始以来的历时 + 完整未来时间上界不超过原窗口”；重启、换候选、纠正格式或第二批比较都不刷新时间。实际成果就绪且 R1 尚未开始时，宿主可用剩余的一批比较有依据的改善；预测有意义的改善胜出后，也必须等实际 R1 达标、原基线与时间准入仍有效才能执行。实际评审沿用 R1/R2：必要修复或条件改善至多一次，R2 仍有缺口就停止，不能增开 R3 或借换 Loop 重置次数。
 
 这不是无人值守保证、估时准确性或 ROI 证明，也不是对所有可能方案求全局最优。框架约束自己的状态、准入与下一步，不会中断协议外的 IDE 操作；不会自动开发多套真实实现、保留历史最高分代码或回滚。旧实例不自动迁移为新能力，已有 B1/D1 与正常 legacy 实例按原合同继续；被标记为已退出支持的旧续办实例只保留历史，不恢复执行。无论时间是否用完，当前真实成果未达必需门槛都不能 Close。
+
+## 用 v3.2.0 验证关键业务规则
+
+在需求中说明必须保持的业务规则和合法行为，例如：“只有 `ready_for_canary` 可以变为 `canary_approved`；`blocked`、`stopped` 和已经批准的状态保持原样；输入文件不能被修改。”代理先固定可检查的规则和验收方法，在原生量化入口比较可行方案，只实现实际选中的方案。
+
+对于需要反例验收的任务，代理使用当前 `stage-simulation-v1` 设计与实现流程，准备绑定本次任务、源码、资源、检查器和预算的反例合同及执行计划。计划分别运行当前实现、隔离错误变体和合法对照，保存实际命令、观察结果与资源清理回执。必要规则被违反时，任务不能以这份失败证据关闭。
+
+实际修改业务实现后，应保留原失败，绑定新源码并使用同一检查器复验。合法行为也要继续通过；隔离副本中的同类回归仍应被保留的防护拒绝。隔离变体不应覆盖正式交付树。普通验收原本就能检出的错误可以保留原检查，不必为了展示改进而削弱它。
+
+代理使用的原生入口如下，参数来自本次已准入的真实任务及执行计划：
+
+```text
+ai-sdlc loop implementation verify --loop-id <当前实现Loop> --task-id <当前任务> --counterexample-plan <本次计划.json> --json
+```
+
+用户不必手写执行计划或执行回执；代理按命令返回的 `Next` 和运行规则组织输入、独立评审与正常 Close。缺件、源码不符或必要清理未完成时，应按真实阻塞处理，不能把技术执行失败解释为检出了业务错误。
+
+反例验收覆盖所选规则与已运行样本，不保证自动发现未知缺陷，也不证明普遍质量收益。未完成旧计划的跨计划接管及无有效判断的历史评审自动恢复不在本版本支持范围；原始失败和资源清理责任仍须保留。

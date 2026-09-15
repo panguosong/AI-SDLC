@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -97,7 +98,17 @@ def build_implementation_input(
     )
     scope = list(dict.fromkeys(path for item in items for path in item.files))
     acceptance = [value for item in items for value in item.acceptance]
-    return ImplementationInput(
+    from ai_sdlc.core.design_contract_models import DesignContractInput
+    from ai_sdlc.core.design_contract_store import (
+        design_contract_artifacts,
+        verification_binding,
+    )
+
+    upstream_path = design_contract_artifacts(root, design_contract_loop_id).input_path
+    upstream = DesignContractInput.model_validate_json(
+        read_stable_bytes(root, upstream_path)
+    )
+    impl_input = ImplementationInput(
         loop_id=loop_id,
         work_item_id=work_item_dir.name,
         work_item_path=repo_relative_path(root, work_item_dir),
@@ -118,7 +129,82 @@ def build_implementation_input(
             if decision_mode == "adaptive-quantified"
             else decision_capability
         ),
+        **verification_binding(upstream),
     )
+    validate_implementation_verification_contract(root, impl_input)
+    return impl_input
+
+
+def validate_implementation_verification_contract(
+    root: Path,
+    impl_input: ImplementationInput,
+    captured_artifacts: Mapping[str, bytes] | None = None,
+):
+    """当前输入只能继承合法关闭的同一 Design 合同，整体删字段也不降级。"""
+    from ai_sdlc.core.design_contract_models import DesignContractInput
+    from ai_sdlc.core.design_contract_store import (
+        design_contract_artifacts,
+        design_contract_input_digest,
+        read_verification_contract,
+        verification_binding,
+    )
+    from ai_sdlc.core.loop_stage_input import validate_verification_identity
+
+    validate_verification_identity(impl_input)
+    artifacts = design_contract_artifacts(root, impl_input.design_contract_loop_id)
+    material: dict[str, bytes] = {}
+
+    def read(path: Path):
+        key = repo_relative_path(root, path)
+        if captured_artifacts is not None:
+            if key not in captured_artifacts:
+                raise ValueError(f"counterexample-captured-upstream-missing: {key}")
+            content = captured_artifacts[key]
+        else:
+            content = read_stable_bytes(root, path)
+        material[key] = content
+        return content
+
+    upstream = DesignContractInput.model_validate_json(read(artifacts.input_path))
+    if verification_binding(upstream) != verification_binding(impl_input):
+        raise ValueError("counterexample-upstream-verification-identity-mismatch")
+    if upstream.verification_capability is None:
+        return None, {}
+    from ai_sdlc.core.design_contract_models import (
+        DesignContractClose,
+        DesignContractReport,
+    )
+
+    run = LoopRun.model_validate_json(read(artifacts.loop_run_path))
+    close = DesignContractClose.model_validate_json(read(artifacts.close_path))
+    report = DesignContractReport.model_validate_json(read(artifacts.report_json_path))
+    if (
+        upstream.loop_id != impl_input.design_contract_loop_id
+        or upstream.work_item_id != impl_input.work_item_id
+        or upstream.work_item_path != impl_input.work_item_path
+        or run.loop_id != upstream.loop_id
+        or run.loop_type != LoopType.DESIGN_CONTRACT
+        or run.work_item_id != impl_input.work_item_id
+        or run.status != "closed"
+        or run.input_digest != design_contract_input_digest(upstream)
+        or close.artifact_kind != "design-contract-close"
+        or close.loop_id != upstream.loop_id
+        or close.report_path != repo_relative_path(root, artifacts.report_json_path)
+        or close.blocker_count != 0
+        or close.next_loop_type != LoopType.IMPLEMENTATION
+        or report.loop_id != upstream.loop_id
+        or report.work_item_id != impl_input.work_item_id
+        or report.status != "needs_review"
+        or report.blocker_count != 0
+    ):
+        raise ValueError("counterexample-upstream-close-identity-mismatch")
+    contract, sources = read_verification_contract(root, impl_input, captured_artifacts)
+    material.update(sources)
+    if captured_artifacts is None:
+        for path, content in material.items():
+            if read_stable_bytes(root, root / path) != content:
+                raise ValueError("counterexample-upstream-source-drift")
+    return contract, material
 
 
 def _implementation_quality_profile(

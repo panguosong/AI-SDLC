@@ -367,7 +367,7 @@ def test_release_artifact_smoke_workflow_installs_published_assets() -> None:
 
     assert "workflow_dispatch:" in workflow
     assert "release:" in workflow
-    assert "default: v3.1.0" in workflow
+    assert "default: v3.2.0" in workflow
     assert "gh release download" in workflow
     assert "windows-latest" in workflow
     assert "macos-latest" in workflow
@@ -430,7 +430,7 @@ def test_release_build_uses_standard_cross_platform_release_flow() -> None:
     workflow = workflow_path.read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
-    assert "default: v3.1.0" in workflow
+    assert "default: v3.2.0" in workflow
     assert "ref: ${{ inputs.tag }}" in workflow
     assert 'git rev-parse "${RELEASE_TAG}^{commit}"' in workflow
     assert all(
@@ -491,7 +491,7 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / "pyproject.toml").write_text(
-        '[project]\nname = "ai-sdlc"\nversion = "3.1.0"\n',
+        '[project]\nname = "ai-sdlc"\nversion = "3.2.0"\n',
         encoding="utf-8",
     )
     for command in (
@@ -500,7 +500,7 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
         [git, "config", "user.email", "release@example.invalid"],
         [git, "add", "pyproject.toml"],
         [git, "commit", "-m", "release source"],
-        [git, "tag", "-a", "v3.1.0", "-m", "v3.1.0"],
+        [git, "tag", "-a", "v3.2.0", "-m", "v3.2.0"],
     ):
         subprocess.run(command, cwd=repository, check=True, capture_output=True)
     head = subprocess.run(
@@ -512,8 +512,8 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
     ).stdout.strip()
     base_env = {
         **os.environ,
-        "RELEASE_TAG": "v3.1.0",
-        "ALLOWED_RELEASE_TAG": "v3.1.0",
+        "RELEASE_TAG": "v3.2.0",
+        "ALLOWED_RELEASE_TAG": "v3.2.0",
         "DISPATCH_REF": "refs/heads/main",
         "DISPATCH_SHA": head,
     }
@@ -553,7 +553,7 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
 
     assert accepted.returncode == 0, accepted.stderr
     assert frozen_tag.returncode != 0
-    assert "Only v3.1.0" in frozen_tag.stderr
+    assert "Only v3.2.0" in frozen_tag.stderr
     assert non_main.returncode != 0
     assert wrong_commit.returncode != 0
 
@@ -634,17 +634,17 @@ fi
         encoding="utf-8",
     )
     fake_gh.chmod(0o755)
-    asset = tmp_path / "dist-offline" / "ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
+    asset = tmp_path / "dist-offline" / "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
     asset.parent.mkdir()
     asset.write_bytes(b"archive")
     sidecar = Path(f"{asset}.sha256")
     sidecar.write_text("digest  archive\n", encoding="utf-8")
     other_assets = []
     for name in (
-        "ai-sdlc-offline-3.1.0-windows-amd64.zip",
-        "ai-sdlc-offline-3.1.0-windows-amd64.zip.sha256",
-        "ai-sdlc-offline-3.1.0-macos-arm64.tar.gz",
-        "ai-sdlc-offline-3.1.0-macos-arm64.tar.gz.sha256",
+        "ai-sdlc-offline-3.2.0-windows-amd64.zip",
+        "ai-sdlc-offline-3.2.0-windows-amd64.zip.sha256",
+        "ai-sdlc-offline-3.2.0-macos-arm64.tar.gz",
+        "ai-sdlc-offline-3.2.0-macos-arm64.tar.gz.sha256",
     ):
         path = asset.parent / name
         path.write_bytes(name.encode("utf-8"))
@@ -656,11 +656,11 @@ fi
     base_env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "RELEASE_TAG": "v3.1.0",
-        "ALLOWED_RELEASE_TAG": "v3.1.0",
+        "RELEASE_TAG": "v3.2.0",
+        "ALLOWED_RELEASE_TAG": "v3.2.0",
         "DISPATCH_REF": "refs/heads/main",
         "DISPATCH_SHA": "a" * 40,
-        "GITHUB_REPOSITORY": "SinclairPan/Ai_AutoSDLC",
+        "GITHUB_REPOSITORY": "panguosong/AI-SDLC",
         "AI_SDLC_RELEASE_ASSET_OS": "linux",
         "AI_SDLC_RELEASE_ASSET_MACHINE": "amd64",
         "FAKE_GH_LOG": str(log_path),
@@ -817,14 +817,14 @@ def test_windows_user_guide_e2e_replays_existing_project_install_path() -> None:
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" in workflow
     assert "windows-latest" in workflow
-    assert "default: v3.1.0" in workflow
+    assert "default: v3.2.0" in workflow
     assert "Build Windows offline bundle for pull request replay" in workflow
     assert "build_offline_bundle.sh" in workflow
     assert 'AI_SDLC_OFFLINE_ASSET_SUFFIX="-windows-amd64"' in workflow
     assert "pull_request_local_bundle" in workflow
     assert "USER_GUIDE.zh-CN.md Chapter 2: existing project" in workflow
     assert "my-existing-project" in workflow
-    assert "v3.1.0" in workflow
+    assert "v3.2.0" in workflow
     assert "ai-sdlc-offline-$releaseVersion-windows-amd64" in workflow
     assert "releases/download/$env:RELEASE_TAG" in workflow
     assert "Invoke-WebRequest" in workflow
@@ -871,8 +871,8 @@ def test_posix_user_guide_e2e_replays_published_guide_commands() -> None:
     driver = driver_path.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" in workflow
-    assert 'default: "v3.1.0"' in workflow
-    assert "v3.1.0" in workflow
+    assert 'default: "v3.2.0"' in workflow
+    assert "v3.2.0" in workflow
     for path_filter in (
         '      - "src/**"',
         '      - "pyproject.toml"',
@@ -1185,7 +1185,7 @@ def test_linux_offline_compatibility_gates_execute_on_glibc_and_musl_hosts() -> 
     assert 'test "$(command -v ldd)" = "/guards/ldd"' in replay
     assert "无法确定此主机使用的 libc" in replay
     assert "grep -Ei 'glibc|GNU C Library|GNU libc' /evidence/host.txt" not in replay
-    assert "不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz" in replay
+    assert "不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz" in replay
     assert "actions/upload-artifact@v7" in str(job["steps"])
 
 
@@ -1209,7 +1209,7 @@ def test_linux_online_existing_python_path_replays_on_opensuse() -> None:
     assert 'source "/replay/${project_state}-acquire.sh"' in replay
     assert 'source "/replay/${project_state}-verify.sh"' in replay
     assert (
-        "https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+        "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
         in replay
     )
     assert 'test -s "${INSTALLER_PATH}"' in replay
@@ -1220,7 +1220,7 @@ def test_linux_online_existing_python_path_replays_on_opensuse() -> None:
     assert "AI_SDLC_PACKAGE_SPEC=/workspace" in replay
     assert "bash /evidence/new-install_online.sh /tmp/ai-sdlc-venv" in replay
     assert "/tmp/ai-sdlc-venv/bin/python -m ai_sdlc --version" in replay
-    assert "grep -F '3.1.0' /evidence/version.txt" in replay
+    assert "grep -F '3.2.0' /evidence/version.txt" in replay
     assert '--volume "${GITHUB_WORKSPACE}:/workspace:ro"' in replay
     assert "actions/upload-artifact@v7" in str(job["steps"])
 
@@ -1465,7 +1465,7 @@ def test_linux_unsupported_python_bootstrap_fails_closed_without_mutation() -> N
     assert 'test "${installer_exit}" -ne 0' in run
     assert "distro=ubuntu version=22\\.04" in run
     assert "Debian GNU/Linux 12 (bookworm)" in run
-    assert "ai-sdlc-offline-3.1.0-linux-amd64.tar.gz" in run
+    assert "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz" in run
     assert "route 6/12" in run
     assert 'test "${python_package_install_calls}" -eq 0' in run
     assert 'test ! -e "${install_root}"' in run
@@ -1493,7 +1493,7 @@ def test_linux_unsupported_python_bootstrap_fails_closed_without_mutation() -> N
         '"python_package_install_calls":%s',
         '"venv_created":%s',
         '"project_mutated":%s',
-        '"offline_recovery_asset":"ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"',
+        '"offline_recovery_asset":"ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"',
     ):
         assert evidence_field in run
 
@@ -1630,7 +1630,7 @@ def test_windows_clean_user_e2e_pins_release_tag_before_online_install() -> None
         "clean-online-interactive-user-journey:", 1
     )[1]
     resolve_release_tag = (
-        "git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "
+        "git ls-remote https://github.com/panguosong/AI-SDLC.git "
         '"refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}"'
     )
     pinned_installer = (
@@ -1760,7 +1760,6 @@ def test_compatibility_gate_statically_layers_fast_and_full_assurance() -> None:
 
     assert {
         "pull_request",
-        "push",
         "merge_group",
         "workflow_dispatch",
         "workflow_call",
@@ -1774,19 +1773,36 @@ def test_compatibility_gate_statically_layers_fast_and_full_assurance() -> None:
         "converted_to_draft",
     ]
     assert triggers["workflow_call"]["inputs"]["force_full"] == {
-        "description": "Force the complete OS and Python assurance matrix.",
+        "description": "Force source, platform and Python compatibility assurance.",
         "required": False,
         "type": "boolean",
         "default": False,
     }
     jobs = workflow["jobs"]
     assert jobs["fast-gate"]["runs-on"] == "ubuntu-latest"
+    fast_run = next(s["run"] for s in jobs["fast-gate"]["steps"]
+                    if s.get("name") == "Run fixed fast suite")
+    assert 'pytest -q -x "${fast_tests[@]}"' in fast_run
     assert "authority-check" not in jobs
     assert "baseline-preflight" not in jobs
-    assert jobs["cross-platform-validation"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-latest", "macos-latest", "windows-latest"],
-        "python-version": ["3.11", "3.12", "3.13", "3.14"],
-    }
+    cells = jobs["cross-platform-validation"]["strategy"]["matrix"]["include"]
+    assert [(c["os"], c["python-version"], c["suite"]) for c in cells] == [
+        ("ubuntu-latest", "3.11", "full"),
+        ("macos-latest", "3.11", "platform"),
+        ("windows-latest", "3.11", "platform"),
+        ("ubuntu-latest", "3.12", "python"),
+        ("ubuntu-latest", "3.13", "python"),
+        ("ubuntu-latest", "3.14", "python"),
+        ("windows-latest", "3.14", "platform"),
+    ]
+    assert jobs["cross-platform-validation"]["needs"] == "fast-gate"
+    assert jobs["windows-shell-smoke"]["needs"] == "fast-gate"
+    # PR 验证合并树；发行核对相同树，避免合并后再重复整库执行。
+    assert "push" not in triggers
+    aggregate = next(s["run"] for s in jobs["merge-assurance"]["steps"]
+                     if s.get("name") == "Rebuild, verify, and aggregate full evidence")
+    for c in cells:
+        assert f'{c["os"]}-py{c["python-version"]}' in aggregate
     full_condition = (
         "github.event_name != 'pull_request' || "
         "github.event.pull_request.draft == false || inputs.force_full == true"
@@ -1800,6 +1816,50 @@ def test_compatibility_gate_statically_layers_fast_and_full_assurance() -> None:
         "windows-shell-smoke",
     ]
     assert jobs["compatibility-gate-result"]["name"] == "Compatibility Gate Result"
+
+
+def test_release_entrypoints_require_successful_assurance_for_the_exact_tree() -> None:
+    for filename, consumers in (
+        ("release-build.yml", ("build-smoke",)),
+        ("release-artifact-smoke.yml", ("windows-zip", "posix-tar")),
+    ):
+        workflow = yaml.safe_load((_WORKFLOWS_DIR / filename).read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+        for consumer in consumers:
+            assert jobs[consumer]["needs"] == "release-assurance"
+        assurance = jobs["release-assurance"]
+        assert assurance["permissions"]["actions"] == "read"
+        step = next(s for s in assurance["steps"] if s.get("name") == "Require tested release tree")
+        assert "scripts/ci_static_assurance.py release-check" in step["run"]
+        assert '--run-id "${ASSURANCE_RUN_ID}"' in step["run"]
+        assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+        assert "continue-on-error" not in assurance
+    compatibility = (_WORKFLOWS_DIR / "compatibility-gate.yml").read_text(encoding="utf-8")
+    assert '--candidate-tree "$(git rev-parse HEAD^{tree})"' in compatibility
+
+
+def test_primary_reuse_keeps_full_collection_and_reruns_all_affected_files():
+    module = runpy.run_path(_REPO_ROOT / "scripts" / "ci_static_assurance.py")
+    workflow = yaml.safe_load((_WORKFLOWS_DIR / "compatibility-gate.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["cross-platform-validation"]
+    steps = {s.get("name"): s for s in job["steps"]}
+    collect = steps["Collect exact candidate members"]["run"]
+    assert 'if [[ "${TEST_SUITE}" != "full" ]]' in collect
+    prepare = steps["Prepare unchanged primary evidence"]
+    assert prepare["if"] == "matrix.suite == 'full'"
+    assert "prepare-primary" in prepare["run"]
+    run = steps["Run selected pytest suite"]["run"]
+    assert "-n auto --dist worksteal --max-worker-restart=0" in run
+    assert module["PRIMARY_REPAIR_SELECTION"] in run
+    # 受影响进程测试必须整体替换并行参数，不能在并行参数后追加文件。
+    assert "test_args=(" in module["PRIMARY_REPAIR_SELECTION"]
+    assert "test_args+=(" not in module["PRIMARY_REPAIR_SELECTION"]
+    for path in module["PRIMARY_REPAIR_TESTS"]:
+        assert path in run
+    aggregate = next(s["run"] for s in workflow["jobs"]["merge-assurance"]["steps"]
+                     if s.get("name") == "Rebuild, verify, and aggregate full evidence")
+    assert "combine-primary" in aggregate
+    assert "fresh-manifest.json" in aggregate
 
 
 def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
@@ -1825,9 +1885,10 @@ def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
 
     parsed = yaml.safe_load(workflow)
     matrix_steps = parsed["jobs"]["cross-platform-validation"]["steps"]
+    assert all("mapfile" not in str(step.get("run", "")) for step in matrix_steps)
     assert all("cell-evidence" not in str(step.get("run", "")) for step in matrix_steps)
     full_pytest_step = next(
-        step for step in matrix_steps if step.get("name") == "Run full pytest suite"
+        step for step in matrix_steps if step.get("name") == "Run selected pytest suite"
     )
     assert "uv run pytest" in full_pytest_step["run"]
     assert (
@@ -1835,7 +1896,11 @@ def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
         in full_pytest_step["run"]
     )
     step_names = [step.get("name") for step in matrix_steps]
-    assert step_names.index("Doctor") < step_names.index("Run full pytest suite")
+    assert step_names.index("Doctor") < step_names.index("Run selected pytest suite")
+    assert "--dist worksteal" in full_pytest_step["run"]
+    assert '"${test_args[@]}"' in full_pytest_step["run"]
+    collect_step = next(s for s in matrix_steps if s.get("name") == "Collect exact candidate members")
+    assert "--pytest-arg" in collect_step["run"]
     merge_steps = parsed["jobs"]["merge-assurance"]["steps"]
     assert all("uv run python" not in str(step.get("run", "")) for step in merge_steps)
     gate_script = merge_steps[0]["run"]
@@ -1977,7 +2042,7 @@ def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
         "--output ci-evidence/${{ env.CELL }}/snapshot-control-sentinel.json"
     )
     assert (
-        step_names.index("Run full pytest suite")
+        step_names.index("Run selected pytest suite")
         < step_names.index("Run fixed SnapshotControl stability sentinel")
         < step_names.index("Record raw cell completion")
     )
@@ -2009,10 +2074,9 @@ def test_compatibility_gate_uses_candidate_local_execution_evidence_only() -> No
     assert "collect" in workflow_text
     assert "cell-evidence" in workflow_text
     assert "aggregate" in workflow_text
-    assert jobs["cross-platform-validation"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-latest", "macos-latest", "windows-latest"],
-        "python-version": ["3.11", "3.12", "3.13", "3.14"],
-    }
+    cells = jobs["cross-platform-validation"]["strategy"]["matrix"]["include"]
+    assert sum(c["suite"] == "full" for c in cells) == 1
+    assert {c["os"] for c in cells} == {"ubuntu-latest", "macos-latest", "windows-latest"}
     assert "windows-shell-smoke" in jobs
     assert "fast-gate" in jobs
 

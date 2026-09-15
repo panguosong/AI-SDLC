@@ -1022,3 +1022,28 @@ def test_failed_round_stale_retry_preserves_failed_outcome(
     with pytest.raises(LoopReviewServiceError, match="review-input-drift"):
         _record(loop_fixture, stale, _result_paths(loop_fixture, stale))
     assert outcome_path.read_bytes() == failed_bytes
+
+
+
+@pytest.mark.parametrize("stage", ["requirement", "design-contract", "frontend-evidence"])
+@pytest.mark.parametrize("blocked", [False, True])
+def test_q004_stage_start_keeps_legacy_and_blocked_guidance(tmp_path, stage, blocked):
+    from ai_sdlc.cli.loop_cmd import _stage_start_guidance
+    from ai_sdlc.core.design_contract_models import DesignContractCommandResult
+    from ai_sdlc.core.frontend_evidence_models import FrontendEvidenceCommandResult
+    from ai_sdlc.core.requirement_loop import RequirementLoopCommandResult
+
+    model = {"requirement": RequirementLoopCommandResult,
+             "design-contract": DesignContractCommandResult,
+             "frontend-evidence": FrontendEvidenceCommandResult}[stage]
+    result = model(
+        status="blocked" if blocked else "ready", loop_id="original-result",
+        loop_status="needs_review", next_action="Keep the original native next action.",
+        blocker="original blocker" if blocked else "",
+    )
+    before = result.model_dump(mode="json")
+    _stage_start_guidance(
+        tmp_path, stage, result, "stage-simulation-v1" if blocked else None
+    )
+    assert result.model_dump(mode="json") == before
+    assert not (tmp_path / ".ai-sdlc").exists()

@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +40,10 @@ from ai_sdlc.core.loop_decision_models import (
     ObligationResult,
 )
 from ai_sdlc.core.loop_models import LoopRun, LoopStatus
-from ai_sdlc.core.loop_resource_lock import _implementation_write_guard
+from ai_sdlc.core.loop_resource_lock import (
+    _implementation_write_guard,
+    _ImplementationWriteLockError,
+)
 from ai_sdlc.core.loop_simulation_context import (
     CAPABILITY,
     SimulationContext,
@@ -506,10 +510,21 @@ def implementation_execution_started(root: Path, loop_id: str) -> bool:
     )
     if progress.loop_id != loop_id:
         raise DecisionPreparationError("decision-progress-identity-mismatch")
-    return any(
+    return _implementation_progress_started(root, loop_id, progress)
+
+
+def _implementation_progress_started(
+    root: Path, loop_id: str, progress: ImplementationProgress
+) -> bool:
+    if any(
         item.status in {"in_progress", "done"} or item.quality_results
         for item in progress.tasks
-    )
+    ):
+        return True
+    from ai_sdlc.core.counterexample_execution import counterexample_execution_started
+
+    # 新执行在原进度中一次记录；仅旧 pending 或中断写入需要读取原尝试证明。
+    return counterexample_execution_started(root, loop_id)
 
 
 def require_simulation_time_admission(
@@ -843,7 +858,11 @@ def prepare_simulation_decision(
         return preview
     if not expected_digest or expected_digest != preview.prepare_digest:
         raise DecisionPreparationError("decision-prepare-digest-mismatch")
-    with _implementation_write_guard(root, loop_id):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_implementation_write_guard(root, loop_id))
+        except _ImplementationWriteLockError as exc:
+            raise DecisionPreparationError(str(exc)) from exc
         current = _simulation_prepare(root, loop_id, request)
         if current.status == "existing":
             return current
@@ -1017,19 +1036,20 @@ def implementation_stage_host(
             is not None
             for n in (1, 2)
         ),
-        execution_started=any(
-            item.status in {"in_progress", "done"} or item.quality_results
-            for item in progress.tasks
-        ),
+        execution_started=_implementation_progress_started(root, loop_id, progress),
     )
 
 
 def _require_stage_implementation_execution(root, host, context):
-    from ai_sdlc.cli.loop_review_cmd import prepare_current_loop_review
+    from ai_sdlc.cli.loop_review_cmd import (
+        _counterexample_execution_capture,
+        prepare_current_loop_review,
+    )
     from ai_sdlc.core.loop_simulation_context import conditional_improvement_admission
     from ai_sdlc.core.loop_stage_decision_service import stage_material_digest
 
-    prepared, _ = prepare_current_loop_review(root, "implementation", host.loop_id)
+    with _counterexample_execution_capture():
+        prepared, _ = prepare_current_loop_review(root, "implementation", host.loop_id)
     previous = prepared.baseline_outcome or prepared.current_outcome
     if (
         previous is None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,93 @@ import pytest
 from ai_sdlc.core import config as config_module
 from ai_sdlc.core.config import YamlStore, YamlStoreError
 from ai_sdlc.models.project import ProjectConfig, ProjectState, ProjectStatus
+
+
+@pytest.mark.parametrize("operation", ["load", "unchanged-save", "changed-save"])
+def test_windows_config_read_overlap_recovers_without_losing_content(
+    tmp_path, monkeypatch, operation
+):
+    target = tmp_path / "config.yaml"
+    original = ProjectConfig(preferred_shell="powershell")
+    YamlStore.save(target, original)
+    before = target.read_bytes()
+    original_read = Path.read_text
+    calls = 0
+    delays = []
+
+    def read(path, *args, **kwargs):
+        nonlocal calls
+        if path == target:
+            calls += 1
+            if calls <= 2:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(config_module.time, "sleep", delays.append)
+    monkeypatch.setattr(Path, "read_text", read)
+    if operation == "load":
+        assert YamlStore.load(target, ProjectConfig) == original
+    else:
+        saved = original.model_copy(
+            update={"preferred_shell": "bash" if operation == "changed-save" else "powershell"}
+        )
+        YamlStore.save(target, saved)
+        assert YamlStore.load(target, ProjectConfig) == saved
+    assert delays == [0.05, 0.1]
+    if operation != "changed-save":
+        assert target.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("windows", [True, False])
+@pytest.mark.parametrize("operation", ["load", "save"])
+def test_config_read_permission_exhaustion_preserves_failure_and_original(
+    tmp_path, monkeypatch, windows, operation
+):
+    target = tmp_path / "config.yaml"
+    YamlStore.save(target, ProjectConfig(preferred_shell="powershell"))
+    before = target.read_bytes()
+    original_read = Path.read_text
+    calls = 0
+    delays = []
+
+    def read(path, *args, **kwargs):
+        nonlocal calls
+        if path == target:
+            calls += 1
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", windows)
+    monkeypatch.setattr(config_module.time, "sleep", delays.append)
+    monkeypatch.setattr(Path, "read_text", read)
+    if operation == "load":
+        with pytest.raises(YamlStoreError) as caught:
+            YamlStore.load(target, ProjectConfig)
+        assert isinstance(caught.value.__cause__, PermissionError)
+    else:
+        with pytest.raises(PermissionError):
+            YamlStore.save(target, ProjectConfig(preferred_shell="bash"))
+    assert calls == (5 if windows else 1)
+    assert delays == ([0.05, 0.1, 0.2] if windows else [])
+    assert target.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("content", ["bad: [", "project_name: [invalid]"])
+def test_windows_yaml_or_model_errors_are_never_retried(tmp_path, monkeypatch, content):
+    target = tmp_path / "state.yaml"
+    target.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", True)
+
+    def unexpected_delay(_delay):
+        raise AssertionError("A content validation error is not a transient IO failure")
+
+    monkeypatch.setattr(config_module.time, "sleep", unexpected_delay)
+    with pytest.raises(YamlStoreError):
+        YamlStore.load(target, ProjectState)
+    assert target.read_text(encoding="utf-8") == content
 
 
 class TestYamlStoreLoad:

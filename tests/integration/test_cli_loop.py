@@ -23,6 +23,7 @@ from ai_sdlc.cli.loop_review_cmd import (
 )
 from ai_sdlc.cli.main import app
 from ai_sdlc.core.design_contract_models import DesignContractCheckOptions
+from ai_sdlc.core.design_contract_store import build_contract_input
 from ai_sdlc.core.implementation_loop import record_implementation_progress
 from ai_sdlc.core.implementation_models import (
     ImplementationClose,
@@ -30,7 +31,10 @@ from ai_sdlc.core.implementation_models import (
     ImplementationRecordOptions,
     ImplementationReport,
 )
-from ai_sdlc.core.implementation_store import implementation_artifacts
+from ai_sdlc.core.implementation_store import (
+    build_implementation_input,
+    implementation_artifacts,
+)
 from ai_sdlc.core.loop_artifacts import LoopArtifactStore
 from ai_sdlc.core.loop_models import LoopRound, LoopRun, LoopStatus, LoopType
 from ai_sdlc.core.loop_review_models import LoopReviewOutcome
@@ -2302,12 +2306,12 @@ def _write_closed_frontend_implementation(root: Path, work_item: Path) -> None:
     design_dir.mkdir(parents=True)
     store.write_json_artifact(
         design_dir / "design-contract-input.json",
-        {
-            "requirement_loop_id": "",
-            "spec_path": f"specs/{work_item.name}/spec.md",
-            "plan_path": f"specs/{work_item.name}/plan.md",
-            "tasks_path": f"specs/{work_item.name}/tasks.md",
-        },
+        build_contract_input(
+            root=root,
+            loop_id="dc-frontend-cli",
+            work_item_dir=work_item,
+            requirement_loop_id="",
+        ),
     )
     store.write_json_artifact(design_dir / "design-contract-report.json", {})
     (design_dir / "design-contract-report.md").write_text(
@@ -2315,7 +2319,15 @@ def _write_closed_frontend_implementation(root: Path, work_item: Path) -> None:
     )
     store.write_json_artifact(
         artifacts.input_path,
-        {"design_contract_loop_id": "dc-frontend-cli"},
+        build_implementation_input(
+            root=root,
+            loop_id="impl-frontend-cli",
+            work_item_dir=work_item,
+            design_contract_loop_id="dc-frontend-cli",
+            design_contract_report_path=(design_dir / "design-contract-report.json")
+            .relative_to(root)
+            .as_posix(),
+        ),
     )
     store.write_json_artifact(artifacts.tasks_path, {})
     store.write_json_artifact(artifacts.progress_path, {})
@@ -2658,3 +2670,58 @@ def _write_current_pointer(root: Path, review_run_path: Path) -> Path:
         },
     )
     return pointer_path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="真实 POSIX 目录权限；Windows 保留原锁互斥门禁")
+@pytest.mark.parametrize("phase", ["mkdir", "open"])
+def test_q003_requirement_cli_real_lock_permission_and_same_loop_recovery(
+    initialized_project_dir, phase
+):
+    import stat
+
+    from tests.integration.test_quantified_implementation import _cli, _git
+
+    root = initialized_project_dir
+    _git(root, "init", "-q")
+    directory = root / ".git/ai-sdlc-locks"
+    if phase == "open":
+        directory.mkdir()
+    denied_parent = directory if phase == "open" else directory.parent
+    previous_mode = stat.S_IMODE(denied_parent.stat().st_mode)
+    args = (
+        "loop", "requirement", "start", "--loop-id", "req-lock-permission",
+        "--idea", "保存订单审批记录并显示审批结果", "--acceptance", "审批记录可以读回", "--json",
+    )
+    loop_dir = root / ".ai-sdlc/loops/requirement/req-lock-permission"
+    pointer = root / requirement_loop.CURRENT_REQUIREMENT_PATH
+    before_pointer = pointer.read_bytes() if pointer.exists() else None
+    denied_parent.chmod(0o500)
+    try:
+        probe = denied_parent / "q003-permission-probe"
+        try:
+            probe.write_bytes(b"permission-probe")
+        except PermissionError:
+            pass
+        else:
+            probe.unlink()
+            pytest.skip("当前用户可越过目录权限，未形成真实 PermissionError，不能冒充验证")
+        failed = _cli(root, *args)
+        (root.parent / f"q003-{phase}-failed-stdout.txt").write_text(failed.stdout)
+        (root.parent / f"q003-{phase}-failed-stderr.txt").write_text(failed.stderr)
+        assert failed.returncode != 0
+        payload = json.loads(failed.stdout)
+        assert payload["status"] == "blocked"
+        assert "write lock is unavailable" in payload["blocker"]
+        assert "Traceback" not in failed.stdout + failed.stderr
+        assert not loop_dir.exists()
+        assert (pointer.read_bytes() if pointer.exists() else None) == before_pointer
+    finally:
+        denied_parent.chmod(previous_mode)
+    recovered = _cli(root, *args)
+    (root.parent / f"q003-{phase}-recovered-stdout.txt").write_text(recovered.stdout)
+    (root.parent / f"q003-{phase}-recovered-stderr.txt").write_text(recovered.stderr)
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    payload = json.loads(recovered.stdout)
+    assert payload["status"] == "ready" and payload["loop_id"] == "req-lock-permission"
+    assert (loop_dir / "loop-run.json").is_file()
+    assert not list(loop_dir.glob("review-outcome*"))

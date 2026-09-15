@@ -9,11 +9,21 @@ from pathlib import Path
 
 import pytest
 
+from ai_sdlc.core import pr_review_provider, pr_review_service
+from ai_sdlc.core.pr_review_models import DiffSourceKind, ReviewFindings, ReviewRun
 from ai_sdlc.core.pr_review_pack import (
     ReviewPackBuildOptions,
     ReviewPackBuildStatus,
     build_review_pack,
 )
+from ai_sdlc.core.source_change_capture import read_index_states
+from ai_sdlc.core.source_content_identity import inspect_unsafe_attribute_paths
+from ai_sdlc.core.source_snapshot import (
+    SourceSnapshotOptions,
+    build_source_snapshot,
+    is_runtime_artifact_path,
+)
+from ai_sdlc.core.source_snapshot_view import file_versions, python_sources
 
 
 def test_build_review_pack_writes_required_artifacts(tmp_path) -> None:
@@ -655,6 +665,175 @@ def test_build_review_pack_from_local_staged_source(tmp_path) -> None:
     )
     diff_text = Path(result.diff_path).read_text(encoding="utf-8")
     assert "+print('staged')" in diff_text
+
+
+@pytest.mark.parametrize(
+    "source_kind", ["local-staged", "local-git-range", "local-unstaged", "patch"]
+)
+@pytest.mark.parametrize("secret", [False, True])
+def test_build_review_pack_preserves_native_git_filename(
+    tmp_path, source_kind, secret
+) -> None:
+    _init_repo_with_base_commit(tmp_path)
+    native_path = Path(r"weird\name.py")
+    git_path = native_path.as_posix()
+    _write_file(tmp_path, str(native_path), "print('before')\n")
+    # POSIX 中反斜杠是文件名本身；另一个同名目录文件不能替代被审查的文件。
+    if git_path != "weird/name.py":
+        _write_file(tmp_path, "weird/name.py", "print('unchanged decoy')\n")
+    _git(tmp_path, "add", "--all")
+    _git(tmp_path, "commit", "-m", "add filename baseline")
+    base_commit = _git(tmp_path, "rev-parse", "HEAD")
+    content = (
+        'api_key = "1234567890sensitive"\n'
+        if secret
+        else "print('review this exact file')\n"
+    )
+    _write_file(tmp_path, str(native_path), content)
+    if source_kind != "local-unstaged":
+        _git(tmp_path, "--literal-pathspecs", "add", "--", git_path)
+    if source_kind == "local-git-range":
+        _git(tmp_path, "commit", "-m", "change exact filename")
+    if source_kind == "patch":
+        (tmp_path / "change.patch").write_text(
+            _git(tmp_path, "diff", "--cached") + "\n", encoding="utf-8"
+        )
+
+    result = build_review_pack(
+        ReviewPackBuildOptions(
+            root=tmp_path,
+            base_ref=base_commit if source_kind == "local-git-range" else "",
+            review_id="review-native-git-path",
+            loop_id="loop-native-git-path",
+            diff_source=source_kind,
+            patch_file="change.patch" if source_kind == "patch" else "",
+            current_model="gpt-5",
+            code_egress=secret,
+        )
+    )
+
+    if secret:
+        assert result.status == ReviewPackBuildStatus.NEEDS_USER
+        report = json.loads(Path(result.redaction_report_path).read_text())
+        assert report["redacted_files"] == [git_path]
+        assert report["high_risk_secret_files"] == [git_path]
+        assert result.diff_path == ""
+    else:
+        assert result.status == ReviewPackBuildStatus.READY, result.blocker
+        assert result.review_pack is not None
+        assert result.review_pack.diff_coverage["diff_bytes"] > 0, (
+            result.review_pack.diff_coverage
+        )
+        assert result.review_pack.changed_files == [git_path]
+        assert result.review_pack.reviewer_allowlist == [git_path]
+        assert "+print('review this exact file')" in Path(result.diff_path).read_text()
+
+
+@pytest.mark.parametrize(
+    "consumer", ["snapshot", "index", "attributes", "runtime", "python-sources", "file-versions"]
+)
+def test_source_consumers_preserve_native_git_filename(tmp_path, consumer) -> None:
+    _init_repo_with_base_commit(tmp_path)
+    native_path = Path(r"build\name.py" if consumer == "runtime" else r"weird\name.py")
+    git_path = native_path.as_posix()
+    _write_file(tmp_path, str(native_path), "print('before')\n")
+    _write_file(tmp_path, ".gitattributes", "* -text\n")
+    _git(tmp_path, "add", "--all")
+    _git(tmp_path, "commit", "-m", "add native path consumer baseline")
+    content = "print('exact after bytes')\n"
+    _write_file(tmp_path, str(native_path), content)
+    _git(tmp_path, "--literal-pathspecs", "add", "--", git_path)
+
+    if consumer in {"snapshot", "python-sources", "file-versions"}:
+        snapshot = build_source_snapshot(
+            SourceSnapshotOptions(root=tmp_path, source_kind="local-staged")
+        )
+        if consumer == "snapshot":
+            assert snapshot.changed_files == [git_path]
+            assert set(snapshot.file_digests) == {git_path}
+        elif consumer == "python-sources":
+            assert python_sources(tmp_path, snapshot) == {git_path: content.encode()}
+        else:
+            assert file_versions(tmp_path, snapshot, git_path) == (
+                b"print('before')\n", content.encode()
+            )
+    elif consumer == "index":
+        states = read_index_states(tmp_path, [git_path])
+        assert set(states) == {git_path}
+        assert states[git_path].payload == content.encode()
+    elif consumer == "attributes":
+        assert inspect_unsafe_attribute_paths(tmp_path, [git_path]) == {git_path}
+    else:
+        git_names = _git(tmp_path, "diff", "--cached", "--name-only", "-z").split("\0")
+        assert git_names == [git_path, ""]
+        # 只有真实 build 目录才是运行产物；POSIX 的同字样文件名仍应进入来源。
+        assert is_runtime_artifact_path(git_names[0]) == (native_path.parts[0] == "build")
+
+
+@pytest.mark.parametrize("consumer", ["provider", "service", "worktree-snapshot", "findings"])
+def test_review_guards_keep_unreviewed_native_path_alias(tmp_path, consumer) -> None:
+    _init_repo_with_base_commit(tmp_path)
+    native_path = Path(r"weird\name.py")
+    git_path = native_path.as_posix()
+    alias = "weird/name.py" if git_path != "weird/name.py" else "other/name.py"
+    for path in (str(native_path), alias):
+        _write_file(tmp_path, path, "print('before')\n")
+    _git(tmp_path, "add", "--all")
+    _git(tmp_path, "commit", "-m", "add two distinct native paths")
+    _write_file(tmp_path, str(native_path), "print('reviewed change')\n")
+    _git(tmp_path, "--literal-pathspecs", "add", "--", git_path)
+    result = build_review_pack(
+        ReviewPackBuildOptions(
+            root=tmp_path,
+            base_ref="",
+            review_id="review-native-path-guard",
+            loop_id="loop-native-path-guard",
+            diff_source="local-staged",
+            current_model="gpt-5",
+        )
+    )
+    pack = result.review_pack
+    assert pack is not None
+    _write_file(tmp_path, alias, "print('unreviewed alias change')\n")
+    _git(tmp_path, "add", "--", alias)
+
+    if consumer == "provider":
+        allowed = pr_review_provider._reviewed_dirty_paths_for_launch(tmp_path, pack)
+        dirty = pr_review_provider._dirty_worktree_paths(
+            tmp_path, frozenset({Path(result.review_dir)}), allowed,
+            DiffSourceKind.LOCAL_STAGED,
+        )
+        assert {"allowed": sorted(allowed), "dirty": dirty} == {
+            "allowed": [git_path], "dirty": [alias],
+        }
+    elif consumer == "service":
+        run = ReviewRun(
+            review_id=pack.review_id, loop_id=pack.loop_id, diff_source=pack.diff_source
+        )
+        allowed = pr_review_service._reviewed_dirty_paths_for_review_run(
+            tmp_path, run, review_pack=pack
+        )
+        dirty = pr_review_service._unreviewed_dirty_paths(tmp_path, run, review_pack=pack)
+        assert {"allowed": sorted(allowed), "dirty": dirty} == {
+            "allowed": [git_path], "dirty": [alias],
+        }
+    elif consumer == "worktree-snapshot":
+        snapshot = pr_review_provider._worktree_snapshot(tmp_path, frozenset())
+        assert git_path in snapshot and alias in snapshot
+        assert snapshot[git_path] != snapshot[alias]
+    else:
+        findings = ReviewFindings(
+            review_id=pack.review_id, loop_id=pack.loop_id,
+            review_pack_path=result.review_pack_path, provider_id="test", resolved_model="gpt-5",
+            verdict="changes_required", findings=[{
+                "id": "F1", "severity": "REQUIRED", "file": alias,
+                "claim": "Unreviewed file", "evidence": "Different Git path",
+                "risk": "Wrong scope", "suggested_fix": "Keep the exact Git path", "confidence": 1,
+            }],
+        )
+        assert "outside the review allowlist" in pr_review_provider._findings_scope_blocker(
+            findings, review_pack=pack, review_pack_path=Path(result.review_pack_path)
+        )
 
 
 def test_build_review_pack_omits_staged_binary_blob(tmp_path) -> None:

@@ -27,16 +27,16 @@ def _stage_write_guard(root: Path, loop_type: str, loop_id: str) -> Iterator[Non
 def _implementation_write_guard(root: Path, loop_id: str) -> Iterator[None]:
     """跨进程串行化同一实现循环的读取、校验与写入。"""
 
-    lock_dir = _implementation_lock_dir(root)
-    lock_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-    lock_key = f"{root.resolve()}\0{loop_id}".encode()
-    lock_name = hashlib.sha256(lock_key).hexdigest()
-    lock_path = lock_dir / f"implementation-{lock_name}.lock"
-    flags = os.O_CREAT | os.O_RDWR
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
     file_descriptor = -1
     try:
+        lock_dir = _implementation_lock_dir(root)
+        lock_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        lock_key = f"{root.resolve()}\0{loop_id}".encode()
+        lock_name = hashlib.sha256(lock_key).hexdigest()
+        lock_path = lock_dir / f"implementation-{lock_name}.lock"
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
         file_descriptor = os.open(lock_path, flags, 0o600)
         _acquire_implementation_file_lock(file_descriptor)
     except OSError as exc:

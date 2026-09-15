@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag that will receive the platform assets.
         required: true
-        default: v3.1.0
+        default: v3.2.0
       upload_to_release:
         description: Upload smoke-passed assets to the existing GitHub Release.
         required: true
@@ -15,6 +15,10 @@ on:
         options:
           - "true"
           - "false"
+      assurance_run_id:
+        description: Successful Compatibility Gate run for the exact release tree.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,7 +28,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-assurance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Require tested release tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSURANCE_RUN_ID: ${{ inputs.assurance_run_id }}
+        run: >-
+          python scripts/ci_static_assurance.py release-check
+          --repository "${GITHUB_REPOSITORY}" --run-id "${ASSURANCE_RUN_ID}"
+          --output release-assurance.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assurance
+          path: release-assurance.json
+          if-no-files-found: error
+
   build-smoke:
+    needs: release-assurance
     name: ${{ matrix.asset_os }} ${{ matrix.archive }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
@@ -49,7 +82,7 @@ jobs:
 
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      ALLOWED_RELEASE_TAG: v3.1.0
+      ALLOWED_RELEASE_TAG: v3.2.0
       DISPATCH_REF: ${{ github.ref }}
       DISPATCH_SHA: ${{ github.sha }}
       PYTHONUTF8: "1"
@@ -363,7 +396,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      ALLOWED_RELEASE_TAG: v3.1.0
+      ALLOWED_RELEASE_TAG: v3.2.0
       DISPATCH_REF: ${{ github.ref }}
       DISPATCH_SHA: ${{ github.sha }}
       GH_TOKEN: ${{ github.token }}

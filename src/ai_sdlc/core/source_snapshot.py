@@ -869,7 +869,7 @@ def _nul_paths(payload: bytes) -> list[str]:
 
 
 def _is_runtime_artifact(path: str) -> bool:
-    normalized = path.replace("\\", "/")
+    normalized = path
     segments = normalized.split("/")
     return (
         normalized.startswith(_AI_SDLC_RUNTIME_PREFIXES)
@@ -905,7 +905,7 @@ def _runtime_pathspecs() -> tuple[str, ...]:
 
 
 def _decode_path(payload: bytes) -> str:
-    return payload.decode("utf-8", errors="strict").replace("\\", "/")
+    return payload.decode("utf-8", errors="strict")
 
 
 def _digest(payload: bytes) -> str:

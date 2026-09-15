@@ -1,5 +1,7 @@
 # Pull Request 检查清单
 
+本仓库 v3.2.0 发行采用[本次发行路径与分层验证](框架自迭代开发与发布约定.md#v320-本次发行路径替代)。本次以当前提交的实际线上 Codex review 承接下方本地复核条目，不执行已撤销的本地整包复评或 Local PR Close；普通用户的产品流程不变。
+
 ## 范围与契约
 
 - [ ] 变更目标、范围和验收标准明确；
@@ -19,7 +21,10 @@
 
 - [ ] 新行为有自动化测试；
 - [ ] 修复包含可复现的回归测试；
-- [ ] `uv run pytest -q` 通过；
+- [ ] 主环境完整适用测试集合通过，例如 `uv run pytest -q -n auto --dist worksteal`，允许隔离进程并行；
+- [ ] 固定平台及 Python 兼容集合通过，聚合校验全部预期 cell 和实际成员，无遗漏或重复；
+- [ ] 复用主环境结果时保留旧原件与逐用例来源，实际重跑受影响文件；发行门禁核对 Release tree 与成功 CI 报告的 tree 相等；
+- [ ] 当前缺陷短回归前置，旧错误能够被拦截，合法对照通过；
 - [ ] `uv run ruff check src tests scripts` 通过；
 - [ ] 没有提交密钥、令牌、环境文件或本地绝对路径。
 
@@ -46,11 +51,12 @@
 - [ ] 12 条路线的在线/离线安装、全新/已有项目和三平台命令均有真实环境证据；
 - [ ] `uv run python scripts/validate_user_guide_standard.py .` 通过；
 - [ ] `README.md`、`USER_GUIDE.zh-CN.md` 与 `packaging/offline/README.md` 描述一致；
-- [ ] 源码、发布文档目标、workflow 默认 tag 与制品名称均为 `3.1.0` / `v3.1.0`；正式发布状态另有对应 Release 与发布后验证证据；
+- [ ] 源码、发布文档目标、workflow 默认 tag 与制品名称均为 `3.2.0` / `v3.2.0`；正式发布状态另有对应 Release 与发布后验证证据；
 - [ ] 发布变更只使用普通 GitHub Release、tag、跨平台 smoke 和分支保护；
 - [ ] 包版本、源码版本、锁文件和工作流一致；
 - [ ] README、用户指南和打包说明一致；
 - [ ] 离线包名称与 manifest 一致；
 - [ ] Windows、macOS、Linux smoke 覆盖对应平台；
+- [ ] 实际 main 合并树与已验证 PR 合并树、依赖及构建输入一致，发行阶段不重复同一源码整库；不一致的变化另有真实验证；
 - [ ] 当前候选 wheel 与 sdist 构建的 wheel 在隔离安装环境通过五 Loop 既有流程与普通 Close 验收，导入来源为已安装包而不是产品源码；
 - [ ] `python scripts/validate_public_release_identity.py .` 通过。

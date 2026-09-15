@@ -117,7 +117,7 @@ def inspect_unsafe_attribute_paths(root: Path, paths: list[str]) -> set[str]:
         raise ValueError("git check-attr returned malformed output")
     unsafe: set[str] = set()
     for index in range(0, len(fields), 3):
-        path = fields[index].decode("utf-8", errors="strict").replace("\\", "/")
+        path = fields[index].decode("utf-8", errors="strict")
         name = fields[index + 1].decode("utf-8", errors="strict")
         value = fields[index + 2].decode("utf-8", errors="strict")
         if (

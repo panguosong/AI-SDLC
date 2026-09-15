@@ -609,9 +609,9 @@ def _release_asset_context(
     if not release_version:
         raise SelfUpdateError("missing target version")
     tag = f"v{release_version}"
-    release_url = f"https://github.com/SinclairPan/Ai_AutoSDLC/releases/tag/{tag}"
+    release_url = f"https://github.com/panguosong/AI-SDLC/releases/tag/{tag}"
     asset_url = (
-        f"https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/"
+        f"https://github.com/panguosong/AI-SDLC/releases/download/"
         f"{tag}/{hint['filename']}"
     )
     return release_version, release_url, asset_url, hint

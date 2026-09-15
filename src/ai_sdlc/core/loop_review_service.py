@@ -9,9 +9,10 @@ import re
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -22,7 +23,10 @@ from ai_sdlc.core.loop_decision_service import (
     validate_b1_review_data,
 )
 from ai_sdlc.core.loop_models import utc_now_iso
-from ai_sdlc.core.loop_resource_lock import _stage_write_guard
+from ai_sdlc.core.loop_resource_lock import (
+    _ImplementationWriteLockError,
+    _stage_write_guard,
+)
 from ai_sdlc.core.loop_review_models import (
     B1ExpertResult,
     LoopReviewOutcome,
@@ -31,6 +35,7 @@ from ai_sdlc.core.loop_review_models import (
 from ai_sdlc.core.loop_stage_decision_service import (
     StageReviewData,
     StageReviewSnapshot,
+    stage_review_source_digest,
 )
 from ai_sdlc.core.review_kernel import (
     LoopReviewType,
@@ -44,6 +49,10 @@ from ai_sdlc.core.stable_file_read import (
     read_stable_bytes,
     read_stable_text,
 )
+
+if TYPE_CHECKING:
+    from ai_sdlc.core.pr_review_models import ReviewRun
+
 
 ReviewInputResolver = Callable[[int], ReviewInput]
 B1SnapshotResolver = Callable[[int], B1ReviewSnapshot | None]
@@ -394,11 +403,7 @@ def prepare_loop_review(
             next_action="The required repair is not available; do not start round 2.",
             b1_snapshot=first_snapshot,
         )
-    first_actionable = (
-        effective_actual_action(first_snapshot, first) in {"repair", "improve"}
-        if first_actual is not None
-        else has_actionable_findings(first)
-    )
+    first_actionable = _first_review_action(first_snapshot, first) in {"repair", "improve"}
     if not first_actionable:
         if first.input_digest != first_input.input_digest:
             return _drifted_preparation(first_input, first, first_path)
@@ -532,7 +537,13 @@ def record_loop_review(
         if quantified or options.loop_type == "implementation"
         else nullcontext()
     )
-    with guard:
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(guard)
+        except _ImplementationWriteLockError as exc:
+            raise LoopReviewServiceError(
+                "review-outcome-lock-unavailable", detail=str(exc)
+            ) from exc
         return _record_loop_review_locked(
             options,
             loop_dir=loop_dir,
@@ -679,9 +690,8 @@ def _record_loop_review_locked(
             outcome = outcome.model_copy(update={"simulation": actual})
         return outcome
 
-    # 模型在锁外完成；提交前仍须复验同一量化候选，不能靠持锁时长代替输入绑定。
-    if prepared.b1_snapshot is not None:
-        revalidate()
+    # 模型在锁外完成；临时文件写好后仍须复验同一量化候选，不能靠持锁时长代替输入绑定。
+    # 最终 precommit 会完整重读并重算当前时间；进入 writer 前不重复同一次验证。
     if prepared.b1_snapshot is not None:
         _write_outcome(
             options.root, prepared.outcome_path, outcome, precommit=revalidate
@@ -895,7 +905,7 @@ def effective_actual_action(snapshot, outcome: LoopReviewOutcome) -> str | None:
         and actual.evaluation.h == 0
         and not has_actionable_findings(outcome)
         and snapshot.review_input.input_digest == outcome.input_digest
-        and snapshot.source_digest == actual.source_digest
+        and stage_review_source_digest(snapshot) == actual.source_digest
     ):
         from ai_sdlc.core.loop_simulation_context import (
             conditional_improvement_admission,
@@ -903,12 +913,62 @@ def effective_actual_action(snapshot, outcome: LoopReviewOutcome) -> str | None:
 
         reason = conditional_improvement_admission(
             snapshot.context,
-            source_digest=snapshot.source_digest,
+            source_digest=stage_review_source_digest(snapshot),
             now_ms=snapshot.observed_at_ms,
         )
         if reason == "model_plan_not_feasible":
             return "stop"
     return actual.decision.action
+
+
+def _first_review_action(snapshot: B1ReviewSnapshot | None, outcome: LoopReviewOutcome) -> str:
+    """正式评审和提供方恢复共用已完成 R1 的动作语义。"""
+    if outcome.status != "completed":
+        return "failed"
+    if _actual_review_data(outcome) is not None:
+        return effective_actual_action(snapshot, outcome) or "blocked"
+    return "repair" if has_actionable_findings(outcome) else "stop"
+
+
+def validate_preserved_local_pr_review(
+    run: ReviewRun, first_raw: bytes, context_raw: bytes | None,
+) -> tuple[LoopReviewOutcome, B1ReviewSnapshot | None, str]:
+    """按原 R1 输入复算正式判断；不要求技术失败已具有新的验收输入。"""
+    from ai_sdlc.core.loop_stage_decision_service import parse_stage_simulation_context
+    from ai_sdlc.core.pr_review_decision import validate_captured_pr_review_context
+    from ai_sdlc.core.pr_review_models import ReviewRun
+
+    run = ReviewRun.model_validate(run.model_dump())
+    first = _parse_outcome(first_raw, "local-pr-review", run.loop_id, 1)
+    snapshot = None
+    if run.decision_capability == "stage-simulation-v1":
+        if context_raw is None:
+            raise LoopReviewServiceError("decision-review-snapshot-unavailable")
+        context = validate_captured_pr_review_context(run, parse_stage_simulation_context(context_raw))
+        if first.status == "failed":
+            # 原 writer 的技术失败没有完成评分；模型与 context 身份仍需成立。
+            # 此处只承认失败原件，是否同输入重试仍由 prepare/record 的原次数门禁判断。
+            if first.infra_retry_count is None:
+                raise LoopReviewServiceError("decision-assessment-missing")
+            return first, None, _first_review_action(None, first)
+        if not isinstance(first.simulation, StageReviewData):
+            raise LoopReviewServiceError("decision-review-snapshot-unavailable")
+        data = first.simulation
+        snapshot = StageReviewSnapshot(
+            review_input=ReviewInput(
+                loop_id=first.loop_id, loop_type=first.loop_type, round_number=1,
+                input_digest=first.input_digest, artifact_paths=list(data.manifest),
+                expert_roles=first.expert_roles,
+                expert_reasons={role: "Persisted completed review role." for role in first.expert_roles},
+            ),
+            context=context, manifest=data.manifest, source_digest=data.source_digest,
+            observed_at_ms=int(time.time() * 1000),
+            context_path=f".ai-sdlc/reviews/pr/{run.review_id}/decision-context.json",
+        )
+    elif context_raw is not None:
+        raise LoopReviewServiceError("decision-context-conflicts-with-legacy")
+    _validate_saved_b1(snapshot, first)
+    return first, snapshot, _first_review_action(snapshot, first)
 
 
 def _validate_saved_b1(
@@ -1012,10 +1072,19 @@ def _read_outcome(
     if not path.exists():
         return None
     try:
-        outcome = LoopReviewOutcome.model_validate_json(
-            read_stable_text(root, path, encoding="utf-8")
-        )
+        raw = read_stable_text(root, path, encoding="utf-8")
     except (OSError, UnicodeError, ValidationError) as exc:
+        raise LoopReviewServiceError("review-outcome-invalid", detail=str(exc)) from exc
+    return _parse_outcome(raw, loop_type, loop_id, round_number)
+
+
+def _parse_outcome(
+    raw: bytes | str, loop_type: LoopReviewType, loop_id: str, round_number: int,
+) -> LoopReviewOutcome:
+    """磁盘和保留原件使用同一个模型及身份解析入口。"""
+    try:
+        outcome = LoopReviewOutcome.model_validate_json(raw)
+    except (ValueError, UnicodeError) as exc:
         raise LoopReviewServiceError("review-outcome-invalid", detail=str(exc)) from exc
     if (
         outcome.loop_type != loop_type
@@ -1346,4 +1415,5 @@ __all__ = [
     "prepare_loop_review",
     "record_loop_review",
     "validate_prepared_outcome_for_close",
+    "validate_preserved_local_pr_review",
 ]

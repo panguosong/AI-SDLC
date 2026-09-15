@@ -337,10 +337,17 @@ def test_frontend_native_r1_repair_refreshes_same_id_and_r2_can_close(
         decision_mode="adaptive-quantified",
         decision_capability="stage-simulation-v1",
     )
-    refreshed = start_frontend_evidence_loop(
-        options, review_input_validator=validate_review_input_for_close
+    from tests.integration.test_quantified_implementation import _cli, _payload
+    from tests.integration.test_stage_quantified_pipeline import (
+        _q004_assert_guidance,
+        _q004_refresh_args,
     )
-    assert refreshed.status == "ready", refreshed.blocker
+
+    refreshed = _payload(_cli(
+        root, *_q004_refresh_args("frontend-evidence", loop_id="stage-browser"), "--json"
+    ))
+    assert refreshed["status"] == "ready", refreshed
+    _q004_assert_guidance(root, "frontend-evidence", refreshed, monkeypatch, expected="loop review")
     run = json.loads((directory / "loop-run.json").read_text())
     assert run["current_round"] == 2
     assert run["created_at"] == original_run["created_at"]
@@ -365,3 +372,41 @@ def test_frontend_native_r1_repair_refreshes_same_id_and_r2_can_close(
     )
     assert closed.closed, closed.blocker
     assert not (directory / "review-outcome-round-3.json").exists()
+
+
+
+def test_q004_frontend_refresh_preserves_selected_guidance(tmp_path, monkeypatch):
+    from tests.integration.test_quantified_implementation import _cli, _payload
+    from tests.integration.test_stage_quantified_pipeline import (
+        _q004_assert_guidance,
+        _q004_loop_bytes,
+        _q004_refresh_args,
+        _q004_reject_corrupt_guidance_after_saved_result,
+    )
+
+    root = frontend_project(tmp_path, monkeypatch)
+    stage = "frontend-evidence"
+    directory = root / ".ai-sdlc/loops" / stage / "stage-browser"
+    before = _q004_loop_bytes(directory)
+    preview_args = _q004_refresh_args(stage, loop_id="q004-first-preview")
+    preview = _payload(_cli(root, *preview_args, "--dry-run", "--json"))
+    assert preview["dry_run"] and "operation=begin" in preview["next_action"]
+    assert not (directory.parent / "q004-first-preview").exists()
+    assert _q004_loop_bytes(directory) == before
+    args = _q004_refresh_args(stage, loop_id="stage-browser")
+    first = _payload(_cli(root, *args, "--json"))
+    assert "operation=begin" in first["next_action"]
+    select(root)
+    context = (directory / "decision-context.json").read_bytes()
+    old_run = json.loads((directory / "loop-run.json").read_bytes())
+    refreshed = _payload(_cli(root, *args, "--json"))
+    _q004_assert_guidance(root, stage, refreshed, monkeypatch, expected="seal-for-review")
+    before = _q004_loop_bytes(directory)
+    preview = _payload(_cli(root, *args, "--dry-run", "--json"))
+    _q004_assert_guidance(root, stage, preview, monkeypatch, expected="seal-for-review")
+    assert preview["dry_run"] and _q004_loop_bytes(directory) == before
+    run = json.loads((directory / "loop-run.json").read_bytes())
+    assert (directory / "decision-context.json").read_bytes() == context
+    for key in ("loop_id", "current_round", "created_at", "decision_started_at_ms"):
+        assert run[key] == old_run[key]
+    _q004_reject_corrupt_guidance_after_saved_result(root, stage, refreshed)

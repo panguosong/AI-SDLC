@@ -1,6 +1,6 @@
 [project]
 name = "ai-sdlc"
-version = "3.1.0"
+version = "3.2.0"
 description = "AI-native SDLC automation framework"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,7 @@ build-backend = "packaging_backend"
 backend-path = ["."]
 
 [tool.ai_sdlc.packaging.force-include]
+"LICENSE" = "ai_sdlc/LICENSE"
 "templates/spec-template.md" = "ai_sdlc/templates/spec-template.md"
 "templates/plan-template.md" = "ai_sdlc/templates/plan-template.md"
 "templates/tasks-template.md" = "ai_sdlc/templates/tasks-template.md"
@@ -59,4 +60,5 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.4",
     "mypy>=1.8",
+    "pytest-xdist>=3.8,<4",
 ]

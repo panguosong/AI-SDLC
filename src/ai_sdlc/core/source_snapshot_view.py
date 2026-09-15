@@ -865,14 +865,14 @@ def _git_input(
 
 def _nul_paths(payload: bytes) -> list[str]:
     return [
-        item.decode("utf-8", errors="strict").replace("\\", "/")
+        item.decode("utf-8", errors="strict")
         for item in payload.split(b"\0")
         if item
     ]
 
 
 def _decode_selected_path(payload: bytes) -> str:
-    return payload.decode("utf-8", errors="strict").replace("\\", "/")
+    return payload.decode("utf-8", errors="strict")
 
 
 __all__ = [

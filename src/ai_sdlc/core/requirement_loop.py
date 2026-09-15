@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -31,7 +32,10 @@ from ai_sdlc.core.loop_models import (
     utc_now_iso,
     validate_decision_identity,
 )
-from ai_sdlc.core.loop_resource_lock import _stage_write_guard
+from ai_sdlc.core.loop_resource_lock import (
+    _ImplementationWriteLockError,
+    _stage_write_guard,
+)
 from ai_sdlc.core.loop_stage_input import (
     preserve_stage_run,
     validate_stage_material_update,
@@ -244,7 +248,13 @@ def start_requirement_loop(
         loop_id = _resolve_loop_id(options.loop_id)
     except ValueError:
         return _start_requirement_loop_locked(options)
-    with _stage_write_guard(options.root.resolve(), "requirement", loop_id):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_stage_write_guard(options.root.resolve(), 'requirement', loop_id))
+        except _ImplementationWriteLockError as exc:
+            return _blocked_requirement_start(loop_id, str(exc)).model_copy(
+                update={"dry_run": options.dry_run}
+            )
         return _start_requirement_loop_locked(replace(options, loop_id=loop_id))
 
 
@@ -541,7 +551,18 @@ def freeze_requirement_loop(
             review_input_validator=review_input_validator,
             reviewed_artifacts=reviewed_artifacts,
         )
-    with _stage_write_guard(root, "requirement", loop_id):
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(_stage_write_guard(root, 'requirement', loop_id))
+        except _ImplementationWriteLockError as exc:
+            return RequirementLoopCommandResult(
+                status=RequirementCommandStatus.BLOCKED,
+                result="Requirement freeze is blocked.",
+                loop_id=loop_id,
+                loop_status=LoopStatus.BLOCKED,
+                blocker=str(exc),
+                next_action="Restore access to the Loop lock directory, then retry the same freeze command.",
+            )
         return _freeze_requirement_loop_locked(
             replace(options, loop_id=loop_id),
             review_input_validator=review_input_validator,

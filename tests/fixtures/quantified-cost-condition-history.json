@@ -1,0 +1,414 @@
+{
+  "schema_version": "stage-simulation-v1",
+  "capability": "stage-simulation-v1",
+  "loop_id": "test",
+  "implementation_input_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "contracts": [
+    {
+      "schema_version": "1",
+      "capability": "stage-simulation-v1",
+      "loop_type": "requirement",
+      "profile_id": "requirement-analysis-v1",
+      "profile_version": "1",
+      "goal_contract": {
+        "goals": [
+          {
+            "id": "g0",
+            "source_ref": "spec",
+            "weight": "1"
+          }
+        ],
+        "obligations": [
+          {
+            "id": "o0",
+            "goal_id": "g0",
+            "statement": "拒绝越权请求",
+            "required": true,
+            "source_ref": "spec",
+            "oracle_kind": "rubric",
+            "pass_rule": "当前材料满足义务",
+            "fail_rule": "存在反例",
+            "unknown_rule": "材料不足",
+            "weight_share": "1"
+          }
+        ]
+      },
+      "criteria": [
+        {
+          "id": "coverage",
+          "goal_shares": [
+            {
+              "goal_id": "g0",
+              "share": "1"
+            }
+          ],
+          "statement": "目标映射",
+          "source_refs": [
+            "spec"
+          ],
+          "applicability": "applicable",
+          "applicability_reason": null,
+          "anchors": [
+            {
+              "level": 0,
+              "statement": "任务锚点 0",
+              "required_supported_ids": []
+            },
+            {
+              "level": 1,
+              "statement": "任务锚点 1",
+              "required_supported_ids": []
+            },
+            {
+              "level": 2,
+              "statement": "任务锚点 2",
+              "required_supported_ids": []
+            },
+            {
+              "level": 3,
+              "statement": "任务锚点 3",
+              "required_supported_ids": []
+            },
+            {
+              "level": 4,
+              "statement": "任务锚点 4",
+              "required_supported_ids": []
+            }
+          ],
+          "target_level": 3,
+          "protected": false,
+          "critical_floor": null,
+          "improvement_direction": null,
+          "count_scope": "rubric",
+          "item_ids": []
+        }
+      ],
+      "time_plan": {
+        "window_seconds": "3600",
+        "scope": "implementation-review-close",
+        "basis_refs": [
+          "spec"
+        ],
+        "assumptions": [
+          "已有环境可用"
+        ],
+        "work_breakdown": [
+          "模拟与评分",
+          "实现",
+          "必要验证和关闭"
+        ]
+      },
+      "simulation_policy": {
+        "max_batches": 2,
+        "max_candidates": 3,
+        "max_judges": 1
+      },
+      "source_refs": [
+        "spec"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "id": "spec",
+      "path": "spec.md",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "locator": "spec",
+      "claim": "冻结目标"
+    }
+  ],
+  "started_at_ms": 1000,
+  "last_observed_at_ms": 3000,
+  "phase": "initial_selected",
+  "pending_batch": null,
+  "comparisons": [
+    {
+      "number": 1,
+      "decision_point": "before-execution",
+      "base_input_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "candidates": [
+        {
+          "candidate_id": "A",
+          "contract_digest": "fc70b9c5b0051ab9a429fdd6057a98adb2a6dc6468d8e2466013a842548b7c1c",
+          "origin": "simulation",
+          "mechanism": "机制 A",
+          "changed_scope": [
+            "request-handler"
+          ],
+          "assumptions": [
+            "范围不变"
+          ],
+          "artifact_sketch": {
+            "goal_mapping": [
+              "o0 映射到访问检查"
+            ],
+            "key_structure": [
+              "先授权后读取"
+            ],
+            "representative_scenarios": [
+              "合法主体可读"
+            ],
+            "failure_paths": [
+              "未授权拒绝"
+            ],
+            "downstream_impacts": [
+              "保留现有消费者"
+            ],
+            "excluded_scope": [
+              "不增加界面"
+            ]
+          },
+          "basis": [
+            {
+              "id": "b",
+              "kind": "logical_projection",
+              "source_ref": null,
+              "locator": "key_structure",
+              "statement": "固定授权边界推演"
+            }
+          ],
+          "execution_preconditions": [
+            {
+              "kind": "authorization",
+              "status": "PASS",
+              "evidence_refs": [
+                "b"
+              ],
+              "reason": "当前前提成立"
+            },
+            {
+              "kind": "safety",
+              "status": "PASS",
+              "evidence_refs": [
+                "b"
+              ],
+              "reason": "当前前提成立"
+            },
+            {
+              "kind": "mandatory_constraints",
+              "status": "PASS",
+              "evidence_refs": [
+                "b"
+              ],
+              "reason": "当前前提成立"
+            }
+          ],
+          "cost_decision_point": "选择完成后执行之前",
+          "future_cost_estimate": {
+            "lower_seconds": "20",
+            "upper_seconds": "30",
+            "scope": "implementation-review-close",
+            "basis_refs": [
+              "b"
+            ],
+            "assumptions": [
+              "含必要验证"
+            ]
+          },
+          "candidate_items": [],
+          "known_required_conflicts": []
+        },
+        {
+          "candidate_id": "B",
+          "contract_digest": "fc70b9c5b0051ab9a429fdd6057a98adb2a6dc6468d8e2466013a842548b7c1c",
+          "origin": "simulation",
+          "mechanism": "机制 B",
+          "changed_scope": [
+            "request-handler"
+          ],
+          "assumptions": [
+            "范围不变"
+          ],
+          "artifact_sketch": {
+            "goal_mapping": [
+              "o0 映射到访问检查"
+            ],
+            "key_structure": [
+              "先授权后读取"
+            ],
+            "representative_scenarios": [
+              "合法主体可读"
+            ],
+            "failure_paths": [
+              "未授权拒绝"
+            ],
+            "downstream_impacts": [
+              "保留现有消费者"
+            ],
+            "excluded_scope": [
+              "不增加界面"
+            ]
+          },
+          "basis": [
+            {
+              "id": "b",
+              "kind": "logical_projection",
+              "source_ref": null,
+              "locator": "key_structure",
+              "statement": "固定授权边界推演"
+            }
+          ],
+          "execution_preconditions": [
+            {
+              "kind": "authorization",
+              "status": "PASS",
+              "evidence_refs": [
+                "b"
+              ],
+              "reason": "当前前提成立"
+            },
+            {
+              "kind": "safety",
+              "status": "PASS",
+              "evidence_refs": [
+                "b"
+              ],
+              "reason": "当前前提成立"
+            },
+            {
+              "kind": "mandatory_constraints",
+              "status": "PASS",
+              "evidence_refs": [
+                "b"
+              ],
+              "reason": "当前前提成立"
+            }
+          ],
+          "cost_decision_point": "选择完成后执行之前",
+          "future_cost_estimate": {
+            "lower_seconds": "20",
+            "upper_seconds": "30",
+            "scope": "implementation-review-close",
+            "basis_refs": [
+              "b"
+            ],
+            "assumptions": [
+              "含必要验证"
+            ]
+          },
+          "candidate_items": [],
+          "known_required_conflicts": []
+        }
+      ],
+      "source_manifest": {
+        "spec.md": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "judge_input_digest": "b15a85e134618bcc793543b5f8957b9e9d3195285b909b092de0ccc4035a81f9",
+      "failures": [],
+      "judgement": {
+        "judge_input_digest": "b15a85e134618bcc793543b5f8957b9e9d3195285b909b092de0ccc4035a81f9",
+        "assessments": [
+          {
+            "candidate_id": "A",
+            "cost_check": "supported",
+            "cost_reason": "预测包含必要验证和关闭，范围与分解一致",
+            "criterion_assessments": [
+              {
+                "criterion_id": "coverage",
+                "lower": 3,
+                "upper": 3,
+                "basis_refs": [
+                  "b"
+                ],
+                "reason": "按冻结目标推演",
+                "items": []
+              }
+            ],
+            "known_required_conflicts": []
+          },
+          {
+            "candidate_id": "B",
+            "cost_check": "supported",
+            "cost_reason": "预测包含必要验证和关闭，范围与分解一致",
+            "criterion_assessments": [
+              {
+                "criterion_id": "coverage",
+                "lower": 3,
+                "upper": 3,
+                "basis_refs": [
+                  "b"
+                ],
+                "reason": "按冻结目标推演",
+                "items": []
+              }
+            ],
+            "known_required_conflicts": []
+          }
+        ],
+        "initial_search_continuation": null
+      },
+      "elapsed_seconds": 2,
+      "outcome": "success",
+      "selection": {
+        "contract_digest": "fc70b9c5b0051ab9a429fdd6057a98adb2a6dc6468d8e2466013a842548b7c1c",
+        "selected_id": null,
+        "basis": null,
+        "reason": "model_plan_not_feasible",
+        "scores": {
+          "A": {
+            "candidate_id": "A",
+            "contract_digest": "fc70b9c5b0051ab9a429fdd6057a98adb2a6dc6468d8e2466013a842548b7c1c",
+            "s_low": "75",
+            "s_high": "75",
+            "u_sim": "0",
+            "targets_met": true,
+            "floor_failures": [],
+            "floor_unknowns": [],
+            "counts": []
+          },
+          "B": {
+            "candidate_id": "B",
+            "contract_digest": "fc70b9c5b0051ab9a429fdd6057a98adb2a6dc6468d8e2466013a842548b7c1c",
+            "s_low": "75",
+            "s_high": "75",
+            "u_sim": "0",
+            "targets_met": true,
+            "floor_failures": [],
+            "floor_unknowns": [],
+            "counts": []
+          }
+        },
+        "eligible_ids": [],
+        "quality_survivors": [],
+        "remaining_ids": [],
+        "excluded": [
+          {
+            "candidate_id": "A",
+            "reason": "time_conditions_mismatch",
+            "criterion_id": null,
+            "witness_id": null
+          },
+          {
+            "candidate_id": "B",
+            "reason": "time_conditions_mismatch",
+            "criterion_id": null,
+            "witness_id": null
+          }
+        ],
+        "limitations": []
+      },
+      "incumbent_id": null,
+      "continuation_requested": false,
+      "continuation_stop_reason": null
+    }
+  ],
+  "initial_selection_id": null,
+  "receipts": [
+    {
+      "request_id": "begin",
+      "request_digest": "7216bd9abf8d14b9d2881ad5eca8d39c6883424d8ac32fcc81045cccc52478ac"
+    },
+    {
+      "request_id": "freeze-comparison",
+      "request_digest": "dd78c035900fdeb0b8c20e12ccf8e6fd435dc8bda5f16a3ca22963c4d0d2d3e0"
+    },
+    {
+      "request_id": "record-comparison",
+      "request_digest": "adc5d51360cfec8feb96d3825fcae986b23562c1cc762de26361e9bb61b47bec"
+    }
+  ],
+  "review_seal": null,
+  "context_digest": "5c683f62e4ab54614e06035bfb2e93872775e3a4e45d5c48680120e5e5d52198",
+  "improvement": null,
+  "conditional_improvement": null
+}

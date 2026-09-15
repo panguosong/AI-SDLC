@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
@@ -17,8 +18,9 @@ from ai_sdlc.utils.helpers import PROJECT_CONFIG_PATH, PROJECT_STATE_PATH
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+R = TypeVar("R")
 _IS_WINDOWS = os.name == "nt"
-_WINDOWS_REPLACE_DELAYS = (0.05, 0.1, 0.2)
+_WINDOWS_IO_DELAYS = (0.05, 0.1, 0.2)
 
 
 class YamlStoreError(Exception):
@@ -51,7 +53,7 @@ class YamlStore:
                 ) from exc
 
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = YamlStore._read_text_with_retry(path)
             data = yaml.safe_load(raw)
             if data is None:
                 data = {}
@@ -67,7 +69,7 @@ class YamlStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         serialized = YamlStore._serialize_model(model)
 
-        if path.exists() and path.read_text(encoding="utf-8") == serialized:
+        if path.exists() and YamlStore._read_text_with_retry(path) == serialized:
             return
 
         temp_path = YamlStore._sibling_temp_path(path)
@@ -100,22 +102,31 @@ class YamlStore:
 
     @staticmethod
     def _replace_with_retry(source: Path, destination: Path) -> None:
+        YamlStore._with_windows_permission_retry(lambda: source.replace(destination))
+
+    @staticmethod
+    def _read_text_with_retry(path: Path) -> str:
+        return YamlStore._with_windows_permission_retry(
+            lambda: path.read_text(encoding="utf-8")
+        )
+
+    @staticmethod
+    def _with_windows_permission_retry(operation: Callable[[], R]) -> R:
+        # Windows 原子替换也会短暂阻断读者；读写共用原有限重试，耗尽仍抛原异常。
         try:
-            source.replace(destination)
-            return
+            return operation()
         except PermissionError:
             if not _IS_WINDOWS:
                 raise
 
-        for delay in _WINDOWS_REPLACE_DELAYS:
+        for delay in _WINDOWS_IO_DELAYS:
             time.sleep(delay)
             try:
-                source.replace(destination)
-                return
+                return operation()
             except PermissionError:
                 continue
 
-        source.replace(destination)
+        return operation()
 
 
 # ── project config helpers ──

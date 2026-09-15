@@ -6,7 +6,7 @@ on:
       tag:
         description: Published release tag described by the user guide.
         required: true
-        default: "v3.1.0"
+        default: "v3.2.0"
   pull_request:
     paths:
       - "src/**"
@@ -46,7 +46,7 @@ jobs:
             runner: ubuntu-latest
             project_shell: bash
     env:
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.0' || inputs.tag }}
       PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
       PROJECT_SHELL: ${{ matrix.project_shell }}
@@ -81,16 +81,16 @@ jobs:
           new_project_root="${HOME}/projects/posix-online-empty-project"
           existing_project_root="${HOME}/projects/posix-online-existing-project"
           source_kind="remote-release-tag"
-          source_repository="SinclairPan/Ai_AutoSDLC"
+          source_repository="panguosong/AI-SDLC"
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
             source_kind="remote-pull-request-head"
             source_repository="${PR_HEAD_REPOSITORY}"
             remote_sha="${PR_HEAD_SHA}"
           else
-            tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
             if [[ -z "${tag_line}" ]]; then
-              tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+              tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
             fi
             remote_sha="${tag_line%%[[:space:]]*}"
             test -n "${remote_sha}"
@@ -188,7 +188,7 @@ jobs:
     container:
       image: debian:12-slim
     env:
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.0' || inputs.tag }}
       PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
       PROJECT_STATE: ${{ matrix.project_state }}
@@ -238,15 +238,15 @@ jobs:
           export SHELL="/bin/bash"
           mkdir -p "${evidence_root}" "${HOME}"
           : > "${HOME}/.bashrc"
-          source_repository="SinclairPan/Ai_AutoSDLC"
+          source_repository="panguosong/AI-SDLC"
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
             source_repository="${PR_HEAD_REPOSITORY}"
             remote_sha="${PR_HEAD_SHA}"
           else
-            tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
             if [[ -z "${tag_line}" ]]; then
-              tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+              tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
             fi
             remote_sha="${tag_line%%[[:space:]]*}"
             test -n "${remote_sha}"
@@ -561,7 +561,7 @@ jobs:
           grep -F \
             'Missing-Python online bootstrap is certified only for Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc' \
             "${evidence_root}/install-online.txt"
-          grep -F 'ai-sdlc-offline-3.1.0-linux-amd64.tar.gz' \
+          grep -F 'ai-sdlc-offline-3.2.0-linux-amd64.tar.gz' \
             "${evidence_root}/install-online.txt"
           grep -F 'route 6/12' "${evidence_root}/install-online.txt"
           test "${python_package_install_calls}" -eq 0
@@ -581,7 +581,7 @@ jobs:
           test "${installer_failed_closed}" = "true"
           test "${venv_created}" = "false"
 
-          printf '{"platform":"ubuntu-22.04","project_state":"%s","installer_failed_closed":%s,"python_package_install_calls":%s,"venv_created":%s,"project_mutated":%s,"offline_recovery_asset":"ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"}\n' \
+          printf '{"platform":"ubuntu-22.04","project_state":"%s","installer_failed_closed":%s,"python_package_install_calls":%s,"venv_created":%s,"project_mutated":%s,"offline_recovery_asset":"ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"}\n' \
             "${PROJECT_STATE}" \
             "${installer_failed_closed}" \
             "${python_package_install_calls}" \
@@ -613,7 +613,7 @@ jobs:
             runner: ubuntu-latest
             project_shell: bash
     env:
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.0' || inputs.tag }}
       ASSET_OS: ${{ matrix.asset_os }}
       ASSET_MACHINE: ${{ matrix.asset_machine }}
       PROJECT_SHELL: ${{ matrix.project_shell }}
@@ -700,10 +700,10 @@ jobs:
           else
             curl --fail --location --retry 3 \
               --output "${download_root}/${PACKAGE_NAME}" \
-              "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME"
+              "https://github.com/panguosong/AI-SDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME"
             curl --fail --location --retry 3 \
               --output "${download_root}/${PACKAGE_NAME}.sha256" \
-              "https://github.com/SinclairPan/Ai_AutoSDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME.sha256"
+              "https://github.com/panguosong/AI-SDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME.sha256"
           fi
           printf 'release_tag=%s; package_source=%s\n' "${RELEASE_TAG}" "${package_source}" \
             > "${evidence_root}/scenario.txt"
@@ -956,7 +956,7 @@ jobs:
             elif [[ "${EXPECTED_OUTCOME}" == "fail" ]]; then
               test "${guard_exit}" -ne 0
               printf '%s\n' "${guard_output}" | \
-                grep -F "不得使用 ai-sdlc-offline-3.1.0-linux-amd64.tar.gz"
+                grep -F "不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
             else
               test "${guard_exit}" -ne 0
               printf '%s\n' "${guard_output}" | \
@@ -1013,7 +1013,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.1.0' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.0' || inputs.tag }}
       PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
     steps:
@@ -1029,20 +1029,20 @@ jobs:
           replay_root="${RUNNER_TEMP}/opensuse-online-route-replay"
           evidence_root="${RUNNER_TEMP}/opensuse-online-route-evidence"
           mkdir -p "${replay_root}" "${evidence_root}"
-          source_repository="SinclairPan/Ai_AutoSDLC"
+          source_repository="panguosong/AI-SDLC"
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
             source_repository="${PR_HEAD_REPOSITORY}"
             remote_sha="${PR_HEAD_SHA}"
           else
-            tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
             if [[ -z "${tag_line}" ]]; then
-              tag_line="$(git ls-remote https://github.com/SinclairPan/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+              tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
             fi
             remote_sha="${tag_line%%[[:space:]]*}"
             test -n "${remote_sha}"
           fi
-          guide_installer_url="https://raw.githubusercontent.com/SinclairPan/Ai_AutoSDLC/v3.1.0/packaging/install_online.sh"
+          guide_installer_url="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
           candidate_installer_url="https://raw.githubusercontent.com/${source_repository}/${remote_sha}/packaging/install_online.sh"
 
           for project_state in "new" "existing"; do
@@ -1096,7 +1096,7 @@ jobs:
             >> /evidence/install.txt 2>&1
           /tmp/ai-sdlc-venv/bin/python -m ai_sdlc --version \
             > /evidence/version.txt
-          grep -F '3.1.0' /evidence/version.txt
+          grep -F '3.2.0' /evidence/version.txt
           printf '{"distro":"opensuse-leap","python":"%s","ca_bundle":"/etc/ssl/ca-bundle.pem","source_revision":"%s","replay_count":8}\n' \
             "$(python3.11 --version 2>&1)" "${SOURCE_REVISION}" \
             > /evidence/receipt.json

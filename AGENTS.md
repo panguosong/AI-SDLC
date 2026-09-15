@@ -44,3 +44,11 @@ Requirement、Design Contract、Implementation、Frontend Evidence、Local PR Re
 请在修改 `specs/` 与 `.ai-sdlc/` 下文档时遵守上述入口。
 
 （自动安装；不覆盖已有同名自定义文件。）
+
+<!-- AI-SDLC managed shell guidance -->
+Project preferred shell: PowerShell.
+Use PowerShell syntax for commands, env vars, pipes, and filesystem operations. Do not start with POSIX shell syntax and then retry in PowerShell.
+
+## 本仓库 v3.2.0 本次发行例外
+
+本次仓库自开发发行按维护者 2026-09-15 的明确决定，使用已正常关闭并冻结的 P1 候选，在单一隔离发布 checkout 中普通提交，再由真实 GitHub PR、当前提交的 Codex review、完整 CI、合并及发行验收承接发布验证。已取消的本地整包 PR 复评、`pr-review` 原生提交和 Local PR 原 Close 不再作为本次发布前置；历史失败与成本保留。具体边界见 [开发与发布合同](docs/框架自迭代开发与发布约定.md#v320-本次发行路径替代)。本例外只适用于本仓库这次发行，不改变上述普通用户的动态复核、证据校验和 Close。

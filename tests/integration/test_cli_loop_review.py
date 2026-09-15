@@ -37,6 +37,97 @@ runner = CliRunner()
 pytestmark = pytest.mark.usefixtures("isolated_cli_cwd")
 
 
+@pytest.mark.parametrize("quantified", [False, True])
+def test_local_agent_pr_read_path_keeps_internal_authority_private(
+    tmp_path, monkeypatch, quantified
+):
+    import sys
+
+    import ai_sdlc.cli.loop_review_cmd as command
+    from ai_sdlc.core import pr_review_service as service
+    from ai_sdlc.core.loop_simulation_models import StageScoreContract
+    from tests.integration import test_stage_pr_review_pipeline as preparation
+    from tests.integration.test_pr_review_diff_capacity import (
+        _v12_case,
+        _weekend_protocol_review,
+    )
+    from tests.unit.test_loop_simulation import assessment_data, candidate_data
+    from tests.unit.test_loop_simulation_models import contract_data
+
+    if quantified:
+        root, reviewer, clean, options = _v12_case(tmp_path)
+        reviewer.write_text(clean)
+        started = service.start_pr_review(options)
+        assert started.status == "started", started
+        directory = Path(started.review_run_path).parent
+        monkeypatch.setattr(preparation, "REVIEW_ID", started.review_id)
+        data = contract_data()
+        data.update(capability="stage-simulation-v1", loop_type="local-pr-review",
+                    profile_id="delivery-readiness-v1")
+        data["time_plan"].update(scope="local-pr-review-close",
+                                 work_breakdown=["当前树风险分析", "实际验证", "独立评审与原Close"])
+        contract = StageScoreContract.model_validate(data)
+        preparation._prepare(root, {"operation": "begin", "request_id": "begin",
+            "contracts": [data], "sources": [{"id": "spec", "path": "README.md",
+                "sha256": hashlib.sha256((root / "README.md").read_bytes()).hexdigest(),
+                "locator": "current implementation", "claim": "当前实现的验收义务"}]})
+        frozen = preparation._prepare(root, {"operation": "freeze-comparison",
+            "request_id": "freeze", "candidates": [candidate_data(contract, "current-staged-tree", seconds=None)]})
+        preparation._prepare(root, {"operation": "record-comparison", "request_id": "record",
+            "judgement": {"judge_input_digest": frozen["judge_input"]["judge_input_digest"],
+                          "assessments": [assessment_data("current-staged-tree", 4, 4)]}})
+    else:
+        root, directory, _, started = _weekend_protocol_review(
+            tmp_path, exit_code=0, verdict="clean"
+        )
+    verified = service.verify_pr_review_command(
+        root, cwd=".", argv=(sys.executable, "-c", "print('ordinary actual verification')")
+    )
+    assert verified.status == "ready", verified
+    if quantified:
+        preparation._prepare(root, {"operation": "seal-for-review", "request_id": "seal"})
+
+    relative = (directory / "review-pack.json").relative_to(root).as_posix()
+    invocation = directory / "reviewer-invocation.json"
+    invocation_key = invocation.relative_to(root).as_posix()
+    expected = command.resolve_review_input(root, loop_type="local-pr-review", loop_id=started.loop_id)
+    with patch("ai_sdlc.cli.loop_review_cmd.find_project_root", return_value=root):
+        result = runner.invoke(app, ["loop", "review", "--type", "local-pr-review",
+            "--loop-id", started.loop_id, "--expect-digest", expected.input_digest,
+            "--read-path", relative, "--json"])
+    assert result.exit_code == 0, result.output
+    snapshot = json.loads(result.output)["review_snapshot"]
+    assert snapshot["path"] == relative
+    assert snapshot["content"].encode() == (root / relative).read_bytes()
+    captured = {}
+    assert command.resolve_review_input(root, loop_type="local-pr-review", loop_id=started.loop_id,
+        captured_artifacts=captured, capture_paths=[relative]) == expected
+    assert captured == {relative: (root / relative).read_bytes()}
+    for capture_all in (False, True):
+        complete = {}
+        assert command.resolve_review_input(root, loop_type="local-pr-review", loop_id=started.loop_id,
+            captured_artifacts=complete, capture_all=capture_all) == expected
+        assert complete[invocation_key] == invocation.read_bytes()
+    # 显式返回一件不削弱内部身份核验，也不允许读取非输入文件。
+    with pytest.raises((ValueError, ReviewInputGuardError)):
+        command.resolve_review_input(root, loop_type="local-pr-review", loop_id=started.loop_id,
+            captured_artifacts={}, capture_paths=[".ai-sdlc/not-a-review-input.json"])
+    original = invocation.read_bytes()
+    invalid_invocation = json.loads(original)
+    invalid_invocation["exit_code"] = 23
+    for changed in (None, json.dumps(invalid_invocation).encode()):
+        if changed is None:
+            invocation.unlink()
+        else:
+            invocation.write_bytes(changed)
+        try:
+            with pytest.raises((ValueError, ReviewInputGuardError)):
+                command.resolve_review_input(root, loop_type="local-pr-review", loop_id=started.loop_id,
+                    captured_artifacts={}, capture_paths=[relative])
+        finally:
+            invocation.write_bytes(original)
+
+
 @pytest.fixture
 def b1_review_project(tmp_path: Path):
     from ai_sdlc.core.implementation_models import ImplementationStartOptions
@@ -100,6 +191,50 @@ def test_b1_review_snapshot_binds_complete_same_read_material(b1_review_project)
     assert before == {
         path: path.read_bytes() for path in root.rglob("*") if path.is_file()
     }
+
+
+def test_legacy_review_resolvers_do_not_construct_quantified_stage_host(
+    tmp_path, monkeypatch
+):
+    import ai_sdlc.cli.loop_review_cmd as review_command
+    import ai_sdlc.cli.loop_stage_cmd as stage_command
+
+    started = start_requirement_loop(
+        RequirementStartOptions(
+            root=tmp_path,
+            loop_id="legacy-snapshot",
+            idea="记录正常文件保存结果",
+            acceptance=("保存成功后可重新读取",),
+        )
+    )
+    assert started.status == "ready"
+
+    def unexpected_host(*args, **kwargs):
+        pytest.fail("旧模式不应构造阶段量化宿主")
+
+    monkeypatch.setattr(stage_command, "resolve_stage_decision_host", unexpected_host)
+    assert (
+        stage_command.read_stage_decision_context(
+            tmp_path, "requirement", "legacy-snapshot", purpose="review"
+        )
+        is None
+    )
+    assert (
+        review_command.resolve_b1_review_snapshot(
+            tmp_path, "legacy-snapshot", 1, loop_type="requirement"
+        )
+        is None
+    )
+    reviewed = review_command.resolve_review_input(
+        tmp_path,
+        loop_type="requirement",
+        loop_id="legacy-snapshot",
+        review_round_number=1,
+    )
+    assert reviewed.loop_id == "legacy-snapshot"
+    assert not any(
+        path.endswith("decision-context.json") for path in reviewed.artifact_paths
+    )
 
 
 def test_b1_review_default_close_capture_includes_exact_context(b1_review_project):
@@ -549,6 +684,9 @@ def test_loop_review_maps_only_substantive_stage_artifacts(
         content = "{}" if filename.endswith(".json") else f"{filename}\n"
         (loop_dir / filename).write_text(content, encoding="utf-8")
     expected_upstream = _write_predecessor_fixture(tmp_path, loop_type, loop_dir)
+    expected_artifacts = set(filenames)
+    if loop_type == "design-contract":
+        expected_artifacts.update({"spec.md", "plan.md", "tasks.md"})
 
     with patch("ai_sdlc.cli.loop_review_cmd.find_project_root", return_value=tmp_path):
         result = runner.invoke(
@@ -570,7 +708,7 @@ def test_loop_review_maps_only_substantive_stage_artifacts(
     assert payload["loop_type"] == loop_type
     assert payload["round_number"] == 1
     assert payload["review_status"] == "review_missing"
-    assert {Path(path).name for path in payload["artifact_paths"]} == set(filenames)
+    assert {Path(path).name for path in payload["artifact_paths"]} == expected_artifacts
     assert {Path(path).name for path in payload["upstream_context_paths"]} == (
         expected_upstream
     )
@@ -1649,9 +1787,8 @@ def test_stage_review_binds_recursive_predecessor_evidence(tmp_path: Path) -> No
     ):
         content = "{}" if filename.endswith(".json") else filename
         (requirement_dir / filename).write_text(content, encoding="utf-8")
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": "requirement-001"}),
-        encoding="utf-8",
+    _write_legacy_design_input(
+        tmp_path, design_dir, {"requirement_loop_id": "requirement-001"}
     )
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text(filename, encoding="utf-8")
@@ -1693,6 +1830,9 @@ def test_stage_review_binds_recursive_predecessor_evidence(tmp_path: Path) -> No
         "design-contract-input.json",
         "design-contract-report.json",
         "design-contract-report.md",
+        "spec.md",
+        "plan.md",
+        "tasks.md",
         "implementation-input.json",
         "implementation-report.json",
         "implementation-report.md",
@@ -1779,16 +1919,8 @@ def test_stage_review_binds_each_stage_source_material(tmp_path: Path) -> None:
         (requirement_dir / filename).write_text(filename, encoding="utf-8")
 
     design_dir = loop_dirs["design-contract"]
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps(
-            {
-                "requirement_loop_id": "requirement-001",
-                "spec_path": "specs/demo/spec.md",
-                "plan_path": "specs/demo/plan.md",
-                "tasks_path": "specs/demo/tasks.md",
-            }
-        ),
-        encoding="utf-8",
+    _write_legacy_design_input(
+        tmp_path, design_dir, {"requirement_loop_id": "requirement-001"}
     )
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
@@ -1982,14 +2114,8 @@ def test_stage_review_rejects_symlink_source_material(tmp_path: Path) -> None:
         "design-contract",
         "design-symlink-001",
     )
-    (loop_dir / "design-contract-input.json").write_text(
-        json.dumps(
-            {
-                "requirement_loop_id": "",
-                "spec_path": linked_spec.relative_to(tmp_path).as_posix(),
-            }
-        ),
-        encoding="utf-8",
+    _write_legacy_design_input(
+        tmp_path, loop_dir, {"spec_path": linked_spec.relative_to(tmp_path).as_posix()}
     )
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (loop_dir / filename).write_text("{}", encoding="utf-8")
@@ -2057,9 +2183,7 @@ def test_stage_review_keeps_symlink_when_scope_also_matches_target(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2105,9 +2229,7 @@ def test_implementation_review_represents_deleted_declared_scope(
         tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-delete-001"
     )
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
     loop_dir = _write_stage_current_state(
@@ -2151,9 +2273,7 @@ def test_implementation_review_represents_deleted_declared_scope(
 def test_implementation_review_binds_repository_evidence_files(tmp_path: Path) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2216,9 +2336,7 @@ def test_implementation_review_binds_repository_evidence_directories(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2273,9 +2391,7 @@ def test_implementation_review_rejects_nested_evidence_directory_symlink(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2323,9 +2439,7 @@ def test_implementation_review_rejects_escaped_evidence_symlink(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2374,9 +2488,7 @@ def test_implementation_review_does_not_scan_through_ancestor_symlink(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}), encoding="utf-8"
-    )
+    _write_legacy_design_input(tmp_path, design_dir)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -3076,6 +3188,60 @@ def _write_legacy_implementation_input(loop_dir: Path, payload: dict) -> None:
     )
 
 
+def _write_legacy_design_input(
+    root: Path, loop_dir: Path, payload: dict | None = None
+) -> None:
+    from ai_sdlc.core.design_contract_models import DesignContractInput
+    from ai_sdlc.core.design_contract_store import design_contract_input_digest
+    from ai_sdlc.core.loop_models import LoopRound, LoopRun
+
+    # 映射测试不伪造评审通过；只提供可读取的原阶段身份与真实来源字节。
+    work_item = root / "specs/demo"
+    work_item.mkdir(parents=True, exist_ok=True)
+    fields = {}
+    for name in ("spec", "plan", "tasks"):
+        path = work_item / f"{name}.md"
+        if not path.exists():
+            path.write_text(f"# {name}\n", encoding="utf-8")
+        fields[f"{name}_path"] = path.relative_to(root).as_posix()
+        fields[f"{name}_digest"] = (
+            "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+    value = DesignContractInput.model_validate(
+        {
+            "loop_id": loop_dir.name,
+            "work_item_id": "demo",
+            "work_item_path": "specs/demo",
+            **fields,
+            **(payload or {}),
+        }
+    )
+    run_path = loop_dir / "loop-run.json"
+    run_payload = (
+        json.loads(run_path.read_bytes())
+        if run_path.exists()
+        else {
+            "loop_id": loop_dir.name,
+            "loop_type": "design-contract",
+            "current_round": 1,
+        }
+    )
+    run_payload.update(
+        work_item_id=value.work_item_id,
+        input_digest=design_contract_input_digest(value),
+        rounds=[
+            LoopRound(round_number=number).model_dump(mode="json")
+            for number in range(1, run_payload["current_round"] + 1)
+        ],
+    )
+    run_path.write_text(
+        LoopRun.model_validate(run_payload).model_dump_json(), encoding="utf-8"
+    )
+    (loop_dir / "design-contract-input.json").write_text(
+        value.model_dump_json(), encoding="utf-8"
+    )
+
+
 def _write_stage_current_state(
     root: Path,
     loop_type: str,
@@ -3109,18 +3275,12 @@ def _write_predecessor_fixture(
     if loop_type == "requirement":
         return set()
     if loop_type == "design-contract":
-        (loop_dir / "design-contract-input.json").write_text(
-            json.dumps({"requirement_loop_id": ""}),
-            encoding="utf-8",
-        )
+        _write_legacy_design_input(root, loop_dir)
         return set()
 
     design_dir = root / ".ai-sdlc" / "loops" / "design-contract" / "design-upstream"
     design_dir.mkdir(parents=True)
-    (design_dir / "design-contract-input.json").write_text(
-        json.dumps({"requirement_loop_id": ""}),
-        encoding="utf-8",
-    )
+    _write_legacy_design_input(root, design_dir)
     design_files = {
         "design-contract-input.json",
         "design-contract-report.json",
@@ -3132,7 +3292,7 @@ def _write_predecessor_fixture(
         _write_legacy_implementation_input(
             loop_dir, {"design_contract_loop_id": "design-upstream"}
         )
-        return design_files
+        return design_files | {"spec.md", "plan.md", "tasks.md"}
 
     implementation_dir = (
         root / ".ai-sdlc" / "loops" / "implementation" / "implementation-upstream"
@@ -3156,7 +3316,7 @@ def _write_predecessor_fixture(
         json.dumps({"implementation_loop_id": "implementation-upstream"}),
         encoding="utf-8",
     )
-    return design_files | implementation_files
+    return design_files | implementation_files | {"spec.md", "plan.md", "tasks.md"}
 
 
 def _git(root: Path, *args: str) -> str:
@@ -3167,3 +3327,293 @@ def _git(root: Path, *args: str) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_design_review_keeps_legacy_mapping_without_spec_digest(tmp_path, explicit_null):
+    loop_dir = _write_stage_current_state(tmp_path, "design-contract", "legacy-mapping")
+    _write_legacy_design_input(tmp_path, loop_dir)
+    for filename in ("design-contract-report.json", "design-contract-report.md"):
+        (loop_dir / filename).write_text("{}", encoding="utf-8")
+    input_path = loop_dir / "design-contract-input.json"
+    payload = json.loads(input_path.read_bytes())
+    payload.pop("spec_digest")
+    if explicit_null:
+        payload.update(
+            verification_capability=None,
+            verification_contract_ref=None,
+            verification_contract_digest=None,
+        )
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    reviewed = resolve_review_input(
+        tmp_path, loop_type="design-contract", loop_id="legacy-mapping"
+    )
+
+    assert {payload[key] for key in ("spec_path", "plan_path", "tasks_path")} <= set(
+        reviewed.artifact_paths
+    )
+    assert not any("decision-context" in path for path in reviewed.artifact_paths)
+    assert before == {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"verification_capability": ""},
+        {"verification_capability": {}},
+        {"verification_contract_ref": "contract.json"},
+        {
+            "verification_capability": "counterexample-acceptance-v1",
+            "verification_contract_ref": "contract.json",
+            "verification_contract_digest": "a" * 64,
+        },
+    ],
+    ids=["empty-capability", "object-capability", "partial-ref", "legacy-conflict"],
+)
+def test_design_review_rejects_nonnull_invalid_verification_binding(tmp_path, binding):
+    loop_dir = _write_stage_current_state(tmp_path, "design-contract", "invalid-binding")
+    _write_legacy_design_input(tmp_path, loop_dir)
+    for filename in ("design-contract-report.json", "design-contract-report.md"):
+        (loop_dir / filename).write_text("{}", encoding="utf-8")
+    input_path = loop_dir / "design-contract-input.json"
+    payload = json.loads(input_path.read_bytes())
+    payload.update(binding)
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError):
+        resolve_review_input(
+            tmp_path, loop_type="design-contract", loop_id="invalid-binding"
+        )
+
+    assert before == {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+
+def test_frontend_review_keeps_opaque_legacy_implementation_predecessor(tmp_path):
+    loop_dir = _write_stage_current_state(
+        tmp_path, "frontend-evidence", "frontend-legacy-predecessor"
+    )
+    _write_predecessor_fixture(tmp_path, "frontend-evidence", loop_dir)
+    for filename in (
+        "frontend-evidence-snapshot.json",
+        "frontend-evidence-report.json",
+        "frontend-evidence-report.md",
+    ):
+        (loop_dir / filename).write_text("{}", encoding="utf-8")
+    input_path = (
+        tmp_path / ".ai-sdlc/loops/implementation/implementation-upstream"
+        / "implementation-input.json"
+    )
+    payload = json.loads(input_path.read_bytes())
+    payload.pop("work_item_id")
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    reviewed = resolve_review_input(
+        tmp_path, loop_type="frontend-evidence", loop_id="frontend-legacy-predecessor"
+    )
+
+    assert input_path.relative_to(tmp_path).as_posix() in reviewed.upstream_context_paths
+    assert "specs/demo/spec.md" in reviewed.upstream_context_paths
+    assert before == {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+
+def test_implementation_material_keeps_upstream_verification_binding(tmp_path):
+    import ai_sdlc.cli.loop_review_cmd as command
+
+    design_dir = _write_stage_current_state(tmp_path, "design-contract", "bound-design")
+    _write_legacy_design_input(
+        tmp_path,
+        design_dir,
+        {
+            "decision_mode": "adaptive-quantified",
+            "decision_capability": "stage-simulation-v1",
+            "verification_capability": "counterexample-acceptance-v1",
+            "verification_contract_ref": "specs/demo/verification.json",
+            "verification_contract_digest": "a" * 64,
+        },
+    )
+    loop_dir = _write_stage_current_state(tmp_path, "implementation", "missing-binding")
+    _write_legacy_implementation_input(
+        loop_dir, {"design_contract_loop_id": "bound-design"}
+    )
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match="upstream-verification-identity-mismatch"):
+        command._stage_source_material(tmp_path, "implementation", loop_dir)
+
+    assert before == {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("consumer", ["implementation-material", "frontend-review"])
+def test_weekend_legacy_predecessor_requires_completed_design_publication(
+    tmp_path, consumer
+):
+    import ai_sdlc.cli.loop_review_cmd as command
+    from ai_sdlc.core.design_contract_store import DESIGN_CHECK_PENDING
+
+    loop_type = (
+        "implementation" if consumer == "implementation-material" else "frontend-evidence"
+    )
+    loop_id = "legacy-pending-predecessor"
+    loop_dir = _write_stage_current_state(tmp_path, loop_type, loop_id)
+    _write_predecessor_fixture(tmp_path, loop_type, loop_dir)
+    if loop_type == "implementation":
+        (loop_dir / "verification-evidence.json").write_text("{}", encoding="utf-8")
+    if loop_type == "frontend-evidence":
+        for filename in (
+            "frontend-evidence-snapshot.json",
+            "frontend-evidence-report.json",
+            "frontend-evidence-report.md",
+        ):
+            (loop_dir / filename).write_text("{}", encoding="utf-8")
+    pending = (
+        tmp_path / ".ai-sdlc/loops/design-contract/design-upstream" / DESIGN_CHECK_PENDING
+    )
+    pending.write_text("{}", encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    with pytest.raises((ValueError, ReviewInputGuardError), match="publication-pending"):
+        if consumer == "implementation-material":
+            command._stage_source_material(tmp_path, loop_type, loop_dir)
+        else:
+            resolve_review_input(tmp_path, loop_type=loop_type, loop_id=loop_id)
+
+    assert before == {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+
+def _released_plain_pr_input(root, *, loop_type, loop_id, review_round_number=None):
+    import ai_sdlc.cli.loop_review_cmd as command
+    from ai_sdlc.core.review_kernel import build_review_input
+
+    # v3.1.0 的普通材料算法独立固定；未变化的摘要内核不复制一份。
+    assert loop_type == "local-pr-review"
+    directory, _, run_path = command._find_local_review_dir(root, loop_id)
+    pack_path = directory / "review-pack.json"
+    pack = command._read_json_object(root, pack_path)
+    command._require_local_review_verification(root, directory, pack)
+    artifacts = [pack_path, directory / "findings.json"]
+    artifacts.extend(
+        directory / name for name in ("resolution.yaml", "verification-evidence.json")
+        if (directory / name).is_file()
+    )
+    artifacts.append(command._local_review_diff(root, pack_path))
+    assert command._read_pr_stage_context(root, run_path)[1] is None
+    return build_review_input(
+        root, loop_id=loop_id, loop_type=loop_type,
+        round_number=review_round_number or command._read_round_number(root, run_path),
+        artifact_paths=artifacts, upstream_context_paths=[],
+        risk_signals=[*command._content_risk_signals(root, artifacts),
+                      *command._local_review_source_risk_signals(root, pack_path)],
+    )
+
+
+@pytest.mark.parametrize("final_round", [1, 2])
+def test_weekend_released_completed_review_keeps_digest_and_closes(
+    tmp_path, monkeypatch, final_round
+):
+    import sys
+
+    import ai_sdlc.cli.loop_review_cmd as command
+    from ai_sdlc.core import pr_review_service as service
+    from ai_sdlc.core.loop_review_service import (
+        RecordLoopReviewOptions,
+        record_loop_review,
+    )
+    from tests.integration.test_pr_review_diff_capacity import _weekend_protocol_review
+
+    root, directory, reviewer, started = _weekend_protocol_review(
+        tmp_path, exit_code=0, verdict="clean"
+    )
+
+    def verify():
+        result = service.verify_pr_review_command(
+            root, cwd=".", argv=(sys.executable, "-c", "print('ordinary verification')"),
+        )
+        assert result.status == "ready", result
+
+    verify()
+    expert_dir = directory / "legacy-expert-inputs"
+    expert_dir.mkdir()
+    with monkeypatch.context() as legacy:
+        legacy.setattr(command, "resolve_review_input", _released_plain_pr_input)
+        for number in range(1, final_round + 1):
+            prepared, _ = command.prepare_current_loop_review(
+                root, "local-pr-review", started.loop_id
+            )
+            old = prepared.review_input
+            assert old.round_number == number
+            paths = _write_cli_expert_results(
+                expert_dir, old.model_dump(),
+                severity="important" if number < final_round else None,
+            )
+            if number < final_round:
+                for path in paths:
+                    execution = json.loads(path.read_bytes())
+                    for finding in execution["findings"]:
+                        finding.update(location="README.md:1", summary="Document the saved output.",
+                                       recommendation="Add the saved output description.")
+                    path.write_text(json.dumps(execution))
+            recorded = record_loop_review(
+                RecordLoopReviewOptions(
+                    root=root, loop_type="local-pr-review", loop_id=started.loop_id,
+                    expected_digest=old.input_digest, result_paths=tuple(paths),
+                ),
+                loop_dir=directory,
+                input_resolver=lambda round_number: _released_plain_pr_input(
+                    root, loop_type="local-pr-review", loop_id=started.loop_id,
+                    review_round_number=round_number,
+                ),
+            )
+            assert recorded.status == ("needs_fix" if number < final_round else "passed")
+            if number < final_round:
+                (root / "README.md").write_text("# Current ordinary implementation\nSaved output is available.\n")
+                _git(root, "add", "README.md")
+                rerun = service.rerun_pr_review(root, provider_command=[sys.executable, str(reviewer)])
+                assert rerun.status == "started", rerun
+                verify()
+
+    outcomes = {p: p.read_bytes() for p in directory.glob("review-outcome-round-*.json")}
+    current, _ = command.prepare_current_loop_review(root, "local-pr-review", started.loop_id)
+    assert current.status == "passed", current
+    assert current.review_input == old
+    invocation_key = (directory / "reviewer-invocation.json").relative_to(root).as_posix()
+    for capture_all in (False, True):
+        captured = {}
+        assert command.resolve_review_input(
+            root, loop_type="local-pr-review", loop_id=started.loop_id,
+            review_round_number=final_round, captured_artifacts=captured, capture_all=capture_all,
+        ) == old
+        assert captured[invocation_key] == (root / invocation_key).read_bytes()
+        assert invocation_key not in old.artifact_paths
+        run, _ = service._load_current_review_run(root)
+        pack = service._load_review_pack(root, run.review_pack_path)
+        service.read_pr_recovery_originals(root, run, pack, reviewed_artifacts=captured).assert_unchanged()
+        captured.pop(invocation_key)
+        with pytest.raises(ValueError, match="missing-from-capture"):
+            service.read_pr_recovery_originals(root, run, pack, reviewed_artifacts=captured)
+    committed = service.commit_pr_review(root, message="deliver reviewed legacy result")
+    assert committed.status == "ready", committed
+    closed = service.close_pr_review(
+        root, expected_review_id=started.review_id, expected_loop_id=started.loop_id,
+        expected_review_digest=old.input_digest,
+        review_input_validator=command.validate_review_input_for_close,
+    )
+    assert closed.status == "closed" and closed.verdict == "fully_clean", closed
+    proof = service.read_verified_delivery_commit(root)
+    assert invocation_key in dict(proof.artifact_digests)
+    with service.verified_delivery_read_scope(root):
+        assert service.read_verified_delivery_commit(root) == proof
+    assert outcomes == {p: p.read_bytes() for p in outcomes}

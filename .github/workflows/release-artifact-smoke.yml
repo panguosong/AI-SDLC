@@ -6,7 +6,11 @@ on:
       tag:
         description: Release tag to verify.
         required: true
-        default: v3.1.0
+        default: v3.2.0
+      assurance_run_id:
+        description: Compatibility Gate run; otherwise read the Release assurance marker.
+        required: false
+        type: string
   release:
     types:
       - published
@@ -19,7 +23,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-assurance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Require tested release tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSURANCE_RUN_ID: ${{ inputs.assurance_run_id }}
+          AI_SDLC_RELEASE_BODY: ${{ github.event.release.body }}
+        run: >-
+          python scripts/ci_static_assurance.py release-check
+          --repository "${GITHUB_REPOSITORY}" --run-id "${ASSURANCE_RUN_ID}"
+          --output release-assurance.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: published-release-assurance
+          path: release-assurance.json
+          if-no-files-found: error
+
   windows-zip:
+    needs: release-assurance
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -163,6 +197,7 @@ jobs:
           if-no-files-found: error
 
   posix-tar:
+    needs: release-assurance
     name: ${{ matrix.asset_os }} tar.gz
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30

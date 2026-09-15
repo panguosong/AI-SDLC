@@ -12,6 +12,30 @@ from ai_sdlc.core.stable_file_read import read_stable_bytes
 STAGE_CAPABILITY = "stage-simulation-v1"
 
 
+def validate_verification_identity(stage_input):
+    """反例能力与决策能力正交；省略全部字段才表示原有输入。"""
+    from ai_sdlc.core.counterexample_models import (
+        VERIFICATION_CAPABILITY,
+        project_relative_path,
+    )
+
+    values = (
+        stage_input.verification_capability,
+        stage_input.verification_contract_ref,
+        stage_input.verification_contract_digest,
+    )
+    if all(value is None for value in values):
+        return
+    if not all(values) or values[0] != VERIFICATION_CAPABILITY:
+        raise ValueError("counterexample-verification-identity-incomplete")
+    if (
+        stage_input.decision_mode != "adaptive-quantified"
+        or stage_input.decision_capability != STAGE_CAPABILITY
+    ):
+        raise ValueError("counterexample-decision-capability-unsupported")
+    project_relative_path(values[1])
+
+
 def validate_stage_close_review(root, run, expected_digest, validator):
     """新量化阶段不能利用旧 API 的可选摘要跳过实际评审。"""
     if run.decision_capability != STAGE_CAPABILITY:

@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 PROTOCOL_VERSION = "1"
 PACKAGE_NAME = "ai-sdlc"
 GITHUB_RELEASES_LATEST_URL = (
-    "https://github.com/SinclairPan/Ai_AutoSDLC/releases/latest"
+    "https://github.com/panguosong/AI-SDLC/releases/latest"
 )
 
 NOTICE_LIGHT = "light_upstream_release_notice"
@@ -398,7 +398,7 @@ def render_notice_lines(evaluation: UpdateEvaluation) -> list[str]:
         ]
     if NOTICE_LIGHT in classes:
         latest = evaluation.upstream_latest_version
-        release_url = evaluation.release_url or "https://github.com/SinclairPan/Ai_AutoSDLC/releases"
+        release_url = evaluation.release_url or "https://github.com/panguosong/AI-SDLC/releases"
         return [
             f"检测到 GitHub 上游新 release：AI-SDLC {latest}。",
             f"A newer upstream AI-SDLC release is available: {latest}.",
@@ -510,7 +510,7 @@ def fetch_latest_github_release(timeout_seconds: float) -> dict[str, Any]:
 
     parsed = urlsplit(final_url)
     match = re.fullmatch(
-        r"/SinclairPan/Ai_AutoSDLC/releases/tag/(v\d+\.\d+\.\d+)",
+        r"/panguosong/AI-SDLC/releases/tag/(v\d+\.\d+\.\d+)",
         parsed.path,
     )
     if (

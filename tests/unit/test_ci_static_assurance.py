@@ -296,6 +296,13 @@ _PRIMARY_REPAIR_NODES = (
     "tests/unit/test_quality_command.py::test_target_signal_constants",
     "tests/unit/test_ci_static_assurance.py::test_original_sources",
     "tests/integration/test_github_workflows.py::test_published_tree",
+    "tests/unit/test_pr_review_provider.py::test_real_provider_failure",
+    "tests/unit/test_counterexample_execution.py::test_real_resource_failure",
+    "tests/unit/test_implementation_loop.py::test_imported_fixture",
+    "tests/unit/test_ci_candidate_execution.py::test_candidate_consumer",
+    "tests/unit/test_release_identity.py::test_release_consumer",
+    "tests/architecture/test_removed_review_subsystems.py::test_workflow_consumer",
+    "tests/unit/test_verify_constraints.py::test_constraint_consumer",
 )
 _PRIMARY_UNCHANGED_NODES = (
     "tests/integration/test_business.py::test_original_case",
@@ -303,7 +310,9 @@ _PRIMARY_UNCHANGED_NODES = (
 )
 
 
-def _primary_reuse_case(module, tmp_path, *, fresh_nodes=None, current_unchanged=None):
+def _primary_reuse_case(
+    module, tmp_path, *, fresh_nodes=None, current_unchanged=None, previous_terminals=None,
+):
     previous_commit = "b" * 40
     previous_nodes = (*_PRIMARY_UNCHANGED_NODES,
                       "tests/unit/test_quality_command.py::test_obsolete_fixture",
@@ -314,23 +323,27 @@ def _primary_reuse_case(module, tmp_path, *, fresh_nodes=None, current_unchanged
         [*unchanged, *_PRIMARY_REPAIR_NODES], [_CELL], _COMMIT,
     )
 
-    def source(name, nodeids, commit, skipped, finished):
+    def source(name, nodeids, commit, skipped, finished, terminals=None):
+        terminals = terminals or {}
         manifest = module.build_collection_manifest(nodeids, [_CELL], commit)
         junit = tmp_path / f"{name}.xml"
         _write_junit(junit, cases=[
-            (*module._junit_key_from_nodeid(node), "skipped" if node in skipped else None)
+            (*module._junit_key_from_nodeid(node),
+             terminals.get(node, "skipped" if node in skipped else None))
             for node in nodeids
-        ])
+        ], failures=sum(value == "failure" for value in terminals.values()),
+           errors=sum(value == "error" for value in terminals.values()))
         evidence = module.build_cell_evidence(
             manifest, junit, cell=_CELL, source_commit=commit,
             started_at="2026-09-15T00:00:00Z", finished_at=finished,
         )
-        assert evidence["status"] == "success"
+        assert evidence["status"] == ("failed" if terminals else "success")
         return manifest, evidence
 
     previous, previous_evidence = source(
         "previous", previous_nodes, previous_commit,
         {_PRIMARY_UNCHANGED_NODES[1], previous_nodes[2]}, "2026-09-15T00:00:02Z",
+        previous_terminals,
     )
     fresh, fresh_evidence = source(
         "fresh", selected_fresh, _COMMIT,
@@ -356,7 +369,7 @@ def test_primary_reuse_preserves_both_original_sources_and_exact_current_members
     assert result["status"] == "success" and result["source_commit"] == _COMMIT
     assert result["cell"] == _CELL
     assert result["collection_manifest_digest"] == current["manifest_digest"]
-    assert result["collected_count"] == result["executed_count"] == 5
+    assert result["collected_count"] == result["executed_count"] == 12
     assert result["duration_seconds"] == pytest.approx(5.0)
     for name, manifest in (("previous", previous), ("fresh", fresh)):
         assert result["provenance"][name]["source_commit"] == manifest["source_commit"]
@@ -381,6 +394,9 @@ def test_primary_reuse_preserves_both_original_sources_and_exact_current_members
 
 
 def test_primary_cli_aggregates_both_sources_without_counting_previous_twice(tmp_path):
+    import hashlib
+    import zipfile
+
     module = _load_module()
     current, previous, previous_result, fresh, fresh_result = _primary_reuse_case(module, tmp_path)
     directory = tmp_path / f"compatibility-{_CELL}"
@@ -388,9 +404,25 @@ def test_primary_cli_aggregates_both_sources_without_counting_previous_twice(tmp
         "collection-manifest.json": current, "fresh-manifest.json": fresh,
         "fresh-result.json": fresh_result, "previous/collection-manifest.json": previous,
         "previous/previous-result.json": previous_result,
-        "reuse-plan.json": {"status": "reuse_eligible", "changed_paths": [module.PRIMARY_REPAIR_TESTS[0]]},
     }.items():
         module._write_json(directory / name, payload)
+    original_dir = directory / "previous"
+    (original_dir / "compatibility-results.xml").write_bytes((tmp_path / "previous.xml").read_bytes())
+    for name, field in (("started-at.txt", "started_at"), ("finished-at.txt", "finished_at")):
+        (original_dir / name).write_text(previous_result[field] + "\n", encoding="utf-8")
+    with zipfile.ZipFile(original_dir / "artifact.zip", "w") as archive:
+        for name in ("collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt"):
+            archive.write(original_dir / name, name)
+    module._write_json(directory / "reuse-plan.json", {
+        "status": "reuse_eligible", "candidate_commit": _COMMIT,
+        "baseline_commit": previous["source_commit"], "previous_manifest_digest": previous["manifest_digest"],
+        "changed_paths": [module.PRIMARY_REPAIR_TESTS[0]],
+        "previous_file_digests": {
+            name: "sha256:" + hashlib.sha256((original_dir / name).read_bytes()).hexdigest()
+            for name in ("collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt", "previous-result.json")
+        },
+        "artifact": {"digest": "sha256:" + hashlib.sha256((original_dir / "artifact.zip").read_bytes()).hexdigest()},
+    })
     assert module.main([
         "combine-primary", "--evidence-dir", str(directory), "--candidate-commit", _COMMIT,
         "--output", str(directory / "cell-evidence.json"),
@@ -402,7 +434,7 @@ def test_primary_cli_aggregates_both_sources_without_counting_previous_twice(tmp
         "--fast-gate-status", "success", "--output", str(report_path),
     ]) == 0
     report = json.loads(report_path.read_text())
-    assert report["case_count"] == report["execution_member_count"] == 5
+    assert report["case_count"] == report["execution_member_count"] == 12
     assert report["candidate_tree"] == "b" * 40
     assert report["reuse_provenance"][_CELL]["previous"]["source_commit"] == previous["source_commit"]
     assert report["report_digest"] == module._canonical_digest(report, "report_digest")
@@ -468,7 +500,122 @@ def test_primary_reuse_rejects_unproven_sources_or_member_changes(tmp_path, dama
         )
 
 
-def _primary_prepare_case(module, tmp_path, monkeypatch):
+def test_primary_reuse_replaces_only_affected_failed_members_and_preserves_old_failure(tmp_path):
+    module = _load_module()
+    failed_node, error_node = _PRIMARY_REPAIR_NODES[3:5]
+    inputs = _primary_reuse_case(module, tmp_path, previous_terminals={
+        failed_node: "failure", error_node: "error",
+    })
+    current, previous, old_result, fresh, _ = inputs
+    original = json.dumps(inputs, sort_keys=True)
+    assert old_result["status"] == "failed"
+    assert old_result["failed_case_ids"] == [module._stable_case_id(failed_node)]
+    assert old_result["error_case_ids"] == [module._stable_case_id(error_node)]
+
+    result = module.reuse_primary_evidence(
+        *inputs, candidate_commit=_COMMIT,
+        changed_paths=["tests/unit/test_pr_review_provider.py", "tests/unit/test_counterexample_execution.py"],
+    )
+
+    assert result["status"] == "success" and result["failures"] == result["errors"] == 0
+    assert result["failed_case_ids"] == result["error_case_ids"] == []
+    assert result["source_commit"] == _COMMIT
+    assert result["provenance"]["previous"]["source_commit"] == previous["source_commit"]
+    assert result["provenance"]["previous"]["original_status"] == "failed"
+    assert result["provenance"]["previous"]["original_failed_case_ids"] == old_result["failed_case_ids"]
+    assert result["provenance"]["previous"]["original_error_case_ids"] == old_result["error_case_ids"]
+    assert result["provenance"]["fresh"]["case_ids"] == fresh["case_ids"]
+    assert not set(old_result["failed_case_ids"] + old_result["error_case_ids"]).intersection(
+        result["provenance"]["previous"]["case_ids"]
+    )
+    report = module.verify_candidate_execution(
+        [_CELL], [current], [result], candidate_commit=_COMMIT, fast_gate_status="success",
+    )
+    assert report["status"] == "success"
+    assert json.dumps(inputs, sort_keys=True) == original
+    assert old_result["status"] == "failed" and old_result["source_commit"] != _COMMIT
+
+
+@pytest.mark.parametrize("terminal", ["failure", "error"])
+@pytest.mark.parametrize("change", ["deleted", "renamed"])
+def test_primary_reuse_cannot_remove_or_rename_original_failed_node(tmp_path, terminal, change):
+    module = _load_module()
+    failed = _PRIMARY_REPAIR_NODES[3]
+    _, previous, old_result, _, _ = _primary_reuse_case(
+        module, tmp_path, previous_terminals={failed: terminal},
+    )
+    new_nodes = [node for node in _PRIMARY_REPAIR_NODES if node != failed]
+    if change == "renamed":
+        new_nodes.append(failed + "_renamed")
+    current = module.build_collection_manifest([*_PRIMARY_UNCHANGED_NODES, *new_nodes], [_CELL], _COMMIT)
+    fresh = module.build_collection_manifest(new_nodes, [_CELL], _COMMIT)
+    junit = tmp_path / "changed-fresh.xml"
+    _write_junit(junit, cases=[(*module._junit_key_from_nodeid(node), None) for node in new_nodes])
+    fresh_result = module.build_cell_evidence(
+        fresh, junit, cell=_CELL, source_commit=_COMMIT,
+        started_at="2026-09-15T00:00:00Z", finished_at="2026-09-15T00:00:03Z",
+    )
+    assert fresh_result["status"] == "success"
+    original = json.dumps(old_result, sort_keys=True)
+
+    with pytest.raises(module.AssuranceError):
+        module.reuse_primary_evidence(
+            current, previous, old_result, fresh, fresh_result,
+            candidate_commit=_COMMIT, changed_paths=["tests/unit/test_pr_review_provider.py"],
+        )
+
+    assert json.dumps(old_result, sort_keys=True) == original and old_result["status"] == "failed"
+
+
+@pytest.mark.parametrize("damage", [
+    "failure-outside-fresh", "error-outside-fresh", "missing-junit-member", "unknown-terminal",
+    "conflicting-terminals", "wrong-source", "unknown-evidence-status", "missing-failed-members",
+    "conftest-change",
+])
+def test_primary_failed_full_reuse_rejects_unrepaired_or_unproven_members(tmp_path, damage):
+    import xml.etree.ElementTree as ET
+
+    module = _load_module()
+    failed = _PRIMARY_REPAIR_NODES[3]
+    terminals = {failed: "failure"}
+    if damage in {"failure-outside-fresh", "error-outside-fresh"}:
+        terminals[_PRIMARY_UNCHANGED_NODES[0]] = damage.split("-", 1)[0]
+    inputs = _primary_reuse_case(module, tmp_path, previous_terminals=terminals)
+    current, previous, old_result, fresh, fresh_result = inputs
+    changed_paths = ["tests/unit/test_pr_review_provider.py"]
+    if damage in {"missing-junit-member", "unknown-terminal", "conflicting-terminals"}:
+        junit = tmp_path / "previous.xml"
+        tree = ET.parse(junit)
+        suite = tree.getroot()
+        if damage == "missing-junit-member":
+            suite.remove(suite.find("testcase"))
+            suite.set("tests", str(len(suite)))
+        else:
+            case = next(item for item in suite if item.find("failure") is not None)
+            ET.SubElement(case, "cancelled" if damage == "unknown-terminal" else "skipped")
+        tree.write(junit, encoding="utf-8")
+        old_result = module.build_cell_evidence(
+            previous, junit, cell=_CELL, source_commit=previous["source_commit"],
+            started_at="2026-09-15T00:00:00Z", finished_at="2026-09-15T00:00:02Z",
+        )
+        assert old_result["status"] == "failed"
+        assert old_result["reason"] != "non_success_terminal_state"
+    elif damage == "wrong-source":
+        old_result["source_commit"] = "c" * 40
+    elif damage == "unknown-evidence-status":
+        old_result["status"] = "cancelled"
+    elif damage == "missing-failed-members":
+        old_result["failed_case_ids"] = []
+    elif damage == "conftest-change":
+        changed_paths.append("tests/conftest.py")
+    with pytest.raises(module.AssuranceError):
+        module.reuse_primary_evidence(
+            current, previous, old_result, fresh, fresh_result,
+            candidate_commit=_COMMIT, changed_paths=changed_paths,
+        )
+
+
+def _primary_prepare_case(module, tmp_path, monkeypatch, *, failed_nodes=()):
     import hashlib
     import io
     import subprocess
@@ -492,6 +639,7 @@ def _primary_prepare_case(module, tmp_path, monkeypatch):
              "with": {"python-version": "3.11"}},
             {"name": "Install uv", "uses": "astral-sh/setup-uv@fixture"},
             {"name": "Sync dependencies", "run": "uv sync --locked"},
+            {"name": "Collect exact candidate members", "run": "uv run pytest --collect-only -q"},
             {"name": "Doctor", "run": "uv run ai-sdlc doctor"},
             {"name": "Run selected pytest suite", "shell": "bash", "run": "uv run pytest -q"},
         ],
@@ -500,9 +648,14 @@ def _primary_prepare_case(module, tmp_path, monkeypatch):
         workflow_path: json.dumps(workflow),
         "src/ai_sdlc/core/quality_command.py": "VALUE = 1\n",
         "uv.lock": "version = 1\n",
+        "tests/conftest.py": "SHARED_VALUE = 1\n",
         **{node.split("::", 1)[0]: f"def {node.split('::', 1)[1]}():\n    pass\n"
            for node in _PRIMARY_REPAIR_NODES},
     }
+    files["tests/unit/test_quality_command.py"] += (
+        "\nimport pytest\n\n@pytest.fixture\ndef shared_case():\n    return 1\n"
+        "\n@pytest.fixture\ndef test_shared_case():\n    return 3\n"
+    )
     for name, content in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -526,8 +679,10 @@ def _primary_prepare_case(module, tmp_path, monkeypatch):
 
     previous = module.build_collection_manifest(_PRIMARY_REPAIR_NODES, [_CELL], baseline)
     junit = tmp_path / "original.xml"
-    _write_junit(junit, cases=[(*module._junit_key_from_nodeid(node), None)
-                              for node in _PRIMARY_REPAIR_NODES])
+    _write_junit(junit, cases=[
+        (*module._junit_key_from_nodeid(node), "failure" if node in failed_nodes else None)
+        for node in _PRIMARY_REPAIR_NODES
+    ], failures=len(failed_nodes))
     members = {
         "collection-manifest.json": json.dumps(previous).encode(),
         "compatibility-results.xml": junit.read_bytes(),
@@ -550,7 +705,17 @@ def _primary_prepare_case(module, tmp_path, monkeypatch):
         endpoints["run"]: {"repository": {"full_name": "owner/repo"},
                            "path": workflow_path, "run_attempt": 1},
         endpoints["jobs"]: {"jobs": [{"name": "Cross Platform Validation (ubuntu-latest, Python 3.11)",
-                                      "status": "completed", "conclusion": "success"}]},
+                                      "status": "completed", "conclusion": "failure" if failed_nodes else "success",
+                                      "steps": [
+                                          {"name": "Checkout candidate", "status": "completed", "conclusion": "success"},
+                                          *[
+                                          {"name": step["name"], "status": "completed",
+                                           "conclusion": "failure" if failed_nodes and step["name"] == "Run selected pytest suite" else "success"}
+                                          for step in workflow["jobs"]["cross-platform-validation"]["steps"]
+                                          ],
+                                          {"name": "Record raw cell completion", "status": "completed", "conclusion": "success"},
+                                          {"name": "Upload compatibility evidence", "status": "completed", "conclusion": "success"},
+                                      ]}]},
         endpoints["artifacts"]: {"artifacts": [{"name": f"compatibility-{_CELL}", "id": 73,
             "expired": False, "digest": "sha256:" + hashlib.sha256(archive_bytes).hexdigest()}]},
         endpoints["zip"]: archive_bytes,
@@ -572,10 +737,12 @@ def _primary_prepare_case(module, tmp_path, monkeypatch):
     return root, baseline, commit, workflow, endpoints, responses, calls, members, archive_bytes
 
 
-def test_prepare_primary_reuse_admits_real_git_test_fix_and_original_archive(tmp_path, monkeypatch):
+@pytest.mark.parametrize("previous_failed", [False, True])
+def test_prepare_primary_reuse_admits_real_git_test_fix_and_original_archive(tmp_path, monkeypatch, previous_failed):
     module = _load_module()
     root, baseline, commit, _, endpoints, _, calls, members, archive = _primary_prepare_case(
         module, tmp_path, monkeypatch,
+        failed_nodes=(_PRIMARY_REPAIR_NODES[0],) if previous_failed else (),
     )
     path = module.PRIMARY_REPAIR_TESTS[0]
     current = commit(path, (root / path).read_text() + "# target signal constants\n")
@@ -592,13 +759,18 @@ def test_prepare_primary_reuse_admits_real_git_test_fix_and_original_archive(tmp
         assert (output / "previous" / name).read_bytes() == raw
     old = json.loads((output / "previous/previous-result.json").read_text())
     fresh = json.loads((output / "fresh-manifest.json").read_text())
-    assert old["status"] == "success" and old["source_commit"] == baseline
+    assert old["status"] == ("failed" if previous_failed else "success")
+    assert old["source_commit"] == baseline
+    assert old["failed_case_ids"] == (
+        [module._stable_case_id(_PRIMARY_REPAIR_NODES[0])] if previous_failed else []
+    )
     assert fresh["source_commit"] == current
     assert set(fresh["case_nodeids"].values()) == set(_PRIMARY_REPAIR_NODES)
 
 
 @pytest.mark.parametrize("change", [
     "src", "lock", "mode", "python", "dependencies", "env", "pytest-env", "environment-step",
+    "conftest", "shared-fixture", "test-prefixed-fixture",
 ])
 def test_prepare_primary_reuse_requires_full_before_artifact_fetch_for_changed_inputs(
     tmp_path, monkeypatch, change,
@@ -614,6 +786,13 @@ def test_prepare_primary_reuse_requires_full_before_artifact_fetch_for_changed_i
         commit("uv.lock", "version = 2\n")
     elif change == "mode":
         commit(module.PRIMARY_REPAIR_TESTS[0], mode_change=True)
+    elif change == "conftest":
+        commit("tests/conftest.py", "SHARED_VALUE = 2\n")
+    elif change in {"shared-fixture", "test-prefixed-fixture"}:
+        path = "tests/unit/test_quality_command.py"
+        before, after = ("return 1", "return 2") if change == "shared-fixture" else ("return 3", "return 4")
+        commit(path, (root / path).read_text().replace(before, after))
+        expected = "shared_test_inputs_changed"
     else:
         job = workflow["jobs"]["cross-platform-validation"]
         if change == "python":
@@ -665,3 +844,107 @@ def test_prepare_primary_reuse_rejects_unfinished_or_unverified_originals(tmp_pa
         assert calls == [endpoints["run"], endpoints["jobs"]]
     assert not (output / "previous/artifact.zip").exists()
     assert not (output / "fresh-manifest.json").exists()
+
+
+@pytest.mark.parametrize("damage", ["doctor-failed", "collection-missing", "unknown-terminal", "post-step-failed"])
+def test_prepare_failed_primary_rejects_non_pytest_or_unproven_steps(tmp_path, monkeypatch, damage):
+    module = _load_module()
+    root, baseline, commit, _, endpoints, responses, calls, _, _ = _primary_prepare_case(
+        module, tmp_path, monkeypatch, failed_nodes=(_PRIMARY_REPAIR_NODES[0],),
+    )
+    path = "tests/unit/test_quality_command.py"
+    commit(path, (root / path).read_text() + "# target signal constants\n")
+    job = responses[endpoints["jobs"]]["jobs"][0]
+    if damage == "doctor-failed":
+        next(step for step in job["steps"] if step["name"] == "Doctor")["conclusion"] = "failure"
+    elif damage == "collection-missing":
+        job["steps"] = [step for step in job["steps"] if step["name"] != "Collect exact candidate members"]
+    else:
+        job["steps"].append({"name": "Post checkout", "status": "completed",
+                             "conclusion": "cancelled" if damage == "unknown-terminal" else "failure"})
+
+    with pytest.raises(module.AssuranceError, match="primary full job has not succeeded"):
+        module.prepare_primary_reuse(root, "owner/repo", 42, baseline, tmp_path / "prepared")
+
+    assert calls == [endpoints["run"], endpoints["jobs"]]
+    assert job["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize("damage", [
+    None, "collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt",
+    "previous-result.json", "artifact.zip", "candidate", "baseline", "manifest-digest", "coherent-source-swap",
+])
+def test_prepare_to_combine_binds_exact_original_files_and_source(tmp_path, monkeypatch, capsys, damage):
+    import hashlib
+    import zipfile
+
+    module = _load_module()
+    root, baseline, commit, _, _, _, _, _, _ = _primary_prepare_case(
+        module, tmp_path, monkeypatch, failed_nodes=(_PRIMARY_REPAIR_NODES[0],),
+    )
+    path = "tests/unit/test_quality_command.py"
+    current_commit = commit(path, (root / path).read_text() + "# target signal constants\n")
+    directory = tmp_path / "prepared"
+    plan = module.prepare_primary_reuse(root, "owner/repo", 42, baseline, directory)
+    previous = directory / "previous"
+    original = json.loads((previous / "previous-result.json").read_text())
+    assert original["status"] == "failed" and original["source_commit"] == baseline
+    fresh = json.loads((directory / "fresh-manifest.json").read_text())
+    current = module.build_collection_manifest(_PRIMARY_REPAIR_NODES, [_CELL], current_commit)
+    junit = directory / "fresh-results.xml"
+    _write_junit(junit, cases=[(*module._junit_key_from_nodeid(node), None) for node in _PRIMARY_REPAIR_NODES])
+    fresh_result = module.build_cell_evidence(
+        fresh, junit, cell=_CELL, source_commit=current_commit,
+        started_at="2026-09-15T00:01:00Z", finished_at="2026-09-15T00:01:02Z",
+    )
+    assert fresh_result["status"] == "success"
+    module._write_json(directory / "collection-manifest.json", current)
+    module._write_json(directory / "fresh-result.json", fresh_result)
+    if damage in {
+        "collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt",
+        "previous-result.json", "artifact.zip",
+    }:
+        target = previous / damage
+        target.write_bytes(target.read_bytes() + b" ")
+    elif damage == "candidate":
+        plan["candidate_commit"] = baseline
+    elif damage == "baseline":
+        plan["baseline_commit"] = current_commit
+    elif damage == "manifest-digest":
+        plan["previous_manifest_digest"] = current["manifest_digest"]
+    elif damage == "coherent-source-swap":
+        # 即使替换源的清单、结果和文件哈希彼此一致，也不能替换 prepare 已绑定的来源。
+        swapped = module.build_collection_manifest(_PRIMARY_REPAIR_NODES, [_CELL], current_commit)
+        swapped_result = module.build_cell_evidence(
+            swapped, previous / "compatibility-results.xml", cell=_CELL, source_commit=current_commit,
+            started_at=original["started_at"], finished_at=original["finished_at"],
+        )
+        assert swapped_result["status"] == "failed"
+        module._write_json(previous / "collection-manifest.json", swapped)
+        module._write_json(previous / "previous-result.json", swapped_result)
+        with zipfile.ZipFile(previous / "artifact.zip", "w") as archive:
+            for name in ("collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt"):
+                archive.write(previous / name, name)
+        plan["previous_file_digests"] = {
+            name: "sha256:" + hashlib.sha256((previous / name).read_bytes()).hexdigest()
+            for name in plan["previous_file_digests"]
+        }
+        plan["artifact"]["digest"] = "sha256:" + hashlib.sha256((previous / "artifact.zip").read_bytes()).hexdigest()
+    module._write_json(directory / "reuse-plan.json", plan)
+    output = directory / "cell-evidence.json"
+
+    code = module.main([
+        "combine-primary", "--evidence-dir", str(directory), "--candidate-commit", current_commit,
+        "--output", str(output),
+    ])
+
+    if damage is None:
+        assert code == 0
+        result = json.loads(output.read_text())
+        assert result["status"] == "success"
+        assert result["provenance"]["previous"]["original_status"] == "failed"
+        assert json.loads((previous / "previous-result.json").read_text()) == original
+    else:
+        assert code == 1 and not output.exists()
+        assert "changed after preparation" in capsys.readouterr().err
+    assert original["status"] == "failed" and original["source_commit"] == baseline

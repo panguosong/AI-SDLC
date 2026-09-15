@@ -483,7 +483,10 @@ def test_local_agent_allows_explicit_omitted_file_policy_waiver(tmp_path) -> Non
         )
     )
 
-    assert result.status == ProviderRunStatus.SUCCESS
+    # 仅失败时输出本次真实 blocker、调用与收尾原件，供 JUnit 保留失败原因。
+    assert result.status == ProviderRunStatus.SUCCESS, json.dumps(
+        result.model_dump(mode="json"), ensure_ascii=False, indent=2
+    )
     assert result.findings is not None
     assert result.findings.verdict == "clean"
 

@@ -173,8 +173,11 @@ jobs:
             # 各测试使用独立临时项目；进程并行，保留所有用例和失败原件。
             test_args=(-n auto --dist worksteal --max-worker-restart=0)
             if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
-              test_args+=(tests/unit/test_quality_command.py tests/unit/test_ci_static_assurance.py
-                          tests/integration/test_github_workflows.py)
+              test_args=(tests/unit/test_quality_command.py tests/unit/test_pr_review_provider.py
+                         tests/unit/test_counterexample_execution.py tests/unit/test_implementation_loop.py
+                         tests/unit/test_ci_static_assurance.py tests/unit/test_ci_candidate_execution.py
+                         tests/integration/test_github_workflows.py tests/unit/test_release_identity.py
+                         tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py)
             fi
           else
             while IFS= read -r node; do

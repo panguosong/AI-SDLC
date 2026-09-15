@@ -5272,6 +5272,18 @@ def test_first_subject_and_later_subject_accept_declared_initial_tree(
     execution_case, nested
 ):
     root, contract, original = execution_case
+
+    def failure_details(receipt):
+        # 只读取本次失败尝试原件；诊断不重跑命令，也不替换原始失败状态。
+        folder = (root / receipt.attempt_ref.path).parent
+        files = {}
+        for name in ("postcheck-error.json", "raw-result.json", "cleanup.json"):
+            try:
+                files[name] = (folder / name).read_text(encoding="utf-8")
+            except OSError as exc:
+                files[name] = {"read_error": f"{type(exc).__name__}: {exc}"}
+        return {"receipt": receipt.model_dump(mode="json"), "attempt_files": files}
+
     data = original.model_dump(mode="json")
     if nested:
         initial_path = (
@@ -5300,7 +5312,7 @@ def test_first_subject_and_later_subject_accept_declared_initial_tree(
     for subject in ("current", "positive_control"):
         for suffix in ("none", "V0", "V1", "cleanup"):
             receipt = _execute(case, subject + "-" + suffix)
-            assert receipt.status == "completed"
+            assert receipt.status == "completed", failure_details(receipt)
         step = next(item for item in case[2].steps if item.subject_id == subject)
         assert not Path(step.binding.resources[0].root).exists()
 

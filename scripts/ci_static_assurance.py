@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -30,13 +31,28 @@ RELEASE_CELLS = (
     "windows-latest-py3.14",
 )
 PRIMARY_CELL = "ubuntu-latest-py3.11"
+PRIMARY_PREVIOUS_FILES = (
+    "collection-manifest.json", "compatibility-results.xml", "started-at.txt",
+    "finished-at.txt", "previous-result.json",
+)
 PRIMARY_REPAIR_TESTS = (
     "tests/unit/test_quality_command.py",
+    "tests/unit/test_pr_review_provider.py",
+    "tests/unit/test_counterexample_execution.py",
+    "tests/unit/test_implementation_loop.py",
+    "tests/unit/test_ci_static_assurance.py",
+    "tests/unit/test_ci_candidate_execution.py",
+    "tests/integration/test_github_workflows.py",
+    "tests/unit/test_release_identity.py",
+    "tests/architecture/test_removed_review_subsystems.py",
+    "tests/unit/test_verify_constraints.py",
+)
+PRIMARY_SHARED_TESTS = frozenset(PRIMARY_REPAIR_TESTS[:3])
+PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_SHARED_TESTS,
     "tests/unit/test_ci_static_assurance.py",
     "tests/integration/test_github_workflows.py",
-)
-PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_REPAIR_TESTS,
     "scripts/ci_static_assurance.py",
+    ".github/ci/fast-gate-tests.txt",
     ".github/workflows/compatibility-gate.yml",
     ".github/workflows/release-build.yml",
     ".github/workflows/release-artifact-smoke.yml",
@@ -44,8 +60,11 @@ PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_REPAIR_TESTS,
     "docs/框架自迭代开发与发布约定.md",
 ))
 PRIMARY_REPAIR_SELECTION = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
-    test_args+=(tests/unit/test_quality_command.py tests/unit/test_ci_static_assurance.py
-                tests/integration/test_github_workflows.py)
+    test_args=(tests/unit/test_quality_command.py tests/unit/test_pr_review_provider.py
+               tests/unit/test_counterexample_execution.py tests/unit/test_implementation_loop.py
+               tests/unit/test_ci_static_assurance.py tests/unit/test_ci_candidate_execution.py
+               tests/integration/test_github_workflows.py tests/unit/test_release_identity.py
+               tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py)
   fi
 '''
 
@@ -154,23 +173,54 @@ def check_release_assurance(root: Path, repository: str, run_id: int) -> dict[st
     return result
 
 
+def _validate_previous_primary(manifest, evidence):
+    """失败原件仍是失败；仅完整可归属、且将全部重验的失败成员可以被替换。"""
+    commit = manifest.get("source_commit")
+    reason = _validate_candidate_manifest(manifest, expected_cell=PRIMARY_CELL, expected_commit=commit)
+    if reason:
+        raise AssuranceError(f"original primary manifest invalid: {reason}")
+    if (evidence.get("schema_version") != CELL_EVIDENCE_SCHEMA
+        or evidence.get("cell") != PRIMARY_CELL or evidence.get("source_commit") != commit
+        or evidence.get("collection_manifest_digest") != manifest["manifest_digest"]
+        or evidence.get("duplicate_testcases") != []
+        or evidence.get("collected_count") != len(manifest["case_ids"])
+        or evidence.get("executed_count") != len(manifest["case_ids"])):
+        raise AssuranceError("original primary execution is incomplete or mismatched")
+    _runner_seconds([evidence])
+    terminal_sets = []
+    for count, key in (("failures", "failed_case_ids"), ("errors", "error_case_ids"),
+                       ("skipped", "skipped_case_ids")):
+        members = evidence.get(key, [] if count != "skipped" else None)
+        number = evidence.get(count)
+        if (not isinstance(members, list) or type(number) is not int or number < 0
+            or len(members) != len(set(members)) or number != len(members)
+            or not set(members).issubset(manifest["case_ids"])):
+            raise AssuranceError("original primary terminal identities are invalid")
+        terminal_sets.append(set(members))
+    if any(terminal_sets[a] & terminal_sets[b] for a, b in ((0, 1), (0, 2), (1, 2))):
+        raise AssuranceError("original primary terminal identities overlap")
+    failed = terminal_sets[0] | terminal_sets[1]
+    expected = ("failed", "non_success_terminal_state") if failed else ("success", "complete")
+    if (evidence.get("status"), evidence.get("reason")) != expected:
+        raise AssuranceError("original primary terminal state is not trustworthy")
+    if any(manifest["case_nodeids"][key].split("::", 1)[0] not in PRIMARY_REPAIR_TESTS for key in failed):
+        raise AssuranceError("original primary failure is outside the fresh repair scope")
+
+
 def reuse_primary_evidence(
     current_manifest, previous_manifest, previous_evidence, fresh_manifest, fresh_evidence,
     *, candidate_commit: str, changed_paths: Sequence[str],
 ) -> dict[str, Any]:
-    """仅组合本次 CI 修复的三文件新结果与原完整结果；不重写旧回执。"""
+    """组合当前受影响集合与旧未变成员；原失败及其身份保留在来源记录中。"""
     if set(changed_paths) - PRIMARY_REUSE_PATHS:
         raise AssuranceError("primary reuse includes changed runtime or test inputs")
-    for manifest, evidence, expected_commit in (
-        (previous_manifest, previous_evidence, previous_manifest.get("source_commit")),
-        (fresh_manifest, fresh_evidence, candidate_commit),
-    ):
-        result = verify_candidate_execution(
-            [PRIMARY_CELL], [manifest], [evidence],
-            candidate_commit=expected_commit, fast_gate_status="success",
-        )
-        if result["status"] != "success":
-            raise AssuranceError(f"primary reuse source failed: {result['reason']}")
+    _validate_previous_primary(previous_manifest, previous_evidence)
+    verified = verify_candidate_execution(
+        [PRIMARY_CELL], [fresh_manifest], [fresh_evidence],
+        candidate_commit=candidate_commit, fast_gate_status="success",
+    )
+    if verified["status"] != "success":
+        raise AssuranceError(f"primary fresh repair failed: {verified['reason']}")
     reason = _validate_candidate_manifest(
         current_manifest, expected_cell=PRIMARY_CELL, expected_commit=candidate_commit,
     )
@@ -182,6 +232,9 @@ def reuse_primary_evidence(
     current = current_manifest["case_nodeids"]
     previous = previous_manifest["case_nodeids"]
     fresh = fresh_manifest["case_nodeids"]
+    old_failures = set(previous_evidence.get("failed_case_ids", [])) | set(previous_evidence.get("error_case_ids", []))
+    if any(fresh.get(key) != previous[key] for key in old_failures):
+        raise AssuranceError("original failed members must be rerun without removal or renaming")
     expected_fresh = {key: node for key, node in current.items() if affected(node)}
     unchanged = {key: node for key, node in current.items() if not affected(node)}
     old_unchanged = {key: node for key, node in previous.items() if not affected(node)}
@@ -196,10 +249,16 @@ def reuse_primary_evidence(
         collection_manifest_digest=current_manifest["manifest_digest"],
         collected_count=len(current), executed_count=len(current),
         skipped=len(skipped), skipped_case_ids=skipped,
+        skip_reasons={key: value for origin in (previous_evidence, fresh_evidence)
+                      for key, value in origin.get("skip_reasons", {}).items() if key in skipped},
         duration_seconds=previous_evidence["duration_seconds"] + fresh_evidence["duration_seconds"],
         provenance={
             "previous": {"source_commit": previous_manifest["source_commit"],
                          "manifest_digest": previous_manifest["manifest_digest"],
+                         "original_status": previous_evidence["status"],
+                         "original_failed_case_ids": previous_evidence.get("failed_case_ids", []),
+                         "original_error_case_ids": previous_evidence.get("error_case_ids", []),
+                         "skipped_case_ids": sorted(set(previous_evidence["skipped_case_ids"]) & set(unchanged)),
                          "case_ids": sorted(unchanged)},
             "fresh": {"source_commit": candidate_commit,
                       "manifest_digest": fresh_manifest["manifest_digest"],
@@ -236,6 +295,19 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
         if fields[0][1:] != fields[1] or fields[4] != "M" or path not in PRIMARY_REUSE_PATHS:
             return {"status": "full_required", "reason": "inputs_changed"}
         paths.append(path)
+    for path in set(paths) & PRIMARY_SHARED_TESTS:
+        def shared_inputs(source):
+            tree = ast.parse(source)
+            # 仅顶层测试函数可变；导入、fixture、共享 helper 和模块初始化必须保持。
+            tree.body = [node for node in tree.body if not (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+                and not any("fixture" in ast.unparse(item) for item in node.decorator_list)
+            )]
+            return ast.dump(tree, include_attributes=False)
+        before = subprocess.check_output(["git", "show", f"{baseline}:{path}"], cwd=root)
+        if shared_inputs(before) != shared_inputs((root / path).read_bytes()):
+            return {"status": "full_required", "reason": "shared_test_inputs_changed"}
     workflow_path = ".github/workflows/compatibility-gate.yml"
     old = yaml.safe_load(subprocess.check_output(["git", "show", f"{baseline}:{workflow_path}"], cwd=root))
     new = yaml.safe_load((root / workflow_path).read_text(encoding="utf-8"))
@@ -247,7 +319,7 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
             if step.get("name") == "Prepare unchanged primary evidence":
                 continue
             if step.get("name") == "Run selected pytest suite":
-                # 只剥离本次固定三文件选择；pytest 环境、命令和其他前置步骤均须相同。
+                # 只剥离固定受影响文件的串行重验；旧未变成员的所有执行输入须相同。
                 step["run"] = step["run"].replace(PRIMARY_REPAIR_SELECTION, "")
             steps.append(step)
         return (workflow.get("env"), workflow.get("defaults"), job.get("defaults"),
@@ -264,8 +336,21 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
     if (run.get("repository", {}).get("full_name") != repository
         or run.get("path") != workflow_path or run.get("run_attempt") != 1
         or len(primary) != 1 or primary[0].get("status") != "completed"
-        or primary[0].get("conclusion") != "success"):
+        or primary[0].get("conclusion") not in {"success", "failure"}):
         raise AssuranceError("original primary full job has not succeeded")
+    if primary[0]["conclusion"] == "failure":
+        steps = primary[0].get("steps", [])
+        required = {"Checkout candidate", "Set up Python", "Install uv", "Sync dependencies",
+                    "Collect exact candidate members", "Doctor", "Record raw cell completion",
+                    "Upload compatibility evidence"}
+        successful = {step.get("name") for step in steps if step.get("conclusion") == "success"}
+        failures = [step.get("name") for step in steps if step.get("conclusion") == "failure"]
+        allowed_skips = {"Run fixed SnapshotControl stability sentinel", "Post Install uv", "Post Set up Python"}
+        if (not required.issubset(successful) or failures != ["Run selected pytest suite"]
+            or any(step.get("conclusion") not in {"success", "failure"}
+                   and not (step.get("conclusion") == "skipped" and step.get("name") in allowed_skips)
+                   for step in steps)):
+            raise AssuranceError("original primary full job has not succeeded: non-pytest failure")
     items = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}/artifacts?per_page=100"))
     artifacts = [item for item in items.get("artifacts", [])
                  if item.get("name") == f"compatibility-{PRIMARY_CELL}" and item.get("expired") is False]
@@ -292,17 +377,22 @@ def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: st
         source_commit=baseline, started_at=(previous / "started-at.txt").read_text().strip(),
         finished_at=(previous / "finished-at.txt").read_text().strip(),
     )
-    verified = verify_candidate_execution([PRIMARY_CELL], [manifest], [evidence],
-                                          candidate_commit=baseline, fast_gate_status="success")
-    if verified["status"] != "success":
-        raise AssuranceError(f"original primary evidence failed: {verified['reason']}")
+    _validate_previous_primary(manifest, evidence)
+    if (evidence["status"] == "success") != (primary[0]["conclusion"] == "success"):
+        raise AssuranceError("original primary job and JUnit terminal states disagree")
     _write_json(previous / "previous-result.json", evidence)
     fresh = build_collection_manifest(_collect_nodeids(root, PRIMARY_REPAIR_TESTS), [PRIMARY_CELL],
                                       _git_commit(root), collection_command=shlex.join(
                                           ["pytest", "--collect-only", "-q", *PRIMARY_REPAIR_TESTS]))
+    old_failures = set(evidence.get("failed_case_ids", [])) | set(evidence.get("error_case_ids", []))
+    if any(fresh["case_nodeids"].get(key) != manifest["case_nodeids"][key] for key in old_failures):
+        raise AssuranceError("original failed members must be rerun without removal or renaming")
     _write_json(output / "fresh-manifest.json", fresh)
     return {"status": "reuse_eligible", "baseline_commit": baseline, "run_id": run_id,
+            "candidate_commit": _git_commit(root),
             "changed_paths": paths, "artifact": artifact, "job": primary[0],
+            "previous_file_digests": {name: "sha256:" + hashlib.sha256((previous / name).read_bytes()).hexdigest()
+                                      for name in PRIMARY_PREVIOUS_FILES},
             "previous_manifest_digest": manifest["manifest_digest"]}
 
 
@@ -650,6 +740,9 @@ def _cell_evidence_base(
         "errors": 0,
         "skipped": 0,
         "skipped_case_ids": [],
+        "failed_case_ids": [],
+        "error_case_ids": [],
+        "skip_reasons": {},
         "duplicate_testcases": [],
         "status": "failed",
         "reason": "unknown",
@@ -742,13 +835,23 @@ def build_cell_evidence(
         if testcase_keys.count(key) > 1
     )
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    allowed_children = {"failure", "error", "skipped", "system-out", "system-err", "properties"}
+    if any(any(child.tag not in allowed_children for child in case)
+           or sum(len(case.findall(tag)) for tag in ("failure", "error", "skipped")) > 1
+           for case in testcases):
+        evidence["reason"] = "junit_terminal_state_invalid"
+        return evidence
     failures = sum(1 for testcase in testcases if testcase.find("failure") is not None)
     errors = sum(1 for testcase in testcases if testcase.find("error") is not None)
     skipped = sum(1 for testcase in testcases if testcase.find("skipped") is not None)
-    declared_failures = sum(int(suite.get("failures", "0") or 0) for suite in suites)
-    declared_errors = sum(int(suite.get("errors", "0") or 0) for suite in suites)
-    declared_skipped = sum(int(suite.get("skipped", "0") or 0) for suite in suites)
-    declared_tests = sum(int(suite.get("tests", "0") or 0) for suite in suites)
+    try:
+        declared_failures = sum(int(suite.get("failures", "0") or 0) for suite in suites)
+        declared_errors = sum(int(suite.get("errors", "0") or 0) for suite in suites)
+        declared_skipped = sum(int(suite.get("skipped", "0") or 0) for suite in suites)
+        declared_tests = sum(int(suite.get("tests", "0") or 0) for suite in suites)
+    except ValueError:
+        evidence["reason"] = "junit_declared_count_mismatch"
+        return evidence
     evidence.update(
         {
             "executed_count": len(testcases),
@@ -761,13 +864,13 @@ def build_cell_evidence(
     if duplicates:
         evidence["reason"] = "duplicate_testcase"
         return evidence
-    if any((evidence["failures"], evidence["errors"])):
-        evidence["reason"] = "non_success_terminal_state"
-        return evidence
     if evidence["executed_count"] != evidence["collected_count"]:
         evidence["reason"] = "execution_count_mismatch"
         return evidence
     if declared_tests != evidence["executed_count"]:
+        evidence["reason"] = "junit_declared_count_mismatch"
+        return evidence
+    if (failures, errors, skipped) != (declared_failures, declared_errors, declared_skipped):
         evidence["reason"] = "junit_declared_count_mismatch"
         return evidence
 
@@ -781,11 +884,17 @@ def build_cell_evidence(
     if set(executed_case_ids) != manifest_case_ids:
         evidence["reason"] = "junit_case_set_mismatch"
         return evidence
-    evidence["skipped_case_ids"] = sorted(
-        lookup[key]
-        for key, testcase in zip(testcase_keys, testcases, strict=True)
-        if testcase.find("skipped") is not None
-    )
+    for tag, field in (("failure", "failed_case_ids"), ("error", "error_case_ids"), ("skipped", "skipped_case_ids")):
+        evidence[field] = sorted(lookup[key] for key, case in zip(testcase_keys, testcases, strict=True)
+                                 if case.find(tag) is not None)
+    evidence["skip_reasons"] = {
+        lookup[key]: {"message": skip.get("message", ""), "text": skip.text or "", "type": skip.get("type", "")}
+        for key, case in zip(testcase_keys, testcases, strict=True)
+        if (skip := case.find("skipped")) is not None
+    }
+    if failures or errors:
+        evidence["reason"] = "non_success_terminal_state"
+        return evidence
     evidence["status"] = "success"
     evidence["reason"] = "complete"
     return evidence
@@ -931,9 +1040,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan = _read_json(directory / "reuse-plan.json")
             if plan.get("status") != "reuse_eligible":
                 raise AssuranceError("primary reuse was not admitted")
+            if plan.get("candidate_commit") != args.candidate_commit:
+                raise AssuranceError("primary reuse candidate changed after preparation")
+            digests = plan.get("previous_file_digests", {})
+            if set(digests) != set(PRIMARY_PREVIOUS_FILES):
+                raise AssuranceError("primary original file bindings are incomplete")
+            originals = {**digests, "artifact.zip": plan.get("artifact", {}).get("digest")}
+            for name, digest in originals.items():
+                path = previous / name
+                if not path.is_file() or "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                    raise AssuranceError("primary original files changed after preparation")
+            previous_manifest = _read_json(previous / "collection-manifest.json")
+            if (previous_manifest.get("source_commit") != plan.get("baseline_commit")
+                or previous_manifest.get("manifest_digest") != plan.get("previous_manifest_digest")):
+                raise AssuranceError("primary original source changed after preparation")
             result = reuse_primary_evidence(
                 _read_json(directory / "collection-manifest.json"),
-                _read_json(previous / "collection-manifest.json"),
+                previous_manifest,
                 _read_json(previous / "previous-result.json"),
                 _read_json(directory / "fresh-manifest.json"),
                 _read_json(directory / "fresh-result.json"),

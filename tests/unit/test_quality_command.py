@@ -1247,13 +1247,16 @@ def test_unattributed_observation_rechecks_absence_without_replaying_or_signalin
         quality.os.kill,
     )
     calls = 0
+    injected = False
     vanished = (999999999, 1, 2)
 
     def collect(owner):
-        nonlocal calls
+        nonlocal calls, injected
         calls += 1
         found = original_collect(owner)
-        if calls == 1:
+        # 本用例检查无本次存活后代时的未知身份重查；首轮可能仍看见已退出的后代。
+        if not found and not injected:
+            injected = True
             owner.unresolved.append(vanished)
         return found
 

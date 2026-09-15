@@ -1850,6 +1850,10 @@ def test_primary_reuse_keeps_full_collection_and_reruns_all_affected_files():
     assert "prepare-primary" in prepare["run"]
     run = steps["Run selected pytest suite"]["run"]
     assert "-n auto --dist worksteal --max-worker-restart=0" in run
+    assert module["PRIMARY_REPAIR_SELECTION"] in run
+    # 受影响进程测试必须整体替换并行参数，不能在并行参数后追加文件。
+    assert "test_args=(" in module["PRIMARY_REPAIR_SELECTION"]
+    assert "test_args+=(" not in module["PRIMARY_REPAIR_SELECTION"]
     for path in module["PRIMARY_REPAIR_TESTS"]:
         assert path in run
     aggregate = next(s["run"] for s in workflow["jobs"]["merge-assurance"]["steps"]

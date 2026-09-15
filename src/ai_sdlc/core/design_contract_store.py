@@ -300,9 +300,15 @@ def _verification_spec_entry(content: bytes, locator: str) -> bytes:
         if re.fullmatch(r"#{1,6}\s+" + re.escape(locator) + r"\s*", line)
     ]
     if len(headings) == 1:
+        heading_level = len(lines[headings[0]].split(maxsplit=1)[0])
         start = headings[0] + 1
+        # 子标题属于当前来源条目，只有同级或上级标题结束该条目。
         end = next(
-            (i for i in range(start, len(lines)) if re.match(r"^#{1,6}\s", lines[i])),
+            (
+                i
+                for i in range(start, len(lines))
+                if re.match(rf"^#{{1,{heading_level}}}\s", lines[i])
+            ),
             len(lines),
         )
         entry = "\n".join(lines[start:end]).strip("\n").encode("utf-8")

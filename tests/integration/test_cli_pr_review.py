@@ -968,8 +968,10 @@ def test_pr_review_close_uses_validated_resolution_across_aba(
         assert resolution["finding_resolutions"][0]["status"] == "unresolved"
 
 
+@pytest.mark.parametrize("restore_originals", [True, False])
 def test_pr_review_close_uses_all_validated_artifacts_across_aba(
     tmp_path: Path,
+    restore_originals: bool,
 ) -> None:
     _init_repo(tmp_path)
     _write_file(tmp_path, "src/app.py", "print('hello')\n")
@@ -1018,8 +1020,9 @@ def test_pr_review_close_uses_all_validated_artifacts_across_aba(
         original_revalidate = pr_review_service.revalidate_review_input_at_transition
 
         def restore_then_revalidate(*args, **kwargs):
-            review_run_path.write_bytes(reviewed_run)
-            findings_path.write_bytes(reviewed_findings)
+            if restore_originals:
+                review_run_path.write_bytes(reviewed_run)
+                findings_path.write_bytes(reviewed_findings)
             return original_revalidate(*args, **kwargs)
 
         with (
@@ -1051,8 +1054,14 @@ def test_pr_review_close_uses_all_validated_artifacts_across_aba(
     assert validation_count == 2
     assert close.exit_code == 1
     assert payload["status"] == "blocked"
-    assert payload["verdict"] == "blocked"
-    assert payload["blocker"] == "Unresolved REQUIRED findings remain."
+    if restore_originals:
+        assert payload["verdict"] == "blocked"
+        assert payload["blocker"] == "Unresolved REQUIRED findings remain."
+        assert findings_path.read_bytes() == reviewed_findings
+    else:
+        assert payload["reason"] == "review-input-drift"
+        assert not review_run_path.with_name("final-report.md").exists()
+        assert json.loads(findings_path.read_bytes())["findings"] == []
 
 
 def test_pr_review_fix_dry_run_json_does_not_write_artifacts(tmp_path: Path) -> None:

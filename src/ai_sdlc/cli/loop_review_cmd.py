@@ -770,7 +770,7 @@ def _resolve_review_input(
             )
         if loop_type == "implementation":
             reject_retired_implementation_continuation(root, safe_loop_id)
-            first_outcome_path = loop_dir / "review-outcome-round-1.json"
+            first_outcome_path = outcome_path(loop_dir, 1)
             if captured_artifacts is not None and first_outcome_path.is_file():
                 # R1 原件证明当前阶段；仅捕获，不加入它自身的评审输入摘要。
                 authority_only_paths.append(first_outcome_path)

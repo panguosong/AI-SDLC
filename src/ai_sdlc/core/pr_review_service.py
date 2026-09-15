@@ -2044,12 +2044,15 @@ def _read_pr_formal_originals(
     normal_production: bool = False,
 ) -> _FormalReviewOriginals | None:
     """原生 R1、其输入原件及当前读取共用同一身份；缺件不能降回未评审。"""
-    from ai_sdlc.core.loop_review_service import validate_preserved_local_pr_review
+    from ai_sdlc.core.loop_review_service import (
+        outcome_path,
+        validate_preserved_local_pr_review,
+    )
 
     root = reader.root
     directory = LoopArtifactStore(root).review_run_dir(run.review_id)
-    first_path = directory / "review-outcome-round-1.json"
-    second_path = directory / "review-outcome-round-2.json"
+    first_path = outcome_path(directory, 1)
+    second_path = outcome_path(directory, 2)
     history_path = directory / "finding-history.json"
     if any(path.name.startswith("review-outcome") and path not in {first_path, second_path}
            for path in directory.iterdir()):
@@ -2809,7 +2812,9 @@ def close_pr_review(
         # R1/R2 都绑定本次转换前的 current run；后续只接受同一 writer 声明的准确输出。
         if ReviewRun.model_validate_json(recovery_originals.read(review_run_path)) != review_run:
             raise ValueError("recovery-current-review-changed-before-close")
-        recovery_originals.assert_unchanged()
+        # 已捕获的评审字节用于准备关闭判断；现场一致性在转换校验及写入前后检查。
+        if reviewed_artifacts is None:
+            recovery_originals.assert_unchanged()
         reviewed_close_mode = review_pack.policy_decisions.get("default_close_mode")
         if reviewed_close_mode not in {"strict", "require-no-blockers"}:
             raise ValueError(

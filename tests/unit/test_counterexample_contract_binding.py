@@ -6,6 +6,10 @@ from dataclasses import replace
 
 import pytest
 
+from ai_sdlc.core.counterexample_models import (
+    VerificationContract,
+    validate_contract_sources,
+)
 from ai_sdlc.core.design_contract_loop import check_design_contract_loop
 from ai_sdlc.core.design_contract_models import (
     DesignContractCheckOptions,
@@ -34,6 +38,64 @@ from ai_sdlc.core.loop_stage_input import (
 )
 from tests.unit.test_counterexample_models import contract_data
 from tests.unit.test_design_contract_loop import _write_work_item
+
+
+@pytest.mark.parametrize("intro", ["", "Payment must remain durable.\n\n"])
+@pytest.mark.parametrize("boundary", ["## Refund", "# Other requirements"])
+def test_heading_source_includes_descendants_until_same_or_higher_heading(
+    intro, boundary
+):
+    descendants = (
+        "### Retry rules\nRetry a failed payment.\n\n"
+        "#### Limit\nAllow at most three retries.\n\n"
+        "### Receipt\nKeep the payment receipt."
+    )
+    source = (
+        "# Requirements\nUnrelated introduction.\n\n"
+        f"## Payment\n{intro}{descendants}\n\n"
+        f"{boundary}\nOutside the payment requirement.\n"
+    ).encode()
+
+    assert _verification_spec_entry(source, "Payment") == (
+        intro + descendants
+    ).encode()
+
+
+def test_heading_source_subsection_change_updates_entry_digest():
+    original = b"## Payment\nKeep payments durable.\n### Retry\nAllow three retries.\n"
+    changed = original.replace(b"three retries", b"one retry")
+
+    before = hashlib.sha256(_verification_spec_entry(original, "Payment")).hexdigest()
+    after = hashlib.sha256(_verification_spec_entry(changed, "Payment")).hexdigest()
+
+    assert before != after
+
+
+def test_heading_source_rejects_changed_subsection_with_stale_entry_digest():
+    original = b"## Payment\nKeep payments durable.\n### Retry\nAllow three retries.\n"
+    changed = original.replace(b"three retries", b"one retry")
+    original_entry = _verification_spec_entry(original, "Payment")
+    data = contract_data()
+    data["sources"][0].update(
+        locator="Payment",
+        sha256=hashlib.sha256(original).hexdigest(),
+        entry_sha256=hashlib.sha256(original_entry).hexdigest(),
+    )
+    contract = VerificationContract.model_validate(data)
+    path = contract.sources[0].path
+    validate_contract_sources(
+        contract, {path: original}, {path: {"Payment": original_entry}}
+    )
+
+    # 即使文件摘要已更新，子要求变化也必须使旧条目摘要失效。
+    data["sources"][0]["sha256"] = hashlib.sha256(changed).hexdigest()
+    stale_entry = VerificationContract.model_validate(data)
+    with pytest.raises(ValueError, match="original-entry-missing-or-stale"):
+        validate_contract_sources(
+            stale_entry,
+            {path: changed},
+            {path: {"Payment": _verification_spec_entry(changed, "Payment")}},
+        )
 
 
 def _add_task_owner(root, work, data, task_id="T11"):

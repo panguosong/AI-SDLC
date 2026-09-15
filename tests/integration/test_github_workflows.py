@@ -918,6 +918,76 @@ def test_posix_user_guide_e2e_replays_published_guide_commands() -> None:
     assert "actions/upload-artifact@v7" in workflow
 
 
+@pytest.mark.skipif(os.name == "nt", reason="真实 POSIX PTY 行为由 POSIX 平台验证")
+@pytest.mark.parametrize("read_delay", [0.0, 0.8])
+def test_posix_guide_driver_waits_for_real_terminal_input(
+    tmp_path: Path, read_delay: float,
+) -> None:
+    cli = tmp_path / "selector-cli"
+    child_pid = tmp_path / "selector.pid"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        f"sys.path.insert(0, {str(_REPO_ROOT / 'src')!r})\n"
+        "from pathlib import Path\n"
+        "from ai_sdlc.integrations import agent_target as target\n"
+        f"Path({str(child_pid)!r}).write_text(str(os.getpid()))\n"
+        "original = target._read_selector_key_posix\n"
+        "first = True\n"
+        "def delayed_read():\n"
+        "    global first\n"
+        "    if first:\n"
+        "        first = False\n"
+        f"        time.sleep({read_delay!r})\n"
+        "    return original()\n"
+        "target._read_selector_key_posix = delayed_read\n"
+        "agent = target.interactive_select_agent_target(target.IDEKind.GENERIC)\n"
+        "shell = target.interactive_select_preferred_shell(target.PreferredShell.ZSH)\n"
+        "assert agent == target.IDEKind.CURSOR and shell == target.PreferredShell.ZSH\n",
+        encoding="utf-8",
+    )
+    cli.chmod(0o755)
+    # 菜单与读键都调用产品代码；只延迟真实读键入口，重现已公开指南的竞态。
+    launcher = (
+        "import runpy, signal, sys\n"
+        "def stop(signum, frame):\n"
+        "    raise TimeoutError('real PTY regression deadline')\n"
+        "signal.signal(signal.SIGALRM, stop)\n"
+        "signal.alarm(6)\n"
+        f"sys.argv = [{str(_REPO_ROOT / 'scripts/posix_clean_user_e2e.py')!r}, "
+        f"'--cli', {str(cli)!r}, '--project', {str(tmp_path)!r}]\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", launcher], capture_output=True, text=True,
+        timeout=15,
+    )
+    # 驱动须回收其真实 PTY 子进程；回放失败也不能遗留等待输入的进程。
+    assert child_pid.is_file(), result.stdout + result.stderr
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(child_pid.read_text()), 0)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "POSIX_INTERACTIVE_SELECTION_COMPLETED" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="真实 POSIX PTY 行为由 POSIX 平台验证")
+def test_posix_guide_driver_rejects_terminal_that_never_becomes_ready() -> None:
+    import pty
+    import termios
+    import time
+
+    driver = runpy.run_path(_REPO_ROOT / "scripts/posix_clean_user_e2e.py")
+    master, slave = pty.openpty()
+    try:
+        assert termios.tcgetattr(master)[3] & (termios.ICANON | termios.ECHO)
+        with pytest.raises(TimeoutError, match="raw input mode"):
+            driver["wait_input_ready"](master, time.monotonic() + 0.05)
+        assert termios.tcgetattr(master)[3] & (termios.ICANON | termios.ECHO)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
 def test_user_guide_e2e_covers_both_project_states_through_online_installers() -> None:
     windows = (_WORKFLOWS_DIR / "windows-user-guide-e2e.yml").read_text(
         encoding="utf-8"

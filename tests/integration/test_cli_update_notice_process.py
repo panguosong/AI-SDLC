@@ -388,7 +388,7 @@ def test_windows_launcher_can_upgrade_its_live_installed_wheel(
     use_stable_shim: bool,
 ) -> None:
     metadata = packaging_backend._load_metadata()
-    assert metadata["version"] == "3.2.0"
+    assert metadata["version"] == "3.2.1"
     old_dist = tmp_path / "old-dist"
     new_dist = tmp_path / "new-dist"
     monkeypatch.setattr(

@@ -6,3 +6,4 @@ tests/unit/test_loop_resource_lock.py
 tests/unit/test_cli_console_io.py
 tests/unit/test_frontend_browser_gate_runtime.py
 tests/integration/test_cli_module_invocation.py
+tests/integration/test_cli_update_notice_process.py::test_windows_launcher_can_upgrade_its_live_installed_wheel

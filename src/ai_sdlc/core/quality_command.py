@@ -1066,6 +1066,14 @@ class _PosixProcessTable:
                 result[pid] = self.info(pid)
             except ProcessLookupError:
                 continue
+            except FileNotFoundError:
+                # 与组查询一致：只有内核确认已退出，才能忽略枚举后消失的 stat。
+                # PID 仍存活或退出查询不可用时，保留原错误，不把缺失身份当作完整表。
+                try:
+                    os.getpgid(pid)
+                except ProcessLookupError:
+                    continue
+                raise
         return result
 
     def group_members(self, group_id: int) -> list[int]:
@@ -1324,6 +1332,8 @@ class _OwnedPosixProcesses:
                 break
         self.unresolved = []
         self.unattributed_details = []
+        unrelated_original_ids: set[int] = set()
+        original_identities: dict[tuple[int, int, int], tuple[int, int]] = {}
         for pid, process in new.items():
             if pid in self.owned and self.owned[pid].key == process.key:
                 continue
@@ -1350,14 +1360,34 @@ class _OwnedPosixProcesses:
                         native is not None
                         and native[1] < self.launcher_original_identity[0]
                     ):
+                        unrelated_original_ids.add(native[0])
                         self.unrelated_original_parents[process.key] = details
                         continue
+                    if native is not None:
+                        original_identities[process.key] = native
                 except (OSError, ValueError, IndexError, struct.error) as exc:
                     details["original_parent_error"] = f"{type(exc).__name__}: {exc}"[
                         :160
                     ]
             self.unresolved.append(process.key)
             self.unattributed_details.append(details)
+        # 外来根可能晚于启动器创建；其后代仍可由原生创建父的唯一编号证明无关。
+        # 仅传播本次采集中通过出生身份前后校验的关系，不借当前 PPID 或历史排除记录。
+        while unrelated_original_ids:
+            remaining = []
+            for identity, details in zip(
+                self.unresolved, self.unattributed_details, strict=True
+            ):
+                native = original_identities.get(identity)
+                if native is not None and native[1] in unrelated_original_ids:
+                    unrelated_original_ids.add(native[0])
+                    self.unrelated_original_parents[identity] = details
+                else:
+                    remaining.append((identity, details))
+            if len(remaining) == len(self.unresolved):
+                break
+            self.unresolved = [identity for identity, _ in remaining]
+            self.unattributed_details = [details for _, details in remaining]
         return [
             process
             for pid, process in new.items()

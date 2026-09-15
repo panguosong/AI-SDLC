@@ -35,10 +35,10 @@ LINUX_PYTHON_BOOTSTRAP_BOUNDARY_MARKERS = (
     "amd64/x86_64",
     "glibc",
     "Python 3.11+",
-    "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
+    "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz",
     "路线 6/12",
     "非 AMD64 或非 glibc",
-    "v3.2.0 没有兼容的 Linux 发行资产",
+    "v3.2.1 没有兼容的 Linux 发行资产",
     "不得使用路线 6/12 的 AMD64 离线包",
 )
 LINUX_OFFLINE_COMPATIBILITY_GATE_MARKERS = (
@@ -61,8 +61,8 @@ LINUX_OFFLINE_COMPATIBILITY_GATE_MARKERS = (
     'LIBC="$(detect_linux_libc)"',
     'if { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; } ||',
     '[ "$LIBC" = "musl" ]; then',
-    'echo "停止：v3.2.0 没有与此主机兼容的 Linux 发行资产；'
-    '不得使用 ai-sdlc-offline-3.2.0-linux-amd64.tar.gz。" >&2',
+    'echo "停止：v3.2.1 没有与此主机兼容的 Linux 发行资产；'
+    '不得使用 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz。" >&2',
     '[ "$LIBC" != "glibc" ]; then',
     "无法确定此主机使用的 libc",
     "为避免误装，未下载、解压或安装",

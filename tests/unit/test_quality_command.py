@@ -2353,6 +2353,67 @@ def test_fix26_linux_sample_and_group_share_full_visible_births(tmp_path, monkey
 
 
 @pytest.mark.parametrize("consumer", ["sample", "group_members"])
+@pytest.mark.parametrize("confirmation", ["gone", "alive", "permission", "unavailable"])
+def test_linux_disappearing_stat_requires_kernel_exit(
+    tmp_path, monkeypatch, consumer, confirmation
+):
+    quality, table, proc = _fix26_linux_visible_table(tmp_path, monkeypatch)
+    (proc / "42/stat").unlink()
+    checked = []
+
+    def getpgid(pid):
+        checked.append(pid)
+        assert pid == 42
+        if confirmation == "gone":
+            raise ProcessLookupError(3, "kernel confirms exit", pid)
+        if confirmation == "permission":
+            raise PermissionError("kernel confirmation denied")
+        if confirmation == "unavailable":
+            raise OSError("kernel confirmation unavailable")
+        return 41
+
+    monkeypatch.setattr(quality.os, "getpgid", getpgid, raising=False)
+    if confirmation == "gone":
+        observed = table.sample() if consumer == "sample" else table.group_members(41)
+        assert set(observed) == {41}
+        if consumer == "sample":
+            assert observed[41].key == (41, 410, 0)
+    else:
+        error = PermissionError if confirmation == "permission" else OSError
+        with pytest.raises(error):
+            table.sample() if consumer == "sample" else table.group_members(41)
+    assert checked == [42]
+
+
+@pytest.mark.parametrize("consumer", ["sample", "group_members"])
+@pytest.mark.parametrize("damage", ["permission", "malformed"])
+def test_linux_stat_read_failures_are_not_treated_as_process_exit(
+    tmp_path, monkeypatch, consumer, damage
+):
+    quality, table, proc = _fix26_linux_visible_table(tmp_path, monkeypatch)
+    stat = proc / "42/stat"
+    if damage == "permission":
+        original_read = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == stat:
+                raise PermissionError("stat read denied")
+            return original_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read)
+    else:
+        stat.write_text("42 (name) broken\n")
+    monkeypatch.setattr(
+        quality.os, "getpgid",
+        lambda pid: pytest.fail("only a missing stat permits an exit query"),
+        raising=False,
+    )
+    error = PermissionError if damage == "permission" else IndexError
+    with pytest.raises(error):
+        table.sample() if consumer == "sample" else table.group_members(41)
+
+
+@pytest.mark.parametrize("consumer", ["sample", "group_members"])
 @pytest.mark.parametrize("damage", ["hidepid", "mount", "namespace", "unreadable"])
 def test_fix26_linux_incomplete_view_rejects_both_consumers(
     tmp_path, monkeypatch, consumer, damage
@@ -2376,6 +2437,109 @@ def test_fix26_linux_incomplete_view_rejects_both_consumers(
         monkeypatch.setattr(Path, "read_text", read)
     with pytest.raises(OSError):
         table.sample() if consumer == "sample" else table.group_members(41)
+
+
+@pytest.fixture(params=[0, 100_000], ids=["ci-identities", "unique-ids-not-pids"])
+def native_unrelated_tree(monkeypatch, request):
+    from types import SimpleNamespace
+
+    from ai_sdlc.core import quality_command as quality
+
+    baseline = {1: quality._ProcessBirth(1, 0, (1, 0), False)}
+    current = dict(baseline)
+    # 复用真实 macOS 失败中的创建身份关系；当前 PPID 不能替代原生创建父身份。
+    parents = {11098: 5716, 11104: 1, 11132: 11104,
+               11133: 11132, 11134: 11132, 11135: 11132, 11136: 11132}
+    native = {
+        pid: (pid + request.param, parent + request.param)
+        for pid, parent in parents.items()
+    }
+
+    def original_parent(process):
+        value = native.get(process.pid)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def marked(process, cookie):
+        raise OSError("controlled-process-marker-unavailable")
+
+    table = SimpleNamespace(
+        uid=501, sample=lambda: dict(current), snapshot=lambda: dict(current),
+        info=lambda pid: current[pid], original_parent_identity=original_parent,
+        marked=marked,
+    )
+    monkeypatch.setattr(quality, "_PosixProcessTable", lambda: table)
+    monkeypatch.setattr(quality, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(quality, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
+    owner = quality._OwnedPosixProcesses()
+    current[11098] = quality._ProcessBirth(11098, 1, (11098, 0), False)
+    owner.register(11098)
+    current.pop(11098)
+    clock = [0.0]
+    sent = []
+    monkeypatch.setattr(
+        quality, "os", SimpleNamespace(getpid=lambda: 99,
+                                       kill=lambda pid, sig: sent.append((pid, sig))),
+    )
+    monkeypatch.setattr(
+        quality, "time", SimpleNamespace(
+            monotonic=lambda: clock[0],
+            sleep=lambda delay: clock.__setitem__(0, clock[0] + delay),
+        ),
+    )
+    monkeypatch.setattr(quality, "cleanup_owned_process_group", lambda process: True)
+    processes = {
+        pid: quality._ProcessBirth(pid, parent, (pid, 0), False)
+        for pid, parent in parents.items() if pid != 11098
+    }
+    return SimpleNamespace(owner=owner, current=current, native=native,
+                           processes=processes, sent=sent, clock=clock,
+                           launcher=SimpleNamespace(pid=11098))
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_native_unrelated_creation_tree_does_not_block_cleanup(
+    native_unrelated_tree, reverse_order,
+):
+    case = native_unrelated_tree
+    items = list(case.processes.items())
+    case.current.update(reversed(items) if reverse_order else items)
+    assert case.owner.cleanup(case.launcher)
+    finished = case.owner.finished()
+    assert finished["unattributed"] == []
+    assert {item["identity"][0] for item in finished["unrelated_by_original_parent"]} == {
+        11104, 11132, 11133, 11134, 11135, 11136,
+    }
+    assert case.sent == []
+
+
+@pytest.mark.parametrize("missing_proof", [
+    "root_unavailable", "root_birth_changed", "parent_is_launcher",
+    "historical_root", "child_unavailable",
+])
+def test_native_unrelated_creation_tree_requires_current_affirmative_proof(
+    native_unrelated_tree, missing_proof,
+):
+    case = native_unrelated_tree
+    case.current.update(case.processes)
+    if missing_proof == "root_unavailable":
+        case.native[11104] = None
+    elif missing_proof == "root_birth_changed":
+        case.native[11104] = OSError("controlled-process-original-identity-changed")
+    elif missing_proof == "parent_is_launcher":
+        case.native[11132] = (
+            case.native[11132][0], case.owner.launcher_original_identity[0],
+        )
+    elif missing_proof == "historical_root":
+        case.owner.collect()
+        case.current.pop(11104)
+    else:
+        case.native[11132] = None
+    assert not case.owner.cleanup(case.launcher)
+    assert case.processes[11132].key in case.owner.finished()["unattributed"]
+    assert case.sent == []
+    assert case.clock[0] == pytest.approx(2.25)
 
 
 @pytest.mark.parametrize("ownership", ["known", "unknown"])

@@ -853,11 +853,9 @@ def prepare_simulation_decision(
     request = SimulationPrepareRequest.model_validate(request)
     if type(dry_run) is not bool:
         raise DecisionPreparationError("decision-dry-run-invalid")
-    preview = _simulation_prepare(root, loop_id, request)
-    if dry_run or preview.status == "existing":
-        return preview
-    if not expected_digest or expected_digest != preview.prepare_digest:
-        raise DecisionPreparationError("decision-prepare-digest-mismatch")
+    if dry_run:
+        return _simulation_prepare(root, loop_id, request)
+    # 写请求先持锁再读取，避免同一请求的并发提交被误判为快照漂移。
     with ExitStack() as locks:
         try:
             locks.enter_context(_implementation_write_guard(root, loop_id))
@@ -866,7 +864,7 @@ def prepare_simulation_decision(
         current = _simulation_prepare(root, loop_id, request)
         if current.status == "existing":
             return current
-        if current.prepare_digest != expected_digest:
+        if not expected_digest or current.prepare_digest != expected_digest:
             raise DecisionPreparationError("decision-prepare-digest-mismatch")
         _write_context(
             implementation_artifacts(root, loop_id).loop_dir / "decision-context.json",

@@ -2373,6 +2373,8 @@ def test_fix26_visible_detached_child_cannot_be_false_complete(monkeypatch, owne
     )
     monkeypatch.setattr(quality, "_PosixProcessTable", lambda: table)
     monkeypatch.setattr(quality, "sys", SimpleNamespace(platform="darwin"))
+    # 进程表和发送器均模拟 Darwin；信号常量也随目标模拟，不依赖 Windows 宿主。
+    monkeypatch.setattr(quality, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
     owner = quality._OwnedPosixProcesses()
     current[41] = parent
     owner.register(41)
@@ -2585,6 +2587,8 @@ def test_fix26_basic_identity_changed_birth_never_receives_signal(monkeypatch):
     from types import SimpleNamespace
 
     quality, table, state, _ = _fix26_darwin_basic_identity_table(monkeypatch)
+    # Windows 宿主没有 SIGKILL，仍须执行相同的 Darwin 出生身份保护断言。
+    monkeypatch.setattr(quality, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
     original = table.info(42)
     state.update(basic=True, birth=(123456, 654322))
     assert table.info(42).key != original.key

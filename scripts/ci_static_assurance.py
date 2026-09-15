@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -21,10 +24,286 @@ MANIFEST_SCHEMA = "ci-test-manifest-v1"
 CELL_EVIDENCE_SCHEMA = "ci-cell-evidence-v1"
 AGGREGATE_SCHEMA = "ci-assurance-report-v1"
 DEFAULT_COLLECTION_COMMAND = "pytest --collect-only -q"
+RELEASE_CELLS = (
+    "ubuntu-latest-py3.11", "macos-latest-py3.11", "windows-latest-py3.11",
+    "ubuntu-latest-py3.12", "ubuntu-latest-py3.13", "ubuntu-latest-py3.14",
+    "windows-latest-py3.14",
+)
+PRIMARY_CELL = "ubuntu-latest-py3.11"
+PRIMARY_REPAIR_TESTS = (
+    "tests/unit/test_quality_command.py",
+    "tests/unit/test_ci_static_assurance.py",
+    "tests/integration/test_github_workflows.py",
+)
+PRIMARY_REUSE_PATHS = frozenset((*PRIMARY_REPAIR_TESTS,
+    "scripts/ci_static_assurance.py",
+    ".github/workflows/compatibility-gate.yml",
+    ".github/workflows/release-build.yml",
+    ".github/workflows/release-artifact-smoke.yml",
+    "docs/pull-request-checklist.zh.md",
+    "docs/框架自迭代开发与发布约定.md",
+))
+PRIMARY_REPAIR_SELECTION = '''  if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
+    test_args+=(tests/unit/test_quality_command.py tests/unit/test_ci_static_assurance.py
+                tests/integration/test_github_workflows.py)
+  fi
+'''
 
 
 class AssuranceError(ValueError):
     """候选测试证据不完整。"""
+
+
+def release_assurance_run_id(value: str, body: str) -> int:
+    markers = re.findall(r"<!-- ai-sdlc-assurance-run: ([1-9][0-9]*) -->", body)
+    if not value and len(markers) == 1:
+        value = markers[0]
+    if not re.fullmatch(r"[1-9][0-9]*", value):
+        raise AssuranceError("release requires one explicit assurance run ID")
+    return int(value)
+
+
+def verify_release_assurance(
+    report: Mapping[str, Any], run: Mapping[str, Any], commit: Mapping[str, Any],
+    *, repository: str, run_id: int, release_tree: str,
+) -> dict[str, Any]:
+    """允许 merge/squash SHA 不同，但发行字节和模式必须等于已验证的 Git tree。"""
+    if (
+        run.get("id") != run_id
+        or run.get("repository", {}).get("full_name") != repository
+        or run.get("path") != ".github/workflows/compatibility-gate.yml"
+        or run.get("status") != "completed" or run.get("conclusion") != "success"
+    ):
+        raise AssuranceError("release assurance workflow did not succeed in this repository")
+    tested_commit = str(report.get("candidate_commit", ""))
+    tested_tree = str(report.get("candidate_tree", ""))
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", tested_commit)
+        or not re.fullmatch(r"[0-9a-f]{40}", tested_tree)
+        or tested_tree != release_tree
+        or commit.get("sha") != tested_commit
+        or commit.get("tree", {}).get("sha") != tested_tree
+    ):
+        raise AssuranceError("release tree differs from the tested checkout")
+    # PR 实际测试合并提交；该提交须包含 run 的分支 head，不能借用另一份报告。
+    run_heads = {tested_commit}
+    if run.get("event") == "pull_request":
+        run_heads.update(parent.get("sha") for parent in commit.get("parents", []))
+    if run.get("head_sha") not in run_heads:
+        raise AssuranceError("tested checkout is unrelated to the assurance run")
+    if (
+        report.get("schema_version") != AGGREGATE_SCHEMA
+        or report.get("status") != "success" or report.get("reason") != "complete"
+        or report.get("late_red") is not False
+        or report.get("cells") != sorted(RELEASE_CELLS)
+        or not isinstance(report.get("case_count"), int) or report["case_count"] <= 0
+        or not isinstance(report.get("execution_member_count"), int)
+        or report["execution_member_count"] < report["case_count"]
+        or report.get("report_digest") != _canonical_digest(report, "report_digest")
+    ):
+        raise AssuranceError("release requires complete, intact layered assurance")
+    return {
+        "status": "success", "repository": repository, "assurance_run_id": run_id,
+        "tested_commit": tested_commit, "release_tree": release_tree,
+        "report_digest": report["report_digest"],
+    }
+
+
+def _github_api(endpoint: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["gh", "api", endpoint], check=True, capture_output=True, timeout=60,
+        ).stdout
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise AssuranceError(f"GitHub assurance request failed: {endpoint}") from exc
+
+
+def check_release_assurance(root: Path, repository: str, run_id: int) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise AssuranceError("invalid release repository")
+    prefix = f"repos/{repository}"
+    run = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}"))
+    # 仅取指定运行的当前 attempt 原件，不接受同名本地文件或历史重跑结果。
+    name = f"assurance-report-{run_id}-{run.get('run_attempt')}"
+    listing = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}/artifacts?per_page=100"))
+    artifacts = [item for item in listing.get("artifacts", []) if item.get("name") == name]
+    if len(artifacts) != 1 or artifacts[0].get("expired") is not False:
+        raise AssuranceError("exact assurance artifact is missing or expired")
+    artifact = artifacts[0]
+    raw = _github_api(f"{prefix}/actions/artifacts/{int(artifact['id'])}/zip")
+    if artifact.get("digest") != "sha256:" + hashlib.sha256(raw).hexdigest():
+        raise AssuranceError("assurance artifact digest mismatch")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            if archive.namelist() != ["assurance-report.json"]:
+                raise AssuranceError("unexpected assurance artifact members")
+            if archive.getinfo("assurance-report.json").file_size > 2_000_000:
+                raise AssuranceError("assurance report is oversized")
+            report = json.loads(archive.read("assurance-report.json"))
+    except (zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        raise AssuranceError("invalid assurance artifact") from exc
+    tested_commit = str(report.get("candidate_commit", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", tested_commit):
+        raise AssuranceError("invalid tested commit")
+    commit = json.loads(_github_api(f"{prefix}/git/commits/{tested_commit}"))
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+    result = verify_release_assurance(
+        report, run, commit, repository=repository, run_id=run_id, release_tree=tree,
+    )
+    result.update(artifact_id=artifact["id"], artifact_digest=artifact["digest"])
+    return result
+
+
+def reuse_primary_evidence(
+    current_manifest, previous_manifest, previous_evidence, fresh_manifest, fresh_evidence,
+    *, candidate_commit: str, changed_paths: Sequence[str],
+) -> dict[str, Any]:
+    """仅组合本次 CI 修复的三文件新结果与原完整结果；不重写旧回执。"""
+    if set(changed_paths) - PRIMARY_REUSE_PATHS:
+        raise AssuranceError("primary reuse includes changed runtime or test inputs")
+    for manifest, evidence, expected_commit in (
+        (previous_manifest, previous_evidence, previous_manifest.get("source_commit")),
+        (fresh_manifest, fresh_evidence, candidate_commit),
+    ):
+        result = verify_candidate_execution(
+            [PRIMARY_CELL], [manifest], [evidence],
+            candidate_commit=expected_commit, fast_gate_status="success",
+        )
+        if result["status"] != "success":
+            raise AssuranceError(f"primary reuse source failed: {result['reason']}")
+    reason = _validate_candidate_manifest(
+        current_manifest, expected_cell=PRIMARY_CELL, expected_commit=candidate_commit,
+    )
+    if reason:
+        raise AssuranceError(f"primary current collection invalid: {reason}")
+    def affected(nodeid):
+        return nodeid.split("::", 1)[0] in PRIMARY_REPAIR_TESTS
+
+    current = current_manifest["case_nodeids"]
+    previous = previous_manifest["case_nodeids"]
+    fresh = fresh_manifest["case_nodeids"]
+    expected_fresh = {key: node for key, node in current.items() if affected(node)}
+    unchanged = {key: node for key, node in current.items() if not affected(node)}
+    old_unchanged = {key: node for key, node in previous.items() if not affected(node)}
+    if not fresh or fresh != expected_fresh or unchanged != old_unchanged:
+        raise AssuranceError("primary reuse member union is incomplete or changed")
+    skipped = sorted(
+        (set(previous_evidence["skipped_case_ids"]) & set(unchanged))
+        | set(fresh_evidence["skipped_case_ids"])
+    )
+    result = dict(fresh_evidence)
+    result.update(
+        collection_manifest_digest=current_manifest["manifest_digest"],
+        collected_count=len(current), executed_count=len(current),
+        skipped=len(skipped), skipped_case_ids=skipped,
+        duration_seconds=previous_evidence["duration_seconds"] + fresh_evidence["duration_seconds"],
+        provenance={
+            "previous": {"source_commit": previous_manifest["source_commit"],
+                         "manifest_digest": previous_manifest["manifest_digest"],
+                         "case_ids": sorted(unchanged)},
+            "fresh": {"source_commit": candidate_commit,
+                      "manifest_digest": fresh_manifest["manifest_digest"],
+                      "case_ids": sorted(fresh)},
+        },
+    )
+    return result
+
+
+def prepare_primary_reuse(root: Path, repository: str, run_id: int, baseline: str, output: Path):
+    """固定原件的受限复用；运行输入改变时恢复普通完整执行。"""
+    import yaml
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise AssuranceError("invalid primary repository")
+    if not re.fullmatch(r"[0-9a-f]{40}", baseline):
+        raise AssuranceError("invalid primary baseline commit")
+    if (output / "fresh-manifest.json").exists() or (output / "reuse-plan.json").exists():
+        raise AssuranceError("primary preparation requires a fresh evidence directory")
+    if subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=root).returncode:
+        raise AssuranceError("primary preparation requires committed test inputs")
+    if subprocess.run(["git", "cat-file", "-e", baseline], cwd=root, capture_output=True).returncode:
+        subprocess.run(["git", "fetch", "--no-tags", "--depth=1", f"https://github.com/{repository}.git", baseline],
+                       cwd=root, check=True, capture_output=True, timeout=60)
+    changes = subprocess.check_output(
+        ["git", "-c", "core.quotepath=false", "diff", "--raw", "--no-abbrev", "--no-renames", baseline, "HEAD"],
+        cwd=root, text=True,
+    ).splitlines()
+    paths = []
+    for change in changes:
+        metadata, path = change.split("\t", 1)
+        fields = metadata.split()
+        # 模式变化、删除/新增、源代码和全局 fixture/依赖变化均不进入本次复用。
+        if fields[0][1:] != fields[1] or fields[4] != "M" or path not in PRIMARY_REUSE_PATHS:
+            return {"status": "full_required", "reason": "inputs_changed"}
+        paths.append(path)
+    workflow_path = ".github/workflows/compatibility-gate.yml"
+    old = yaml.safe_load(subprocess.check_output(["git", "show", f"{baseline}:{workflow_path}"], cwd=root))
+    new = yaml.safe_load((root / workflow_path).read_text(encoding="utf-8"))
+    def execution_inputs(workflow):
+        job = workflow["jobs"]["cross-platform-validation"]
+        steps = []
+        for original_step in job["steps"]:
+            step = dict(original_step)
+            if step.get("name") == "Prepare unchanged primary evidence":
+                continue
+            if step.get("name") == "Run selected pytest suite":
+                # 只剥离本次固定三文件选择；pytest 环境、命令和其他前置步骤均须相同。
+                step["run"] = step["run"].replace(PRIMARY_REPAIR_SELECTION, "")
+            steps.append(step)
+        return (workflow.get("env"), workflow.get("defaults"), job.get("defaults"),
+                job["runs-on"], job["strategy"]["matrix"],
+                {key: value for key, value in job["env"].items() if not key.startswith("PRIMARY_REUSE_")},
+                steps)
+    if execution_inputs(old) != execution_inputs(new):
+        return {"status": "full_required", "reason": "execution_inputs_changed"}
+    prefix = f"repos/{repository}"
+    run = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}"))
+    jobs = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs?per_page=100"))
+    primary = [job for job in jobs.get("jobs", [])
+               if job.get("name") == "Cross Platform Validation (ubuntu-latest, Python 3.11)"]
+    if (run.get("repository", {}).get("full_name") != repository
+        or run.get("path") != workflow_path or run.get("run_attempt") != 1
+        or len(primary) != 1 or primary[0].get("status") != "completed"
+        or primary[0].get("conclusion") != "success"):
+        raise AssuranceError("original primary full job has not succeeded")
+    items = json.loads(_github_api(f"{prefix}/actions/runs/{run_id}/artifacts?per_page=100"))
+    artifacts = [item for item in items.get("artifacts", [])
+                 if item.get("name") == f"compatibility-{PRIMARY_CELL}" and item.get("expired") is False]
+    if len(artifacts) != 1:
+        raise AssuranceError("original primary artifact missing")
+    artifact = artifacts[0]
+    raw = _github_api(f"{prefix}/actions/artifacts/{int(artifact['id'])}/zip")
+    if artifact.get("digest") != "sha256:" + hashlib.sha256(raw).hexdigest():
+        raise AssuranceError("original primary artifact digest mismatch")
+    previous = output / "previous"
+    previous.mkdir(parents=True, exist_ok=True)
+    (previous / "artifact.zip").write_bytes(raw)
+    members = {"collection-manifest.json", "compatibility-results.xml", "started-at.txt", "finished-at.txt"}
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        if set(archive.namelist()) != members or len(archive.namelist()) != len(members):
+            raise AssuranceError("unexpected primary artifact members")
+        for name in members:
+            (previous / name).write_bytes(archive.read(name))
+    manifest = _read_json(previous / "collection-manifest.json")
+    if manifest.get("source_commit") != baseline or manifest.get("collection_command") != DEFAULT_COLLECTION_COMMAND:
+        raise AssuranceError("original primary collection identity mismatch")
+    evidence = build_cell_evidence(
+        manifest, previous / "compatibility-results.xml", cell=PRIMARY_CELL,
+        source_commit=baseline, started_at=(previous / "started-at.txt").read_text().strip(),
+        finished_at=(previous / "finished-at.txt").read_text().strip(),
+    )
+    verified = verify_candidate_execution([PRIMARY_CELL], [manifest], [evidence],
+                                          candidate_commit=baseline, fast_gate_status="success")
+    if verified["status"] != "success":
+        raise AssuranceError(f"original primary evidence failed: {verified['reason']}")
+    _write_json(previous / "previous-result.json", evidence)
+    fresh = build_collection_manifest(_collect_nodeids(root, PRIMARY_REPAIR_TESTS), [PRIMARY_CELL],
+                                      _git_commit(root), collection_command=shlex.join(
+                                          ["pytest", "--collect-only", "-q", *PRIMARY_REPAIR_TESTS]))
+    _write_json(output / "fresh-manifest.json", fresh)
+    return {"status": "reuse_eligible", "baseline_commit": baseline, "run_id": run_id,
+            "changed_paths": paths, "artifact": artifact, "job": primary[0],
+            "previous_manifest_digest": manifest["manifest_digest"]}
 
 
 def _sha256(value: str) -> str:
@@ -597,8 +876,27 @@ def _build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--evidence-root", type=Path, required=True)
     aggregate.add_argument("--expected-cell", action="append", required=True)
     aggregate.add_argument("--candidate-commit", required=True)
+    aggregate.add_argument("--candidate-tree", required=True)
     aggregate.add_argument("--fast-gate-status", default="unknown")
     aggregate.add_argument("--output", type=Path, required=True)
+
+    release = subparsers.add_parser("release-check")
+    release.add_argument("--root", type=Path, default=Path.cwd())
+    release.add_argument("--repository", required=True)
+    release.add_argument("--run-id", default="")
+    release.add_argument("--output", type=Path, required=True)
+
+    prepare = subparsers.add_parser("prepare-primary")
+    prepare.add_argument("--root", type=Path, default=Path.cwd())
+    prepare.add_argument("--repository", required=True)
+    prepare.add_argument("--run-id", type=int, required=True)
+    prepare.add_argument("--baseline-commit", required=True)
+    prepare.add_argument("--output", type=Path, required=True)
+
+    combine = subparsers.add_parser("combine-primary")
+    combine.add_argument("--evidence-dir", type=Path, required=True)
+    combine.add_argument("--candidate-commit", required=True)
+    combine.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -624,6 +922,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 started_at=args.started_at,
                 finished_at=args.finished_at,
             )
+        elif args.command == "prepare-primary":
+            result = prepare_primary_reuse(args.root, args.repository, args.run_id,
+                                           args.baseline_commit, args.output.parent)
+        elif args.command == "combine-primary":
+            directory = args.evidence_dir
+            previous = directory / "previous"
+            plan = _read_json(directory / "reuse-plan.json")
+            if plan.get("status") != "reuse_eligible":
+                raise AssuranceError("primary reuse was not admitted")
+            result = reuse_primary_evidence(
+                _read_json(directory / "collection-manifest.json"),
+                _read_json(previous / "collection-manifest.json"),
+                _read_json(previous / "previous-result.json"),
+                _read_json(directory / "fresh-manifest.json"),
+                _read_json(directory / "fresh-result.json"),
+                candidate_commit=args.candidate_commit, changed_paths=plan["changed_paths"],
+            )
+        elif args.command == "release-check":
+            result = check_release_assurance(
+                args.root, args.repository,
+                release_assurance_run_id(args.run_id, os.environ.get("AI_SDLC_RELEASE_BODY", "")),
+            )
         else:
             evidence = [
                 _read_json(path)
@@ -634,6 +954,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for path in sorted(
                     args.evidence_root.rglob("collection-manifest.json")
                 )
+                if path.parent.name != "previous"
             ]
             result = verify_candidate_execution(
                 args.expected_cell,
@@ -642,8 +963,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_commit=args.candidate_commit,
                 fast_gate_status=args.fast_gate_status,
             )
+            if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_tree):
+                raise AssuranceError("invalid candidate tree")
+            result["candidate_tree"] = args.candidate_tree
+            result["reuse_provenance"] = {
+                item["cell"]: item["provenance"] for item in evidence if "provenance" in item
+            }
+            result["report_digest"] = _canonical_digest(result, "report_digest")
         _write_json(args.output, result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        if args.command == "prepare-primary":
+            return 0
         return 0 if result.get("status", "success") == "success" else 1
     except AssuranceError as exc:
         print(f"ci static assurance failed: {exc}", file=sys.stderr)

@@ -89,6 +89,9 @@ jobs:
     needs: fast-gate
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.force_full == true
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read
     timeout-minutes: ${{ matrix.suite == 'full' && 60 || 15 }}
     strategy:
       fail-fast: false
@@ -105,6 +108,9 @@ jobs:
     env:
       CELL: ${{ matrix.os }}-py${{ matrix.python-version }}
       TEST_SUITE: ${{ matrix.suite }}
+      # 本次发行原始完整执行，只有严格未变的输入才能复用；其他改动自动完整执行。
+      PRIMARY_REUSE_RUN_ID: "34986697226"
+      PRIMARY_REUSE_COMMIT: c091e092519b72c40929086deaa12d7f7716d52c
     steps:
       - name: Checkout candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -148,6 +154,16 @@ jobs:
       - name: Doctor
         run: uv run ai-sdlc doctor
 
+      - name: Prepare unchanged primary evidence
+        if: matrix.suite == 'full'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uv run python scripts/ci_static_assurance.py prepare-primary
+          --repository "${GITHUB_REPOSITORY}"
+          --run-id "${PRIMARY_REUSE_RUN_ID}" --baseline-commit "${PRIMARY_REUSE_COMMIT}"
+          --output "ci-evidence/${CELL}/reuse-plan.json"
+
       - name: Run selected pytest suite
         shell: bash
         run: |
@@ -156,6 +172,10 @@ jobs:
           if [[ "${TEST_SUITE}" == "full" ]]; then
             # 各测试使用独立临时项目；进程并行，保留所有用例和失败原件。
             test_args=(-n auto --dist worksteal --max-worker-restart=0)
+            if [[ -f "ci-evidence/${CELL}/fresh-manifest.json" ]]; then
+              test_args+=(tests/unit/test_quality_command.py tests/unit/test_ci_static_assurance.py
+                          tests/integration/test_github_workflows.py)
+            fi
           else
             while IFS= read -r node; do
               test_args+=("${node}")
@@ -269,20 +289,32 @@ jobs:
               evidence_dir="downloaded-evidence/compatibility-${cell}"
               started_at="$(tr -d '\r\n' < "${evidence_dir}/started-at.txt")"
               finished_at="$(tr -d '\r\n' < "${evidence_dir}/finished-at.txt")"
+              manifest="${evidence_dir}/collection-manifest.json"
+              result="${evidence_dir}/cell-evidence.json"
+              if [[ "${cell}" == "ubuntu-latest-py3.11" && -f "${evidence_dir}/fresh-manifest.json" ]]; then
+                manifest="${evidence_dir}/fresh-manifest.json"
+                result="${evidence_dir}/fresh-result.json"
+              fi
               python scripts/ci_static_assurance.py cell-evidence \
-                --manifest "${evidence_dir}/collection-manifest.json" \
+                --manifest "${manifest}" \
                 --junit "${evidence_dir}/compatibility-results.xml" \
                 --cell "${cell}" \
                 --source-commit "${candidate_sha}" \
                 --started-at "${started_at}" \
                 --finished-at "${finished_at}" \
-                --output "${evidence_dir}/cell-evidence.json"
+                --output "${result}"
+              if [[ "${result}" == "${evidence_dir}/fresh-result.json" ]]; then
+                python scripts/ci_static_assurance.py combine-primary \
+                  --evidence-dir "${evidence_dir}" --candidate-commit "${candidate_sha}" \
+                  --output "${evidence_dir}/cell-evidence.json"
+              fi
               cell_args+=(--expected-cell "${cell}")
           done
           python scripts/ci_static_assurance.py aggregate \
             --evidence-root downloaded-evidence \
             "${cell_args[@]}" \
             --candidate-commit "${candidate_sha}" \
+            --candidate-tree "$(git rev-parse HEAD^{tree})" \
             --fast-gate-status success \
             --output assurance-report.json
 

@@ -1818,6 +1818,46 @@ def test_compatibility_gate_statically_layers_fast_and_full_assurance() -> None:
     assert jobs["compatibility-gate-result"]["name"] == "Compatibility Gate Result"
 
 
+def test_release_entrypoints_require_successful_assurance_for_the_exact_tree() -> None:
+    for filename, consumers in (
+        ("release-build.yml", ("build-smoke",)),
+        ("release-artifact-smoke.yml", ("windows-zip", "posix-tar")),
+    ):
+        workflow = yaml.safe_load((_WORKFLOWS_DIR / filename).read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+        for consumer in consumers:
+            assert jobs[consumer]["needs"] == "release-assurance"
+        assurance = jobs["release-assurance"]
+        assert assurance["permissions"]["actions"] == "read"
+        step = next(s for s in assurance["steps"] if s.get("name") == "Require tested release tree")
+        assert "scripts/ci_static_assurance.py release-check" in step["run"]
+        assert '--run-id "${ASSURANCE_RUN_ID}"' in step["run"]
+        assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+        assert "continue-on-error" not in assurance
+    compatibility = (_WORKFLOWS_DIR / "compatibility-gate.yml").read_text(encoding="utf-8")
+    assert '--candidate-tree "$(git rev-parse HEAD^{tree})"' in compatibility
+
+
+def test_primary_reuse_keeps_full_collection_and_reruns_all_affected_files():
+    module = runpy.run_path(_REPO_ROOT / "scripts" / "ci_static_assurance.py")
+    workflow = yaml.safe_load((_WORKFLOWS_DIR / "compatibility-gate.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["cross-platform-validation"]
+    steps = {s.get("name"): s for s in job["steps"]}
+    collect = steps["Collect exact candidate members"]["run"]
+    assert 'if [[ "${TEST_SUITE}" != "full" ]]' in collect
+    prepare = steps["Prepare unchanged primary evidence"]
+    assert prepare["if"] == "matrix.suite == 'full'"
+    assert "prepare-primary" in prepare["run"]
+    run = steps["Run selected pytest suite"]["run"]
+    assert "-n auto --dist worksteal --max-worker-restart=0" in run
+    for path in module["PRIMARY_REPAIR_TESTS"]:
+        assert path in run
+    aggregate = next(s["run"] for s in workflow["jobs"]["merge-assurance"]["steps"]
+                     if s.get("name") == "Rebuild, verify, and aggregate full evidence")
+    assert "combine-primary" in aggregate
+    assert "fresh-manifest.json" in aggregate
+
+
 def test_compatibility_gate_uses_candidate_artifacts_and_exact_results(
     tmp_path: Path,
 ) -> None:

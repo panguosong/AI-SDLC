@@ -1782,8 +1782,19 @@ def test_unrelated_reparented_child_requires_affirmative_parent_evidence(
             row[0] for row in receipts["cleanup"]["process_tracking"]["owned"]
         }
         before = (folder / "other-value").read_bytes()
-        time.sleep(0.05)
-        assert (folder / "other-value").read_bytes() != before
+        # 等待真实写入进展；共享 runner 不保证外部进程在固定 50ms 内获得调度。
+        progress_deadline = time.monotonic() + 1
+        after = before
+        while time.monotonic() < progress_deadline:
+            after = (folder / "other-value").read_bytes()
+            if after and after != before:
+                break
+            time.sleep(0.01)
+        assert after and after != before, json.dumps(
+            {"before": repr(before), "after": repr(after), "receipts": receipts},
+            ensure_ascii=False,
+            indent=2,
+        )
     finally:
         # 测试只通过自有临时文件让协作进程退出，不向未归属身份发送信号。
         (folder / "other-stop").touch()

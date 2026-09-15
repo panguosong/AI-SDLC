@@ -790,7 +790,7 @@ def _dirty_worktree_paths(
 
     dirty: list[str] = []
     for status_code, rel_path in _iter_porcelain_entries(result.stdout):
-        normalized = rel_path.replace("\\", "/")
+        normalized = rel_path
         if (
             not normalized
             or _is_reviewed_dirty_status_for_launch(
@@ -827,9 +827,9 @@ def _reviewed_dirty_paths_for_launch(
     }:
         return frozenset()
     return frozenset(
-        path.strip().replace("\\", "/")
+        path
         for path in review_pack.changed_files
-        if path.strip()
+        if path
     )
 
 
@@ -1070,7 +1070,7 @@ def _worktree_snapshot(
 
     snapshot = _git_head_index_snapshot(root)
     for status_code, rel_path in _iter_porcelain_entries(result.stdout):
-        normalized = rel_path.replace("\\", "/")
+        normalized = rel_path
         if not normalized or _is_mutable_provider_output(
             root, mutable_provider_outputs, normalized
         ):
@@ -1467,7 +1467,7 @@ def _findings_scope_blocker(
 
 
 def _normalize_review_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("/")
+    return Path(path).as_posix().lstrip("/") if path else ""
 
 
 def _exit_code_verdict_blocker(

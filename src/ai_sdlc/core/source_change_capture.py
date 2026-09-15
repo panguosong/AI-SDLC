@@ -418,7 +418,7 @@ def _mode(payload: bytes) -> str:
 
 
 def _decode_path(payload: bytes) -> str:
-    return payload.decode("utf-8", errors="strict").replace("\\", "/")
+    return payload.decode("utf-8", errors="strict")
 
 
 def _git(

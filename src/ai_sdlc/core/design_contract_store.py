@@ -270,9 +270,11 @@ def read_verification_contract(
     budget = read(contract.budget_ref.path)
     if hashlib.sha256(budget).hexdigest() != contract.budget_ref.sha256:
         raise ValueError("counterexample-original-budget-digest-mismatch")
+    # 比较时忽略阶段目录大小写，原路径和内容摘要仍按原件绑定。
+    budget_path = contract.budget_ref.path.casefold()
     if (
-        "/loops/implementation/" in contract.budget_ref.path
-        or "/loops/design-contract/" in contract.budget_ref.path
+        "/loops/implementation/" in budget_path
+        or "/loops/design-contract/" in budget_path
     ):
         raise ValueError("counterexample-future-stage-budget-forbidden")
     validate_contract_sources(contract, material, entries)

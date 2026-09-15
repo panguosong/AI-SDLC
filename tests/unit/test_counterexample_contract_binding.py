@@ -156,6 +156,57 @@ def _contract(root, namespace="spec"):
     return work, raw, options
 
 
+@pytest.mark.parametrize("stage", ["implementation", "design-contract"])
+@pytest.mark.parametrize("spelling", ["lower", "upper", "mixed"])
+def test_design_budget_rejects_future_stage_path_case_aliases(
+    root_tmp_path, stage, spelling
+):
+    root = root_tmp_path
+    work, _, options = _contract(root)
+    path = f".ai-sdlc/loops/{stage}/sample/budget.md"
+    if spelling == "upper":
+        path = path.upper()
+    elif spelling == "mixed":
+        path = f".AI-SDLC/Loops/{stage.title()}/sample/budget.md"
+    budget = b"Existing operation budget.\n"
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(budget)
+    data = json.loads((work / "verification.json").read_bytes())
+    data["budget_ref"] = {"path": path, "sha256": hashlib.sha256(budget).hexdigest()}
+    (work / "verification.json").write_text(json.dumps(data), encoding="utf-8")
+
+    result = check_design_contract_loop(options)
+
+    assert result.status == "blocked", result
+    assert "future-stage-budget-forbidden" in result.blocker
+    assert not design_contract_artifacts(root, "design").input_path.exists()
+    assert target.read_bytes() == budget
+
+
+def test_design_budget_keeps_ordinary_path_spelling(root_tmp_path):
+    root = root_tmp_path
+    work, _, options = _contract(root)
+    path = "SPECS/Original/Budget.md"
+    budget = b"Existing operation budget.\n"
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(budget)
+    data = json.loads((work / "verification.json").read_bytes())
+    data["budget_ref"] = {"path": path, "sha256": hashlib.sha256(budget).hexdigest()}
+    (work / "verification.json").write_text(json.dumps(data), encoding="utf-8")
+
+    result = check_design_contract_loop(options)
+
+    assert result.status == "ready", result
+    frozen = DesignContractInput.model_validate_json(
+        design_contract_artifacts(root, "design").input_path.read_bytes()
+    )
+    contract, material = read_verification_contract(root, frozen)
+    assert contract.budget_ref.path == path
+    assert material[path] == budget
+
+
 @pytest.mark.parametrize("namespace", ["spec", "task"])
 def test_first_check_captures_exact_contract_then_reuses_it(root_tmp_path, namespace):
     root = root_tmp_path

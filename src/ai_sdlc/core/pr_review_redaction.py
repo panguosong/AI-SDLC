@@ -466,7 +466,7 @@ def _combine_blob_decisions(
 
 
 def _normalize_repo_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("/")
+    return Path(path).as_posix().lstrip("/") if path else ""
 
 
 def _is_generated_path(path: str) -> bool:

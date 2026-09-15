@@ -4030,7 +4030,7 @@ def _unreviewed_dirty_paths(
     )
     dirty: list[str] = []
     for status_xy, rel_path in _iter_porcelain_entries(result.stdout):
-        normalized = rel_path.replace("\\", "/")
+        normalized = rel_path
         if (
             not normalized
             or _is_reviewed_dirty_status(
@@ -4093,9 +4093,9 @@ def _reviewed_dirty_paths_for_review_run(
         ):
             return frozenset()
     return frozenset(
-        path.strip().replace("\\", "/")
+        path
         for path in review_pack.changed_files
-        if path.strip()
+        if path
     )
 
 

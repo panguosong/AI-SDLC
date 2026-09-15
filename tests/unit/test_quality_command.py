@@ -1947,6 +1947,13 @@ def _fix23_ps_availability(monkeypatch, missing):
     def run(argv, *args, **kwargs):
         if isinstance(argv, (list, tuple)) and argv[0] == "ps":
             calls.append(tuple(argv))
+            if missing == "unsupported":
+                # 真实子进程拒绝参数并非找不到可执行文件，仍须查询原生进程表。
+                return original(
+                    [sys.executable, "-c", "import sys; sys.exit(1)", *argv[1:]],
+                    *args,
+                    **kwargs,
+                )
             if missing:
                 raise FileNotFoundError(2, "ps unavailable", "ps")
         return original(argv, *args, **kwargs)
@@ -1956,7 +1963,7 @@ def _fix23_ps_availability(monkeypatch, missing):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 进程组消费者")
-@pytest.mark.parametrize("missing_ps", [False, True])
+@pytest.mark.parametrize("missing_ps", [False, True, "unsupported"])
 def test_fix23_quality_completes_with_and_without_ps(
     repository, monkeypatch, missing_ps
 ):
@@ -1969,9 +1976,10 @@ def test_fix23_quality_completes_with_and_without_ps(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 清理能力必须在启动前可证实")
+@pytest.mark.parametrize("missing_ps", [True, "unsupported"])
 @pytest.mark.parametrize("failure", ["permission", "visibility", "malformed", "empty"])
 def test_fix23_unavailable_native_group_never_launches_business(
-    repository, monkeypatch, failure
+    repository, monkeypatch, failure, missing_ps
 ):
     from ai_sdlc.core import quality_command as quality
 
@@ -1979,7 +1987,7 @@ def test_fix23_unavailable_native_group_never_launches_business(
     options, receipts = _controlled_options(
         repository, f"from pathlib import Path; Path({str(marker)!r}).write_text('launched')"
     )
-    calls = _fix23_ps_availability(monkeypatch, True)
+    calls = _fix23_ps_availability(monkeypatch, missing_ps)
     queries, launchers = [], []
     original_popen = quality.subprocess.Popen
 
@@ -2013,7 +2021,7 @@ def test_fix23_unavailable_native_group_never_launches_business(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 进程组消费者")
-@pytest.mark.parametrize("missing_ps", [False, True])
+@pytest.mark.parametrize("missing_ps", [False, True, "unsupported"])
 def test_fix23_provider_completes_with_and_without_ps(
     repository, monkeypatch, missing_ps
 ):
@@ -2045,11 +2053,12 @@ def test_fix23_provider_completes_with_and_without_ps(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 全组原生查询")
-def test_fix23_native_group_and_browser_consumer_without_ps(monkeypatch):
+@pytest.mark.parametrize("missing_ps", [True, "unsupported"])
+def test_fix23_native_group_and_browser_consumer_without_ps(monkeypatch, missing_ps):
     from ai_sdlc.core import quality_command as quality
     from ai_sdlc.core.frontend_browser_gate_runtime import _kill_posix_process_group
 
-    calls = _fix23_ps_availability(monkeypatch, True)
+    calls = _fix23_ps_availability(monkeypatch, missing_ps)
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         start_new_session=True,
@@ -2073,27 +2082,30 @@ def test_fix23_native_group_and_browser_consumer_without_ps(monkeypatch):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 脱组后代原生收尾")
+@pytest.mark.parametrize("missing_ps", [True, "unsupported"])
 @pytest.mark.parametrize("mode", ["success", "double_fork", "nonzero", "timeout", "output_limit"])
-def test_fix23_missing_ps_preserves_detached_cleanup(repository, monkeypatch, mode):
-    _fix23_ps_availability(monkeypatch, True)
+def test_fix23_missing_ps_preserves_detached_cleanup(repository, monkeypatch, mode, missing_ps):
+    _fix23_ps_availability(monkeypatch, missing_ps)
     test_controlled_detached_helper_really_stops_writing(repository, mode)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 未归属后代仍拒绝完成")
-def test_fix23_missing_ps_preserves_unknown_detached_process(repository, monkeypatch):
-    _fix23_ps_availability(monkeypatch, True)
+@pytest.mark.parametrize("missing_ps", [True, "unsupported"])
+def test_fix23_missing_ps_preserves_unknown_detached_process(repository, monkeypatch, missing_ps):
+    _fix23_ps_availability(monkeypatch, missing_ps)
     test_detached_helper_without_marker_cannot_claim_complete(repository)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 原生查询失败仍阻断")
+@pytest.mark.parametrize("missing_ps", [True, "unsupported"])
 @pytest.mark.parametrize("error", [PermissionError, ValueError, IndexError])
-def test_fix23_missing_ps_native_error_cannot_claim_cleanup(monkeypatch, error):
+def test_fix23_missing_ps_native_error_cannot_claim_cleanup(monkeypatch, error, missing_ps):
     from types import SimpleNamespace
 
     from ai_sdlc.core import quality_command as quality
     from ai_sdlc.core.frontend_browser_gate_runtime import _kill_posix_process_group
 
-    _fix23_ps_availability(monkeypatch, True)
+    _fix23_ps_availability(monkeypatch, missing_ps)
 
     def unavailable(self, group_id):
         raise error("group visibility unavailable")

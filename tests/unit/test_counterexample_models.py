@@ -452,6 +452,35 @@ def test_invalid_contracts_do_not_get_default_success(mutation):
         VerificationContract.model_validate(data)
 
 
+@pytest.mark.parametrize("stage", ["implementation", "design-contract"])
+@pytest.mark.parametrize("spelling", ["lower", "upper", "mixed"])
+def test_requirement_source_rejects_future_stage_path_case_aliases(stage, spelling):
+    data = contract_data()
+    path = f".ai-sdlc/loops/{stage}/sample/report.json"
+    if spelling == "upper":
+        path = path.upper()
+    elif spelling == "mixed":
+        path = f".AI-SDLC/Loops/{stage.title()}/sample/report.json"
+    data["sources"][0].update(
+        namespace="requirement", path=path, loop_id="requirement",
+        profile_id="profile", goal_id="goal", obligation_id="obligation",
+    )
+    with pytest.raises(ValidationError, match="future-stage-source-forbidden"):
+        VerificationContract.model_validate(data)
+
+
+def test_requirement_source_keeps_ordinary_path_spelling():
+    data = contract_data()
+    path = "SPECS/Original/Requirements.md"
+    data["sources"][0].update(
+        namespace="requirement", path=path, loop_id="requirement",
+        profile_id="profile", goal_id="goal", obligation_id="obligation",
+    )
+    contract = VerificationContract.model_validate(data)
+    assert contract.sources[0].path == path
+    assert contract.sources[0].sha256 == data["sources"][0]["sha256"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

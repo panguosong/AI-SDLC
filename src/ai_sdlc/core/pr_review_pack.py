@@ -927,7 +927,7 @@ def _normalize_patch_path(value: str) -> str:
 
 
 def _normalize_patch_repo_path(value: str) -> str:
-    normalized = value.replace("\\", "/")
+    normalized = value.replace(os.sep, "/")
     if normalized.startswith("/") or _looks_like_windows_absolute_path(normalized):
         raise GitError(f"Patch path escapes repository: {value}")
     parts: list[str] = []
@@ -974,7 +974,8 @@ def _diff_git_paths(line: str) -> list[str]:
 
 
 def _normalize_repo_path(value: str) -> str:
-    return value.replace("\\", "/").lstrip("/")
+    # 只转换宿主路径分隔符；POSIX Git 文件名中的反斜杠属于名字本身。
+    return value.replace(os.sep, "/").lstrip("/")
 
 
 def _append_unique(items: list[str], value: str) -> None:

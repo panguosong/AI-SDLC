@@ -208,7 +208,9 @@ class SourceReference(ArtifactRef):
                 raise ValueError(
                     "counterexample-original-requirement-identity-required"
                 )
-            if "/implementation/" in self.path or "/design-contract/" in self.path:
+            # 跨平台拒绝阶段目录的大小写别名，保留原路径用于身份绑定。
+            source_path = self.path.casefold()
+            if "/implementation/" in source_path or "/design-contract/" in source_path:
                 raise ValueError("counterexample-future-stage-source-forbidden")
         elif any(
             (

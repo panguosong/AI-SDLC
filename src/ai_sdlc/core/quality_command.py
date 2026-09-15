@@ -1069,7 +1069,7 @@ class _PosixProcessTable:
         return result
 
     def group_members(self, group_id: int) -> list[int]:
-        """缺少 ps 时查询完整进程组；不沿用归属追踪的当前 UID 过滤。"""
+        """ps 不可用时查询完整进程组；不沿用归属追踪的当前 UID 过滤。"""
         members = []
         deadline = time.monotonic() + 2
         if sys.platform == "darwin":
@@ -1438,7 +1438,8 @@ def _posix_group_members(group_id: int) -> list[int]:
             check=True,
             timeout=2,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # 已安装的 ps 也可能不支持这些选项；原生全组查询失败仍由调用方拒绝完成。
         return _PosixProcessTable().group_members(group_id)
     members = []
     for line in result.stdout.splitlines():

@@ -56,7 +56,7 @@ def test_release_checklist_matches_the_standard_release_workflow() -> None:
 
 
 def test_online_installers_default_to_the_exact_public_git_tag(tmp_path: Path) -> None:
-    expected = "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0"
+    expected = "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0"
     powershell = (_PACKAGING_DIR / "install_online.ps1").read_text(encoding="utf-8")
     script_path = tmp_path / "install_online.sh"
     shutil.copy2(_PACKAGING_DIR / "install_online.sh", script_path)
@@ -2478,7 +2478,7 @@ def test_user_guide_documents_published_assets_and_two_new_user_paths() -> None:
     guide = (_REPO_ROOT / "USER_GUIDE.zh-CN.md").read_text(encoding="utf-8")
     assert "## 第一章：全新用户 + 全新空项目" in guide
     assert "## 第二章：全新用户 + 已有项目" in guide
-    assert "https://github.com/sinclairpan0720/Ai_AutoSDLC" in guide
+    assert "https://github.com/panguosong/AI-SDLC" in guide
     assert "ai-sdlc-offline-3.2.0-windows-amd64.zip" in guide
     assert "ai-sdlc-offline-3.2.0-macos-arm64.tar.gz" in guide
     assert "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz" in guide

@@ -2,7 +2,7 @@
 
 AI-SDLC 是一个本地优先、可恢复、可验证的 AI 原生软件研发框架。它把需求澄清、设计契约、任务执行、质量门禁、对抗审查和交付证据组织成一套可由 AI 代理与工程师共同执行的命令行工作流。
 
-项目地址：<https://github.com/sinclairpan0720/Ai_AutoSDLC>
+项目地址：<https://github.com/panguosong/AI-SDLC>
 
 > 本文为 `v3.2.0` 发布文档；安装前请确认对应正式 Release 和目标平台资产已经可用，未发布时不要用开发分支替代正式安装来源。第一次使用时，请在下面的 12 条路线中只选择一条完整执行；从 `v2.0.0` 升级前请阅读 [v3 迁移说明](docs/v3-migration.zh-CN.md)，从 `v1.0.2` 跨大版本升级还应先阅读 [v2 迁移说明](docs/v2-migration.zh-CN.md)。
 
@@ -49,7 +49,7 @@ Linux 选择边界：已存在 Python 3.11+ 的 Linux 主机保持发行版无�
 ### 高级安装：从 Git 安装
 
 ```powershell
-python -m pip install "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0"
+python -m pip install "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0"
 ai-sdlc --version
 ```
 
@@ -60,8 +60,8 @@ ai-sdlc --version
 ### 开发者入口：从源码运行
 
 ```powershell
-git clone --branch v3.2.0 --depth 1 https://github.com/sinclairpan0720/Ai_AutoSDLC.git
-Set-Location Ai_AutoSDLC
+git clone --branch v3.2.0 --depth 1 https://github.com/panguosong/AI-SDLC.git
+Set-Location AI-SDLC
 uv sync
 uv run ai-sdlc --version
 ```

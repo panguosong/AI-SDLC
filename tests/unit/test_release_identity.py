@@ -41,8 +41,8 @@ def test_release_workflow_defaults_target_v1_0_2() -> None:
 
 def test_stable_git_install_examples_pin_v1_0_2() -> None:
     text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0" in text
-    assert "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v1.0.2" not in text
+    assert "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0" in text
+    assert "git+https://github.com/panguosong/AI-SDLC.git@v1.0.2" not in text
     assert "@main" in text
     assert "开发版" in text
 
@@ -50,7 +50,7 @@ def test_stable_git_install_examples_pin_v1_0_2() -> None:
 def test_stable_source_checkout_examples_pin_v1_0_2() -> None:
     stable_clone = (
         "git clone --branch v3.2.0 --depth 1 "
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC.git"
+        "https://github.com/panguosong/AI-SDLC.git"
     )
     for name in ("README.md", "packaging/offline/README.md"):
         text = (REPO_ROOT / name).read_text(encoding="utf-8")

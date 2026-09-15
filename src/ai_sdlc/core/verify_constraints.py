@@ -145,9 +145,9 @@ RECONCILE_SMOKE_CONTRACT_SURFACES: dict[Path, tuple[str, ...]] = {
 RELEASE_DOCS_CONSISTENCY_SURFACES: dict[Path, tuple[str, ...]] = {
     README_REL: (
         "# AI-SDLC 3.2.0",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC",
-        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
-        "git clone --branch v3.2.0 --depth 1 https://github.com/sinclairpan0720/Ai_AutoSDLC.git",
+        "https://github.com/panguosong/AI-SDLC",
+        "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0",
+        "git clone --branch v3.2.0 --depth 1 https://github.com/panguosong/AI-SDLC.git",
         "ai-sdlc-offline-3.2.0-windows-amd64.zip",
         "ai-sdlc-offline-3.2.0-macos-arm64.tar.gz",
         "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
@@ -156,7 +156,7 @@ RELEASE_DOCS_CONSISTENCY_SURFACES: dict[Path, tuple[str, ...]] = {
     ),
     USER_GUIDE_REL: (
         "# AI-SDLC 3.2.0 中文用户指南",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC",
+        "https://github.com/panguosong/AI-SDLC",
         "## 第一章：全新用户 + 全新空项目",
         "## 第二章：全新用户 + 已有项目",
         "Windows",
@@ -177,8 +177,8 @@ RELEASE_DOCS_CONSISTENCY_SURFACES: dict[Path, tuple[str, ...]] = {
     ),
     OFFLINE_README_REL: (
         "# AI-SDLC 3.2.0 离线打包说明",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC",
-        "git clone --branch v3.2.0 --depth 1 https://github.com/sinclairpan0720/Ai_AutoSDLC.git",
+        "https://github.com/panguosong/AI-SDLC",
+        "git clone --branch v3.2.0 --depth 1 https://github.com/panguosong/AI-SDLC.git",
         "ai-sdlc-offline-3.2.0-windows-amd64.zip",
         "ai-sdlc-offline-3.2.0-macos-arm64.tar.gz",
         "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
@@ -189,10 +189,10 @@ RELEASE_DOCS_CONSISTENCY_SURFACES: dict[Path, tuple[str, ...]] = {
         "verify_offline_bundle.py",
     ),
     ONLINE_INSTALL_PS_REL: (
-        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
+        "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0",
     ),
     ONLINE_INSTALL_SH_REL: (
-        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
+        "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0",
     ),
     V3_MIGRATION_REL: (
         "v2.0.0",
@@ -208,7 +208,7 @@ RELEASE_DOCS_CONSISTENCY_SURFACES: dict[Path, tuple[str, ...]] = {
         "USER_GUIDE.zh-CN.md",
         "packaging/offline/README.md",
         "docs/pull-request-checklist.zh.md",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC",
+        "https://github.com/panguosong/AI-SDLC",
         "ai-sdlc-offline-3.2.0-windows-amd64.zip",
         "ai-sdlc-offline-3.2.0-macos-arm64.tar.gz",
         "ai-sdlc-offline-3.2.0-linux-amd64.tar.gz",
@@ -272,7 +272,7 @@ BEGINNER_GUIDE_FORBIDDEN_TOKENS = (
     "从源码运行",
     "@main",
     "uv sync",
-    "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git",
+    "git+https://github.com/panguosong/AI-SDLC.git",
     "git clone --branch",
     "开发版",
     "Codex + PowerShell 为默认组合",

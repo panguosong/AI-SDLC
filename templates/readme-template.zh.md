@@ -23,6 +23,6 @@
 
 ## 与 AI-SDLC 的关系
 
-本仓库使用 [AI-SDLC](https://github.com/sinclairpan0720/Ai_AutoSDLC) 管理研发流程；流水线入口见 `.ai-sdlc/` 与 `rules/pipeline.md`。
+本仓库使用 [AI-SDLC](https://github.com/panguosong/AI-SDLC) 管理研发流程；流水线入口见 `.ai-sdlc/` 与 `rules/pipeline.md`。
 
 ## 许可证

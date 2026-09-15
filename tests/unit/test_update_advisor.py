@@ -33,7 +33,7 @@ def test_latest_release_redirect_returns_existing_fetch_contract(monkeypatch) ->
             return None
 
         def geturl(self) -> str:
-            return "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0"
+            return "https://github.com/panguosong/AI-SDLC/releases/tag/v2.0.0"
 
         def read(self) -> bytes:
             raise AssertionError("release HTML body must not be read")
@@ -52,13 +52,13 @@ def test_latest_release_redirect_returns_existing_fetch_contract(monkeypatch) ->
     result = fetch_latest_github_release(1.5)
 
     assert seen == {
-        "url": "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/latest",
+        "url": "https://github.com/panguosong/AI-SDLC/releases/latest",
         "method": "HEAD",
         "timeout": 1.5,
     }
     assert result == {
         "tag_name": "v2.0.0",
-        "html_url": "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0",
+        "html_url": "https://github.com/panguosong/AI-SDLC/releases/tag/v2.0.0",
         "draft": False,
         "prerelease": False,
     }
@@ -67,16 +67,16 @@ def test_latest_release_redirect_returns_existing_fetch_contract(monkeypatch) ->
 @pytest.mark.parametrize(
     "final_url",
     [
-        "http://github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0",
-        "https://example.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0",
-        "https://user@github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0",
-        "https://github.com:443/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0",
-        "https://github.com/Other/Ai_AutoSDLC/releases/tag/v2.0.0",
-        "https://github.com/SinclairPan/Ai_AutoSDLC/releases/tag/v2.0.0",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/latest",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0?x=1",
-        "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/tag/v2.0.0#x",
+        "http://github.com/panguosong/AI-SDLC/releases/tag/v2.0.0",
+        "https://example.com/panguosong/AI-SDLC/releases/tag/v2.0.0",
+        "https://user@github.com/panguosong/AI-SDLC/releases/tag/v2.0.0",
+        "https://github.com:443/panguosong/AI-SDLC/releases/tag/v2.0.0",
+        "https://github.com/Other/AI-SDLC/releases/tag/v2.0.0",
+        "https://github.com/Panguosong/AI-SDLC/releases/tag/v2.0.0",
+        "https://github.com/panguosong/AI-SDLC/releases/latest",
+        "https://github.com/panguosong/AI-SDLC/releases/tag/v2.0",
+        "https://github.com/panguosong/AI-SDLC/releases/tag/v2.0.0?x=1",
+        "https://github.com/panguosong/AI-SDLC/releases/tag/v2.0.0#x",
     ],
 )
 def test_latest_release_redirect_rejects_noncanonical_final_url(

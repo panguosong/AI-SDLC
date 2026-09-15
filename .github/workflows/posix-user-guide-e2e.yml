@@ -81,16 +81,16 @@ jobs:
           new_project_root="${HOME}/projects/posix-online-empty-project"
           existing_project_root="${HOME}/projects/posix-online-existing-project"
           source_kind="remote-release-tag"
-          source_repository="sinclairpan0720/Ai_AutoSDLC"
+          source_repository="panguosong/AI-SDLC"
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
             source_kind="remote-pull-request-head"
             source_repository="${PR_HEAD_REPOSITORY}"
             remote_sha="${PR_HEAD_SHA}"
           else
-            tag_line="$(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
             if [[ -z "${tag_line}" ]]; then
-              tag_line="$(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+              tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
             fi
             remote_sha="${tag_line%%[[:space:]]*}"
             test -n "${remote_sha}"
@@ -238,15 +238,15 @@ jobs:
           export SHELL="/bin/bash"
           mkdir -p "${evidence_root}" "${HOME}"
           : > "${HOME}/.bashrc"
-          source_repository="sinclairpan0720/Ai_AutoSDLC"
+          source_repository="panguosong/AI-SDLC"
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
             source_repository="${PR_HEAD_REPOSITORY}"
             remote_sha="${PR_HEAD_SHA}"
           else
-            tag_line="$(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
             if [[ -z "${tag_line}" ]]; then
-              tag_line="$(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+              tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
             fi
             remote_sha="${tag_line%%[[:space:]]*}"
             test -n "${remote_sha}"
@@ -700,10 +700,10 @@ jobs:
           else
             curl --fail --location --retry 3 \
               --output "${download_root}/${PACKAGE_NAME}" \
-              "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME"
+              "https://github.com/panguosong/AI-SDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME"
             curl --fail --location --retry 3 \
               --output "${download_root}/${PACKAGE_NAME}.sha256" \
-              "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME.sha256"
+              "https://github.com/panguosong/AI-SDLC/releases/download/$RELEASE_TAG/$PACKAGE_NAME.sha256"
           fi
           printf 'release_tag=%s; package_source=%s\n' "${RELEASE_TAG}" "${package_source}" \
             > "${evidence_root}/scenario.txt"
@@ -1029,20 +1029,20 @@ jobs:
           replay_root="${RUNNER_TEMP}/opensuse-online-route-replay"
           evidence_root="${RUNNER_TEMP}/opensuse-online-route-evidence"
           mkdir -p "${replay_root}" "${evidence_root}"
-          source_repository="sinclairpan0720/Ai_AutoSDLC"
+          source_repository="panguosong/AI-SDLC"
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             test -n "${PR_HEAD_REPOSITORY}" && test -n "${PR_HEAD_SHA}"
             source_repository="${PR_HEAD_REPOSITORY}"
             remote_sha="${PR_HEAD_SHA}"
           else
-            tag_line="$(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
+            tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}^{}" | head -n 1)"
             if [[ -z "${tag_line}" ]]; then
-              tag_line="$(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
+              tag_line="$(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/${RELEASE_TAG}" | head -n 1)"
             fi
             remote_sha="${tag_line%%[[:space:]]*}"
             test -n "${remote_sha}"
           fi
-          guide_installer_url="https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.sh"
+          guide_installer_url="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
           candidate_installer_url="https://raw.githubusercontent.com/${source_repository}/${remote_sha}/packaging/install_online.sh"
 
           for project_state in "new" "existing"; do

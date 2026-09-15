@@ -660,7 +660,7 @@ fi
         "ALLOWED_RELEASE_TAG": "v3.2.0",
         "DISPATCH_REF": "refs/heads/main",
         "DISPATCH_SHA": "a" * 40,
-        "GITHUB_REPOSITORY": "sinclairpan0720/Ai_AutoSDLC",
+        "GITHUB_REPOSITORY": "panguosong/AI-SDLC",
         "AI_SDLC_RELEASE_ASSET_OS": "linux",
         "AI_SDLC_RELEASE_ASSET_MACHINE": "amd64",
         "FAKE_GH_LOG": str(log_path),
@@ -1209,7 +1209,7 @@ def test_linux_online_existing_python_path_replays_on_opensuse() -> None:
     assert 'source "/replay/${project_state}-acquire.sh"' in replay
     assert 'source "/replay/${project_state}-verify.sh"' in replay
     assert (
-        "https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.sh"
+        "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
         in replay
     )
     assert 'test -s "${INSTALLER_PATH}"' in replay
@@ -1630,7 +1630,7 @@ def test_windows_clean_user_e2e_pins_release_tag_before_online_install() -> None
         "clean-online-interactive-user-journey:", 1
     )[1]
     resolve_release_tag = (
-        "git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "
+        "git ls-remote https://github.com/panguosong/AI-SDLC.git "
         '"refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}"'
     )
     pinned_installer = (

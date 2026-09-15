@@ -7,7 +7,7 @@
 - [ ] `pyproject.toml` 为 `3.2.0`；
 - [ ] 两个 `ai_sdlc/__init__.py` 回退版本均为 `3.2.0`；
 - [ ] `uv.lock` 中本项目版本为 `3.2.0`；
-- [ ] Git 地址为 `https://github.com/sinclairpan0720/Ai_AutoSDLC`；
+- [ ] Git 地址为 `https://github.com/panguosong/AI-SDLC`；
 - [ ] 工作树只包含本次授权变更。
 
 ## 质量门禁

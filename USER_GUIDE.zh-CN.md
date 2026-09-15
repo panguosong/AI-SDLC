@@ -2,7 +2,7 @@
 
 本指南面向第一次接触 AI-SDLC 的普通用户，对应 `v3.2.0` 发布版本。所有安装器、离线包、校验文件和安装后版本必须保持一致；仅在对应正式 Release 可用后使用这些下载链接，不用开发分支替代未就绪的制品。
 
-项目地址：<https://github.com/sinclairpan0720/Ai_AutoSDLC>
+项目地址：<https://github.com/panguosong/AI-SDLC>
 
 外部 stable shim 与 `python -m ai_sdlc` 是 Windows 支持即时更新和原命令重放的入口。Windows 运行时目录内的 direct `Scripts\ai-sdlc.exe` 活动时不能安全替换：它只给出迁移提示、零安装并让当前业务命令继续一次；显式 direct self-update 不修改安装且返回非零。`-AddToPath` 或 `--add-to-path` 成功后，新终端中的裸 `ai-sdlc` 是日常入口；当前安装窗口使用路线内给出的 module 命令。
 
@@ -10,12 +10,12 @@
 
 `v3.2.0` 正式 Release 应提供以下离线资产：
 
-- <https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip>
-- <https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip.sha256>
-- <https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz>
-- <https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz.sha256>
-- <https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz>
-- <https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz.sha256>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-windows-amd64.zip.sha256>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-macos-arm64.tar.gz.sha256>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz>
+- <https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/ai-sdlc-offline-3.2.0-linux-amd64.tar.gz.sha256>
 
 每个归档旁都必须同时下载完全同名并追加 `.sha256` 的 sidecar。
 
@@ -81,7 +81,7 @@ git --version
 
 ```powershell
 $InstallerName = "install_online.ps1"
-$InstallerUrl = "https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.ps1"
 $InstallerPath = Join-Path $DownloadRoot $InstallerName
 Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
 ```
@@ -163,7 +163,7 @@ brew --version
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -249,7 +249,7 @@ curl --version
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -343,7 +343,7 @@ $ErrorActionPreference = "Stop"
 $DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
 New-Item -ItemType Directory -Force -Path $DownloadRoot | Out-Null
 $PackageName = "ai-sdlc-offline-3.2.0-windows-amd64.zip"
-$PackageUrl = "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/$PackageName"
+$PackageUrl = "https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PackageName"
 Invoke-WebRequest -Uri $PackageUrl -OutFile (Join-Path $DownloadRoot $PackageName)
 Invoke-WebRequest -Uri "$PackageUrl.sha256" -OutFile (Join-Path $DownloadRoot "$PackageName.sha256")
 ```
@@ -430,7 +430,7 @@ set -e
 DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$DOWNLOAD_ROOT"
 PACKAGE_NAME="ai-sdlc-offline-3.2.0-macos-arm64.tar.gz"
-PACKAGE_URL="https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/$PACKAGE_NAME"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -564,7 +564,7 @@ fi
 command -v curl >/dev/null 2>&1 || { echo "Prerequisite installation did not produce curl." >&2; exit 1; }
 ca_bundle_available || { echo "Prerequisite installation did not produce a readable CA bundle." >&2; exit 1; }
 PACKAGE_NAME="ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
-PACKAGE_URL="https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/$PACKAGE_NAME"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -707,7 +707,7 @@ if ($LASTEXITCODE -eq 0) { git status --short --untracked-files=all }
 
 ```powershell
 $InstallerName = "install_online.ps1"
-$InstallerUrl = "https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.ps1"
+$InstallerUrl = "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.ps1"
 $InstallerPath = Join-Path $DownloadRoot $InstallerName
 Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
 ```
@@ -792,7 +792,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -880,7 +880,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
 ```bash
 INSTALLER_NAME="install_online.sh"
-INSTALLER_URL="https://raw.githubusercontent.com/sinclairpan0720/Ai_AutoSDLC/v3.2.0/packaging/install_online.sh"
+INSTALLER_URL="https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.0/packaging/install_online.sh"
 INSTALLER_PATH="$DOWNLOAD_ROOT/$INSTALLER_NAME"
 curl --fail --location --retry 3 --output "$INSTALLER_PATH" "$INSTALLER_URL"
 ```
@@ -980,7 +980,7 @@ $ErrorActionPreference = "Stop"
 $DownloadRoot = Join-Path $HOME "Downloads\ai-sdlc-v3.2.0"
 New-Item -ItemType Directory -Force -Path $DownloadRoot | Out-Null
 $PackageName = "ai-sdlc-offline-3.2.0-windows-amd64.zip"
-$PackageUrl = "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/$PackageName"
+$PackageUrl = "https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PackageName"
 Invoke-WebRequest -Uri $PackageUrl -OutFile (Join-Path $DownloadRoot $PackageName)
 Invoke-WebRequest -Uri "$PackageUrl.sha256" -OutFile (Join-Path $DownloadRoot "$PackageName.sha256")
 ```
@@ -1072,7 +1072,7 @@ set -e
 DOWNLOAD_ROOT="$HOME/Downloads/ai-sdlc-v3.2.0"
 mkdir -p "$DOWNLOAD_ROOT"
 PACKAGE_NAME="ai-sdlc-offline-3.2.0-macos-arm64.tar.gz"
-PACKAGE_URL="https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/$PACKAGE_NAME"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```
@@ -1207,7 +1207,7 @@ fi
 command -v curl >/dev/null 2>&1 || { echo "Prerequisite installation did not produce curl." >&2; exit 1; }
 ca_bundle_available || { echo "Prerequisite installation did not produce a readable CA bundle." >&2; exit 1; }
 PACKAGE_NAME="ai-sdlc-offline-3.2.0-linux-amd64.tar.gz"
-PACKAGE_URL="https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/v3.2.0/$PACKAGE_NAME"
+PACKAGE_URL="https://github.com/panguosong/AI-SDLC/releases/download/v3.2.0/$PACKAGE_NAME"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME" "$PACKAGE_URL"
 curl --fail --location --retry 3 --output "$DOWNLOAD_ROOT/$PACKAGE_NAME.sha256" "$PACKAGE_URL.sha256"
 ```

@@ -10,10 +10,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-CURRENT_REPOSITORY_URL = "https://github.com/sinclairpan0720/Ai_AutoSDLC"
+CURRENT_REPOSITORY_URL = "https://github.com/panguosong/AI-SDLC"
 CURRENT_VERSION = "3.2.0"
 STABLE_SOURCE_CLONE = (
-    "git clone --branch v3.2.0 --depth 1 https://github.com/sinclairpan0720/Ai_AutoSDLC.git"
+    "git clone --branch v3.2.0 --depth 1 https://github.com/panguosong/AI-SDLC.git"
 )
 
 REQUIRED_SURFACES: dict[str, tuple[str, ...]] = {
@@ -61,11 +61,11 @@ REQUIRED_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "packaging/install_online.ps1": (
         CURRENT_REPOSITORY_URL,
-        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
+        "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0",
     ),
     "packaging/install_online.sh": (
         CURRENT_REPOSITORY_URL,
-        "git+https://github.com/sinclairpan0720/Ai_AutoSDLC.git@v3.2.0",
+        "git+https://github.com/panguosong/AI-SDLC.git@v3.2.0",
     ),
     "docs/v3-migration.zh-CN.md": (
         "v3.0.0",

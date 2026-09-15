@@ -157,8 +157,8 @@ jobs:
             }
             Copy-Item -LiteralPath $localChecksum.FullName -Destination $checksumPath -Force
           } else {
-            Invoke-WebRequest -Uri "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$PackageName" -OutFile $packagePath
-            Invoke-WebRequest -Uri "https://github.com/sinclairpan0720/Ai_AutoSDLC/releases/download/$env:RELEASE_TAG/$ChecksumName" -OutFile $checksumPath
+            Invoke-WebRequest -Uri "https://github.com/panguosong/AI-SDLC/releases/download/$env:RELEASE_TAG/$PackageName" -OutFile $packagePath
+            Invoke-WebRequest -Uri "https://github.com/panguosong/AI-SDLC/releases/download/$env:RELEASE_TAG/$ChecksumName" -OutFile $checksumPath
           }
           $checksumParts = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+', 2
           if ($checksumParts.Count -ne 2 -or $checksumParts[1] -ne $PackageName) {
@@ -504,7 +504,7 @@ jobs:
           $installerPath = Join-Path $env:RUNNER_TEMP "install_online.ps1"
           $installVenv = Join-Path $env:RUNNER_TEMP "ai-sdlc-online"
           $sourceKind = "remote-release-tag"
-          $sourceRepository = "sinclairpan0720/Ai_AutoSDLC"
+          $sourceRepository = "panguosong/AI-SDLC"
           if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
             if (-not $env:PR_HEAD_REPOSITORY -or -not $env:PR_HEAD_SHA) {
               throw "Pull request source repository or revision is unavailable."
@@ -513,7 +513,7 @@ jobs:
             $sourceRepository = $env:PR_HEAD_REPOSITORY
             $remoteSha = $env:PR_HEAD_SHA
           } else {
-            $tagLines = @(git ls-remote https://github.com/sinclairpan0720/Ai_AutoSDLC.git "refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}")
+            $tagLines = @(git ls-remote https://github.com/panguosong/AI-SDLC.git "refs/tags/$env:RELEASE_TAG" "refs/tags/$env:RELEASE_TAG^{}")
             $peeledTag = $tagLines | Where-Object { $_ -match '\^\{\}$' } | Select-Object -First 1
             $resolvedTag = if ($peeledTag) { $peeledTag } else { $tagLines | Select-Object -First 1 }
             $remoteSha = ($resolvedTag -split "`t")[0]

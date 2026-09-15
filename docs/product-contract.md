@@ -6,7 +6,7 @@
 
 AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负责读取项目事实、固化工程规则、组织可恢复流水线、运行质量门禁，并把每次推进转化为可验证的本地证据。
 
-项目地址：<https://github.com/sinclairpan0720/Ai_AutoSDLC>
+项目地址：<https://github.com/panguosong/AI-SDLC>
 
 ## 核心原则
 
@@ -124,7 +124,7 @@ AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负�
 ### v3.2.0 发行目标
 
 - 目标源码版本及安装后输出：`3.2.0`；目标正式 tag：`v3.2.0`；
-- Git 仓库：`https://github.com/sinclairpan0720/Ai_AutoSDLC`；
+- Git 仓库：`https://github.com/panguosong/AI-SDLC`；
 - 安装与校验入口见 `USER_GUIDE.zh-CN.md` 的完整 12 条路线；只有对应正式 Release、资产和摘要已就绪后才能按正式渠道安装；
 - 目标离线产物：`ai-sdlc-offline-3.2.0-windows-amd64.zip`、`ai-sdlc-offline-3.2.0-macos-arm64.tar.gz`、`ai-sdlc-offline-3.2.0-linux-amd64.tar.gz`，每个归档同时提供同名 `.sha256`；
 - 本版范围为五 Loop / 六视角的有界模拟量化、原生实际评审与关闭接线，以及对应公开文档和安装包；不因源码测试或协议夹具通过就宣称模型效果、全平台安装或发行已完成。

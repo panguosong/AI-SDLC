@@ -2,7 +2,7 @@
 
 离线打包用于在可联网构建机准备完整制品，再交付到无法访问软件源的 Windows、macOS 或 Linux 环境。
 
-项目地址：<https://github.com/sinclairpan0720/Ai_AutoSDLC>
+项目地址：<https://github.com/panguosong/AI-SDLC>
 
 本次源码与发布文档目标版本为 `3.2.0` / `v3.2.0`。下列命令用于发布前候选验证或正式制品复验；公开可用状态以正式 Release 为准。
 
@@ -31,8 +31,8 @@
 复验正式发布的 `v3.2.0` 源码时，固定使用该 tag；正式 tag 尚不可用时不要执行此下载步骤或替换为开发分支：
 
 ```bash
-git clone --branch v3.2.0 --depth 1 https://github.com/sinclairpan0720/Ai_AutoSDLC.git
-cd Ai_AutoSDLC
+git clone --branch v3.2.0 --depth 1 https://github.com/panguosong/AI-SDLC.git
+cd AI-SDLC
 ```
 
 3.2.0 候选构建只能在已审查 PR 的当前工作树根目录执行：

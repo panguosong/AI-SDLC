@@ -290,3 +290,46 @@ def test_legacy_review_without_narrow_binding_requires_complete_original_digest(
                 case, IMPLEMENTATION, review_input_validator=validate_review_input_for_close,
             )
         assert _loop_bytes(case) == before
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_closed_native_legacy_review_quality_is_required_after_source_changes(
+    initialized_project_dir, repair,
+):
+    root = initialized_project_dir
+    _native_closed_baseline(root, repair=repair)
+    spec = root / "specs/stage-requirement/spec.md"
+    spec.write_bytes(spec.read_bytes() + b"\nAllowed post-Close source update.\n")
+    assert read_verified_implementation_close(root, IMPLEMENTATION).loop_id == IMPLEMENTATION
+    assert not _implementation_gate(root, IMPLEMENTATION, work_item_id="stage-requirement")[2]
+    damages = ["failed", "important", "blocker", "missing-all"]
+    if repair:
+        damages += ["failed-r1", "clean-r1"]
+    for damage in damages:
+        case = root.parent / f"closed-quality-{damage}"
+        shutil.copytree(root, case)
+        directory = case / ".ai-sdlc/loops/implementation" / IMPLEMENTATION
+        number = 1 if damage.endswith("-r1") else 2 if repair else 1
+        outcome = directory / f"review-outcome-round-{number}.json"
+        data = json.loads(outcome.read_bytes())
+        assert data["implementation_input_digest"]
+        if damage == "missing-all":
+            for path in directory.glob("review-outcome-round-*.json"):
+                path.unlink()
+        else:
+            if damage.startswith("failed"):
+                data.update(status="failed", findings=[], failure_kind="transport", failure_reason="Incomplete")
+            elif damage == "clean-r1":
+                data["findings"] = []
+            else:
+                data["findings"] = [{
+                    "severity": damage, "role": data["expert_roles"][0],
+                    "location": "implementation", "summary": "Unresolved required repair",
+                    "recommendation": "Repair before accepting Close",
+                }]
+            outcome.write_text(json.dumps(data))
+        before = _loop_bytes(case)
+        for validator in (None, validate_review_input_for_close):
+            with pytest.raises(ValueError):
+                read_verified_implementation_close(case, IMPLEMENTATION, review_input_validator=validator)
+        assert _implementation_gate(case, IMPLEMENTATION, work_item_id="stage-requirement")[2]
+        assert _loop_bytes(case) == before

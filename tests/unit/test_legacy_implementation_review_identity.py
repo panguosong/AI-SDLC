@@ -120,8 +120,9 @@ def test_old_actionable_review_can_revalidate_identity_without_claiming_pass(tmp
     assert all(p.read_bytes() == content for p, content in before.items())
 
 
-@pytest.mark.parametrize("damage", ["actionable", "failed", "source-drift"])
-def test_old_closed_review_default_read_keeps_quality_and_full_digest(tmp_path, damage):
+@pytest.mark.parametrize("bound_identity", [False, True])
+@pytest.mark.parametrize("damage", ["actionable", "failed", "missing", "source-drift"])
+def test_old_closed_review_default_read_keeps_quality_and_full_digest(tmp_path, damage, bound_identity):
     from ai_sdlc.cli.loop_review_cmd import validate_review_input_for_close
     from ai_sdlc.core.implementation_loop import (
         ImplementationCloseOptions,
@@ -130,6 +131,11 @@ def test_old_closed_review_default_read_keeps_quality_and_full_digest(tmp_path, 
     from ai_sdlc.core.loop_review_service import read_verified_implementation_close
 
     directory, reviewed = _old_review_case(tmp_path)
+    if bound_identity:
+        path = directory / "review-outcome-round-1.json"
+        data = json.loads(path.read_bytes())
+        data["implementation_input_digest"] = reviewed.implementation_input_digest
+        path.write_text(json.dumps(data))
     assert close_implementation_loop(
         ImplementationCloseOptions(
             root=tmp_path, loop_id=reviewed.loop_id, yes=True,
@@ -144,10 +150,15 @@ def test_old_closed_review_default_read_keeps_quality_and_full_digest(tmp_path, 
         data = json.loads(outcome.read_bytes())
         data.update(status="failed", failure_kind="transport", failure_reason="Incomplete")
         outcome.write_text(json.dumps(data))
+    elif damage == "missing":
+        outcome.unlink()
     else:
         spec = tmp_path / "specs/demo-implementation-loop/spec.md"
         spec.write_bytes(spec.read_bytes() + b"\nChanged substantive input.\n")
     before = {p: p.read_bytes() for p in directory.iterdir() if p.is_file()}
-    with pytest.raises(ValueError):
-        read_verified_implementation_close(tmp_path, reviewed.loop_id)
+    if bound_identity and damage == "source-drift":
+        assert read_verified_implementation_close(tmp_path, reviewed.loop_id).loop_id == reviewed.loop_id
+    else:
+        with pytest.raises(ValueError):
+            read_verified_implementation_close(tmp_path, reviewed.loop_id)
     assert all(p.read_bytes() == content for p, content in before.items())

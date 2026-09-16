@@ -728,6 +728,20 @@ def validate_legacy_implementation_identity(
         or (bound and (impl_input is None or not run.input_digest))
     ):
         raise DecisionPreparationError("decision-identity-mismatch")
+    if native_footprint and run.status == LoopStatus.CLOSED:
+        from ai_sdlc.core.loop_review_service import has_actionable_findings
+
+        # 窄摘要只证明输入身份；原生闭后消费仍须保留完整、已通过的正式评审序列。
+        if not outcomes:
+            raise DecisionPreparationError("review-result-missing")
+        if len(outcomes) == 2 and (
+            outcomes[0].status != "completed" or not has_actionable_findings(outcomes[0])
+        ):
+            raise DecisionPreparationError("review-outcome-sequence-invalid")
+        if outcomes[-1].status != "completed":
+            raise DecisionPreparationError("review-execution-failed")
+        if has_actionable_findings(outcomes[-1]):
+            raise DecisionPreparationError("review-findings-actionable")
     if impl_input is not None:
         if reviewed_input is not None and (
             reviewed_input.loop_id, reviewed_input.loop_type,

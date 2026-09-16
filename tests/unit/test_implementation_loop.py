@@ -1157,6 +1157,10 @@ def test_close_implementation_loop_writes_close_artifact(tmp_path: Path) -> None
     assert blocked.blocker == ("T11 has no successful verification for current source.")
 
     _record_successful_quality_result(tmp_path, "impl-close", "T11")
+    reviewed = resolve_review_input(
+        tmp_path, loop_type="implementation", loop_id="impl-close", review_round_number=1,
+    )
+    _write_clean_implementation_review(tmp_path, "impl-close", reviewed, bind_input=True)
 
     loop_dir = tmp_path / ".ai-sdlc/loops/implementation/impl-close"
     reviewed_reports = {
@@ -1786,12 +1790,15 @@ def _write_clean_implementation_review(
     root: Path,
     loop_id: str,
     reviewed: ReviewInput,
+    *,
+    bind_input: bool = False,
 ) -> None:
     outcome = LoopReviewOutcome(
         loop_id=loop_id,
         loop_type="implementation",
         round_number=reviewed.round_number,
         input_digest=reviewed.input_digest,
+        implementation_input_digest=(reviewed.implementation_input_digest if bind_input else None),
         status="completed",
         expert_roles=reviewed.expert_roles,
         findings=[],

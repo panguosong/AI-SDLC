@@ -438,6 +438,13 @@ def _closed_document_review(root, host):
     }
     if current_manifest != previous.manifest:
         raise DecisionPreparationError("simulation-closed-review-material-drift")
+    # 合并前核对重叠路径，防止早期元数据覆盖已与最终 manifest 绑定的不同字节。
+    if any(
+        material_captured[path] != content
+        for path, content in captured.items()
+        if path in material_captured
+    ):
+        raise DecisionPreparationError("review-input-drift")
     # 最终材料中的原始依据与最初捕获的补录/R1/合同必须仍为同一版本。
     if repair_supplement is not None and (
         read_verified_repair_supplement(

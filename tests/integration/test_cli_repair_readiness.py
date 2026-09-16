@@ -334,6 +334,63 @@ def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
     _frozen_supplemented_requirement(initialized_project_dir)
 
 
+def test_closed_requirement_rejects_mixed_supplement_captures(
+    initialized_project_dir, monkeypatch
+):
+    import ai_sdlc.cli.loop_stage_cmd as stage
+    import ai_sdlc.core.design_contract_loop as design
+    from ai_sdlc.core.loop_decision_service import DecisionPreparationError
+
+    root = initialized_project_dir
+    directory, _ = _frozen_supplemented_requirement(root)
+    originals = {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+    supplement = directory / "repair-readiness-supplement.json"
+    bound_bytes = originals[supplement]
+    other_bytes = bound_bytes + b"\n"
+    host = stage.resolve_stage_decision_host(root, "requirement", LOOP)
+    assert stage._closed_document_review(root, host) is not None
+    supplement.write_bytes(other_bytes)
+    with pytest.raises(DecisionPreparationError):
+        stage._closed_document_review(root, host)
+
+    native_read = stage.read_stable_bytes
+    native_gate = design._requirement_loop_gate
+    captured = []
+
+    def alternating_read(project_root, path):
+        if path != supplement:
+            return native_read(project_root, path)
+        # 模拟写入方仅在材料捕获时发布 R2 绑定版本，其余读取仍见旧版本。
+        if len(captured) == 1:
+            supplement.write_bytes(bound_bytes)
+            try:
+                content = native_read(project_root, path)
+            finally:
+                supplement.write_bytes(other_bytes)
+        else:
+            content = native_read(project_root, path)
+        captured.append(content)
+        return content
+
+    def gate_during_bound_version(project_root, *args, **kwargs):
+        supplement.write_bytes(bound_bytes)
+        try:
+            result = native_gate(project_root, *args, **kwargs)
+            assert not result[0]
+            return result
+        finally:
+            supplement.write_bytes(other_bytes)
+
+    monkeypatch.setattr(stage, "read_stable_bytes", alternating_read)
+    monkeypatch.setattr(design, "_requirement_loop_gate", gate_during_bound_version)
+    with pytest.raises(DecisionPreparationError, match="review-input-drift"):
+        stage._closed_document_review(root, host)
+    assert captured[:2] == [other_bytes, bound_bytes]
+    supplement.write_bytes(bound_bytes)
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
 @pytest.mark.parametrize(
     "damage", ["basis-deleted", "basis-changed", "supplement-deleted", "all-repair-footprints-deleted", "origin-decision-forged"]
 )

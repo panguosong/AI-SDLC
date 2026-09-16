@@ -76,6 +76,10 @@ class LoopReviewOutcome(BaseModel):
     loop_type: LoopReviewType
     round_number: int = Field(strict=True, ge=1)
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    implementation_input_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
     status: ReviewExecutionStatus
     expert_roles: list[str] = Field(min_length=1, max_length=2)
     findings: list[ReviewFinding] = Field(default_factory=list)
@@ -115,6 +119,10 @@ class LoopReviewOutcome(BaseModel):
 
     @model_validator(mode="after")
     def _validate_outcome_shape(self) -> LoopReviewOutcome:
+        if self.implementation_input_digest is not None and (
+            self.loop_type != "implementation" or self.b1 is not None or self.simulation is not None
+        ):
+            raise ValueError("legacy implementation review binding identity is invalid")
         values = (
             self.continuation_digest,
             self.continuation_material_manifest,

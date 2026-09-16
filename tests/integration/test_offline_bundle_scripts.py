@@ -49,14 +49,14 @@ LOGO=ubuntu-logo
 def test_release_checklist_matches_the_standard_release_workflow() -> None:
     checklist = (_OFFLINE_DIR / "RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
 
-    assert "`v3.2.1`" in checklist
+    assert "`v3.2.2`" in checklist
     assert "`upload_to_release`" in checklist
     assert "PR1 的三个发布开关" not in checklist
     assert "v1.0.4 上传与发布动作保持禁止" not in checklist
 
 
 def test_online_installers_default_to_the_exact_public_git_tag(tmp_path: Path) -> None:
-    expected = "git+https://github.com/panguosong/AI-SDLC.git@v3.2.1"
+    expected = "git+https://github.com/panguosong/AI-SDLC.git@v3.2.2"
     powershell = (_PACKAGING_DIR / "install_online.ps1").read_text(encoding="utf-8")
     script_path = tmp_path / "install_online.sh"
     shutil.copy2(_PACKAGING_DIR / "install_online.sh", script_path)
@@ -1929,7 +1929,7 @@ def test_install_online_rejects_ubuntu_glibc_without_python_before_any_mutation(
     assert result.returncode != 0
     assert "distro=ubuntu version=22.04 arch=x86_64 libc=glibc" in result.stdout
     assert "Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc" in result.stdout
-    assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" in result.stdout
+    assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" in result.stdout
     assert "route 6/12" in result.stdout
     _assert_unsupported_install_did_not_mutate(
         venv_target=venv_target,
@@ -2059,10 +2059,10 @@ def test_install_online_preserves_independent_linux_host_facts_when_os_release_i
     assert result.returncode != 0
     assert f"distro=unknown version=unknown {expected_identity}" in result.stdout
     if expects_amd64_fallback:
-        assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" in result.stdout
+        assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" in result.stdout
         assert "route 6/12" in result.stdout
     else:
-        assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" not in result.stdout
+        assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" not in result.stdout
         assert "route 6/12" not in result.stdout
     _assert_unsupported_install_did_not_mutate(
         venv_target=venv_target,
@@ -2110,7 +2110,7 @@ def test_install_online_rejects_linux_aarch64_glibc_without_python_fallback(
 
     assert result.returncode != 0
     assert "distro=debian version=12 arch=aarch64 libc=glibc" in result.stdout
-    assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" not in result.stdout
+    assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" not in result.stdout
     assert "route 6/12" not in result.stdout
     _assert_unsupported_install_did_not_mutate(
         venv_target=venv_target,
@@ -2158,7 +2158,7 @@ def test_install_online_rejects_linux_x86_64_musl_without_python_fallback(
 
     assert result.returncode != 0
     assert "distro=debian version=12 arch=x86_64 libc=musl" in result.stdout
-    assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" not in result.stdout
+    assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" not in result.stdout
     assert "route 6/12" not in result.stdout
     _assert_unsupported_install_did_not_mutate(
         venv_target=venv_target,
@@ -2479,9 +2479,9 @@ def test_user_guide_documents_published_assets_and_two_new_user_paths() -> None:
     assert "## 第一章：全新用户 + 全新空项目" in guide
     assert "## 第二章：全新用户 + 已有项目" in guide
     assert "https://github.com/panguosong/AI-SDLC" in guide
-    assert "ai-sdlc-offline-3.2.1-windows-amd64.zip" in guide
-    assert "ai-sdlc-offline-3.2.1-macos-arm64.tar.gz" in guide
-    assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" in guide
+    assert "ai-sdlc-offline-3.2.2-windows-amd64.zip" in guide
+    assert "ai-sdlc-offline-3.2.2-macos-arm64.tar.gz" in guide
+    assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" in guide
     assert "releases/download/v1.0.4/" not in guide
     assert "Get-FileHash -Algorithm SHA256" in guide
     assert "shasum -a 256 -c" in guide

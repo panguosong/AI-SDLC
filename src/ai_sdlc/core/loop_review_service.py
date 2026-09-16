@@ -248,7 +248,7 @@ def read_verified_implementation_close(
             impl_input = ImplementationInput.model_validate_json(captured[artifacts.input_path])
         # 缺失摘要不是历史身份：执行路径或评审足迹仍须保留原生输入绑定。
         opaque = validate_legacy_implementation_identity(
-            root, run, impl_input,
+            root, run, impl_input, review_input_validator=review_input_validator,
         )
         if impl_input is not None:
             validate_implementation_requirement(
@@ -690,6 +690,10 @@ def _record_loop_review_locked(
         loop_type=options.loop_type,
         round_number=prepared.review_input.round_number,
         input_digest=prepared.review_input.input_digest,
+        implementation_input_digest=(
+            prepared.review_input.implementation_input_digest
+            if prepared.b1_snapshot is None else None
+        ),
         status=merged.status,
         expert_roles=prepared.review_input.expert_roles,
         findings=merged.findings,
@@ -723,6 +727,25 @@ def _record_loop_review_locked(
             or fresh.b1_snapshot != prepared.b1_snapshot
         ):
             raise LoopReviewServiceError("review-input-drift")
+        if outcome.implementation_input_digest is not None:
+            from ai_sdlc.core.implementation_models import ImplementationInput
+            from ai_sdlc.core.loop_decision_service import (
+                validate_legacy_implementation_identity,
+            )
+            from ai_sdlc.core.loop_models import LoopRun
+
+            identity_bytes = {
+                path: read_stable_bytes(options.root, path)
+                for path in (loop_dir / "loop-run.json", loop_dir / "implementation-input.json")
+            }
+            validate_legacy_implementation_identity(
+                options.root,
+                LoopRun.model_validate_json(identity_bytes[loop_dir / "loop-run.json"]),
+                ImplementationInput.model_validate_json(identity_bytes[loop_dir / "implementation-input.json"]),
+                reviewed_input=fresh.review_input,
+            )
+            if any(read_stable_bytes(options.root, path) != content for path, content in identity_bytes.items()):
+                raise LoopReviewServiceError("review-input-drift")
         if (
             isinstance(fresh.b1_snapshot, StageReviewSnapshot)
             and outcome.status == "completed"
@@ -738,7 +761,7 @@ def _record_loop_review_locked(
 
     # 模型在锁外完成；临时文件写好后仍须复验同一量化候选，不能靠持锁时长代替输入绑定。
     # 最终 precommit 会完整重读并重算当前时间；进入 writer 前不重复同一次验证。
-    if prepared.b1_snapshot is not None:
+    if prepared.b1_snapshot is not None or outcome.implementation_input_digest is not None:
         _write_outcome(
             options.root, prepared.outcome_path, outcome, precommit=revalidate
         )

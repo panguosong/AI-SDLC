@@ -40,7 +40,7 @@ def test_readme_linux_selector_states_certified_python_bootstrap_boundary() -> N
     for marker in (
         "已存在 Python 3.11+ 的 Linux 主机保持发行版无关的在线兼容路径",
         "缺少 Python 时，在线自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc",
-        "其他缺少 Python 的 amd64/x86_64 + glibc Linux 主机使用路线 6/12 的 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz",
+        "其他缺少 Python 的 amd64/x86_64 + glibc Linux 主机使用路线 6/12 的 ai-sdlc-offline-3.2.2-linux-amd64.tar.gz",
     ):
         assert marker in readme
     assert "所有 Linux AMD64 都会自动安装 Python" not in readme
@@ -210,7 +210,7 @@ def test_linux_offline_routes_keep_exact_asset_without_debian_only_reclassificat
     None
 ):
     _, routes = _route_sections(guide_text())
-    asset = "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz"
+    asset = "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz"
 
     for route_id in (
         "new|offline|linux-amd64",
@@ -245,8 +245,8 @@ def test_linux_offline_routes_gate_amd64_glibc_in_prerequisites_and_recovery() -
         '"$ARCH" != "x86_64"',
         '"$ARCH" != "amd64"',
         '"$LIBC" != "glibc"',
-        "停止：v3.2.1 没有与此主机兼容的 Linux 发行资产",
-        "不得使用 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz",
+        "停止：v3.2.2 没有与此主机兼容的 Linux 发行资产",
+        "不得使用 ai-sdlc-offline-3.2.2-linux-amd64.tar.gz",
         "exit 1",
         "\nfi\n",
     )
@@ -282,17 +282,17 @@ def test_guide_lists_every_runtime_adapter_in_both_scenarios() -> None:
 def test_guide_pins_published_assets_and_stable_output_contract() -> None:
     text = guide_text()
     for asset in (
-        "ai-sdlc-offline-3.2.1-windows-amd64.zip",
-        "ai-sdlc-offline-3.2.1-macos-arm64.tar.gz",
-        "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz",
+        "ai-sdlc-offline-3.2.2-windows-amd64.zip",
+        "ai-sdlc-offline-3.2.2-macos-arm64.tar.gz",
+        "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz",
     ):
         assert asset in text
-        assert f"releases/download/v3.2.1/{asset}" in text
+        assert f"releases/download/v3.2.2/{asset}" in text
         assert f"{asset}.sha256" in text
     assert "releases/download/v1.0.4/" not in text
     for anchor in (
         "Offline installation completed",
-        "3.2.1",
+        "3.2.2",
         "Initialized AI-SDLC project",
         "当前结果 / Result",
         "下一步 / Next",

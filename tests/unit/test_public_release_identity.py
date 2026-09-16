@@ -50,7 +50,7 @@ def test_scan_rejects_repository_mismatch_and_local_path_disclosure(
 def test_required_surfaces_enforce_current_release_identity() -> None:
     files = {
         "README.md": (
-            f"{CURRENT_REPOSITORY_URL}\nAI-SDLC 3.2.1\n{STABLE_SOURCE_CLONE}"
+            f"{CURRENT_REPOSITORY_URL}\nAI-SDLC 3.2.2\n{STABLE_SOURCE_CLONE}"
         ),
     }
 
@@ -64,7 +64,7 @@ def test_required_surfaces_enforce_current_release_identity() -> None:
 
 def test_scan_allows_current_release_and_dependency_versions(tmp_path: Path) -> None:
     files = {
-        "README.md": f"{CURRENT_REPOSITORY_URL}\nAI-SDLC 3.2.1",
+        "README.md": f"{CURRENT_REPOSITORY_URL}\nAI-SDLC 3.2.2",
         "uv.lock": 'name = "example"\nversion = "3.4.2"',
         "managed/frontend/package-lock.json": '{"version":"3.3.0"}',
         "src/provider.py": 'release_ref = "refs/tags/rust-v0.138.0"',

@@ -1,12 +1,12 @@
-# AI-SDLC 3.2.1 离线发布检查清单
+# AI-SDLC 3.2.2 离线发布检查清单
 
-本次目标版本为 `3.2.1` / `v3.2.1`。候选源码版本不代表已经公开发布；只有本清单的发布后验证完成，才能宣布发布完成。
+本次目标版本为 `3.2.2` / `v3.2.2`。候选源码版本不代表已经公开发布；只有本清单的发布后验证完成，才能宣布发布完成。
 
 ## 版本与源码
 
-- [ ] `pyproject.toml` 为 `3.2.1`；
-- [ ] 两个 `ai_sdlc/__init__.py` 回退版本均为 `3.2.1`；
-- [ ] `uv.lock` 中本项目版本为 `3.2.1`；
+- [ ] `pyproject.toml` 为 `3.2.2`；
+- [ ] 两个 `ai_sdlc/__init__.py` 回退版本均为 `3.2.2`；
+- [ ] `uv.lock` 中本项目版本为 `3.2.2`；
 - [ ] Git 地址为 `https://github.com/panguosong/AI-SDLC`；
 - [ ] 工作树只包含本次授权变更。
 
@@ -45,7 +45,7 @@
 - [ ] Windows 解压与 `install_offline.ps1 -AddToPath` 成功；
 - [ ] macOS 解压与 `install_offline.sh --add-to-path` 成功；
 - [ ] Linux 解压与 `install_offline.sh --add-to-path` 成功；
-- [ ] 三个平台 `ai-sdlc --version` 输出 `3.2.1`；
+- [ ] 三个平台 `ai-sdlc --version` 输出 `3.2.2`；
 - [ ] 三个平台 `ai-sdlc --help` 成功；
 - [ ] Codex + PowerShell 初始化成功；
 - [ ] `ai-sdlc adapter status` 成功；
@@ -54,13 +54,13 @@
 ## 发布与复验
 
 - [ ] README、用户指南和打包说明中的包名一致；
-- [ ] 精确 main SHA 上存在 annotated tag `v3.2.1` 和全新的空 Draft Release；
+- [ ] 精确 main SHA 上存在 annotated tag `v3.2.2` 和全新的空 Draft Release；
 - [ ] `release-build` 仅在 `upload_to_release` 为字符串 `"true"` 时，把已通过 smoke 的六个文件上传到该 Draft；
 - [ ] Release Build 的三平台安装 smoke 全部通过；下载 Draft 中全部六个资产，验证精确名称、sidecar 文件名和 SHA256；
 - [ ] `release-artifact-smoke` 使用只读 token，无法读取 Draft 时不得把可见性失败记作通过，也不增加权限或重复请求；保留上述构建 smoke 和已上传资产校验，重新核对 main、annotated tag、Draft 与六资产身份后发布为非预发布 Latest；
-- [ ] 发布事件触发的 Release Artifact Smoke 三平台全部通过，正式下载并安装的 CLI 均报告 `3.2.1`；
-- [ ] 发布后分别手动触发现有 `windows-user-guide-e2e.yml` 和 `posix-user-guide-e2e.yml`，输入 `tag=v3.2.1`，要求全部成功；这两份流程没有 release 事件触发器，不等待自动触发；
-- [ ] 所有旧 tag 对象、Release ID、旧草稿状态及资产身份保持不变；只允许 Latest 切换到 `v3.2.1`；
+- [ ] 发布事件触发的 Release Artifact Smoke 三平台全部通过，正式下载并安装的 CLI 均报告 `3.2.2`；
+- [ ] 发布后分别手动触发现有 `windows-user-guide-e2e.yml` 和 `posix-user-guide-e2e.yml`，输入 `tag=v3.2.2`，要求全部成功；这两份流程没有 release 事件触发器，不等待自动触发；
+- [ ] 所有旧 tag 对象、Release ID、旧草稿状态及资产身份保持不变；只允许 Latest 切换到 `v3.2.2`；
 - [ ] 平台工作流 artifact 完整；
 - [ ] 从全新目录安装正式制品并重复 smoke；
 - [ ] 日志、制品和仓库不包含令牌或本地绝对路径。

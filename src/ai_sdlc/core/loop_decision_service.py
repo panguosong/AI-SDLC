@@ -55,7 +55,7 @@ from ai_sdlc.core.loop_simulation_context import (
     validate_simulation_context,
 )
 from ai_sdlc.core.quality_command import _RUNTIME_PREFIXES, quality_command_environment
-from ai_sdlc.core.review_kernel import ReviewInput
+from ai_sdlc.core.review_kernel import ReviewInput, ReviewInputValidator
 from ai_sdlc.core.stable_file_read import _stable_regular_file_exists, read_stable_bytes
 
 
@@ -425,7 +425,9 @@ def validate_implementation_context(
         )
         if _optional_bytes(root, path) is not None:
             raise DecisionPreparationError("decision-context-conflicts-with-legacy")
-        validate_legacy_implementation_identity(root, run, impl_input)
+        validate_legacy_implementation_identity(
+            root, run, impl_input, preparing_review=purpose == "review",
+        )
         validate_implementation_requirement(root, impl_input)
         return None
     _check_identity(run, impl_input, run.loop_id)
@@ -687,6 +689,9 @@ def _check_sources(root: Path, loop_dir: Path, request: DecisionPrepareInput) ->
 
 def validate_legacy_implementation_identity(
     root: Path, run: LoopRun, impl_input: ImplementationInput | None,
+    *, preparing_review: bool = False,
+    reviewed_input: ReviewInput | None = None,
+    review_input_validator: ReviewInputValidator | None = None,
 ) -> bool:
     """只把没有原生绑定足迹的历史凭据视为 opaque；返回是否可沿用旧读取协议。"""
     artifacts = implementation_artifacts(root, run.loop_id)
@@ -697,6 +702,20 @@ def validate_legacy_implementation_identity(
             for number in (1, 2)
         )
     }
+    from ai_sdlc.core.loop_review_models import LoopReviewOutcome
+
+    outcomes = []
+    for number, content in enumerate(reviews.values(), 1):
+        if content is None:
+            continue
+        outcome = LoopReviewOutcome.model_validate_json(content)
+        if (outcome.loop_id, outcome.loop_type, outcome.round_number) != (
+            run.loop_id, "implementation", number,
+        ) or outcome.b1 is not None or outcome.simulation is not None:
+            raise DecisionPreparationError("decision-identity-mismatch")
+        outcomes.append(outcome)
+    if outcomes and outcomes[0].round_number != 1:
+        raise DecisionPreparationError("review-outcome-sequence-invalid")
     native_footprint = any(
         item.input_artifacts or item.output_artifacts for item in run.rounds
     ) or any(content is not None for content in reviews.values())
@@ -708,6 +727,13 @@ def validate_legacy_implementation_identity(
     ):
         raise DecisionPreparationError("decision-identity-mismatch")
     if impl_input is not None:
+        if reviewed_input is not None and (
+            reviewed_input.loop_id, reviewed_input.loop_type,
+            reviewed_input.implementation_input_digest,
+        ) != (
+            run.loop_id, "implementation", implementation_input_digest(impl_input),
+        ):
+            raise DecisionPreparationError("decision-identity-mismatch")
         if (
             impl_input.loop_id != run.loop_id
             or impl_input.work_item_id != run.work_item_id
@@ -735,6 +761,32 @@ def validate_legacy_implementation_identity(
                     and impl_input.design_contract_report_path != design_report)
             ):
                 raise DecisionPreparationError("decision-identity-mismatch")
+        for outcome in outcomes:
+            if (
+                outcome.implementation_input_digest is not None
+                and outcome.implementation_input_digest != implementation_input_digest(impl_input)
+            ):
+                raise DecisionPreparationError("decision-identity-mismatch")
+        if outcomes and outcomes[-1].implementation_input_digest is None:
+            final = outcomes[-1]
+            if reviewed_input is None and review_input_validator is not None:
+                reviewed_input = review_input_validator(
+                    root, loop_type="implementation", loop_id=run.loop_id,
+                    expected_digest=final.input_digest,
+                )
+            if reviewed_input is not None:
+                if not isinstance(reviewed_input, ReviewInput) or (
+                    reviewed_input.loop_id, reviewed_input.loop_type,
+                    reviewed_input.round_number, reviewed_input.input_digest,
+                    reviewed_input.implementation_input_digest,
+                ) != (
+                    run.loop_id, "implementation", final.round_number,
+                    final.input_digest, implementation_input_digest(impl_input),
+                ):
+                    raise DecisionPreparationError("decision-legacy-review-binding-unavailable")
+            elif not preparing_review:
+                # 仅允许只读构造完整旧快照；执行/写入仍须得到可核对的原摘要。
+                raise DecisionPreparationError("decision-legacy-review-binding-unavailable")
     if any(_optional_bytes(root, path) != content for path, content in reviews.items()):
         raise DecisionPreparationError("decision-identity-mismatch")
     return not bound

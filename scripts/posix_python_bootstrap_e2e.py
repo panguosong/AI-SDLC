@@ -120,7 +120,7 @@ def _run_bootstrap(root: Path) -> dict[str, object]:
     env.update(
         {
             "AI_SDLC_PACKAGE_SPEC": (
-                "git+https://github.com/panguosong/AI-SDLC.git@v3.2.1"
+                "git+https://github.com/panguosong/AI-SDLC.git@v3.2.2"
             ),
             "FAKE_BOOTSTRAP_LOG": str(log),
             "FAKE_PYTHON_READY": str(ready),

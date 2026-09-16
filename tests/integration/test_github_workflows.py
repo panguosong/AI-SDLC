@@ -367,7 +367,7 @@ def test_release_artifact_smoke_workflow_installs_published_assets() -> None:
 
     assert "workflow_dispatch:" in workflow
     assert "release:" in workflow
-    assert "default: v3.2.1" in workflow
+    assert "default: v3.2.2" in workflow
     assert "gh release download" in workflow
     assert "windows-latest" in workflow
     assert "macos-latest" in workflow
@@ -430,7 +430,7 @@ def test_release_build_uses_standard_cross_platform_release_flow() -> None:
     workflow = workflow_path.read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
-    assert "default: v3.2.1" in workflow
+    assert "default: v3.2.2" in workflow
     assert "ref: ${{ inputs.tag }}" in workflow
     assert 'git rev-parse "${RELEASE_TAG}^{commit}"' in workflow
     assert all(
@@ -491,7 +491,7 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / "pyproject.toml").write_text(
-        '[project]\nname = "ai-sdlc"\nversion = "3.2.1"\n',
+        '[project]\nname = "ai-sdlc"\nversion = "3.2.2"\n',
         encoding="utf-8",
     )
     for command in (
@@ -500,7 +500,7 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
         [git, "config", "user.email", "release@example.invalid"],
         [git, "add", "pyproject.toml"],
         [git, "commit", "-m", "release source"],
-        [git, "tag", "-a", "v3.2.1", "-m", "v3.2.1"],
+        [git, "tag", "-a", "v3.2.2", "-m", "v3.2.2"],
     ):
         subprocess.run(command, cwd=repository, check=True, capture_output=True)
     head = subprocess.run(
@@ -512,8 +512,8 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
     ).stdout.strip()
     base_env = {
         **os.environ,
-        "RELEASE_TAG": "v3.2.1",
-        "ALLOWED_RELEASE_TAG": "v3.2.1",
+        "RELEASE_TAG": "v3.2.2",
+        "ALLOWED_RELEASE_TAG": "v3.2.2",
         "DISPATCH_REF": "refs/heads/main",
         "DISPATCH_SHA": head,
     }
@@ -553,7 +553,7 @@ def test_release_build_rejects_frozen_tags_and_non_main_dispatch(tmp_path) -> No
 
     assert accepted.returncode == 0, accepted.stderr
     assert frozen_tag.returncode != 0
-    assert "Only v3.2.1" in frozen_tag.stderr
+    assert "Only v3.2.2" in frozen_tag.stderr
     assert non_main.returncode != 0
     assert wrong_commit.returncode != 0
 
@@ -634,17 +634,17 @@ fi
         encoding="utf-8",
     )
     fake_gh.chmod(0o755)
-    asset = tmp_path / "dist-offline" / "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz"
+    asset = tmp_path / "dist-offline" / "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz"
     asset.parent.mkdir()
     asset.write_bytes(b"archive")
     sidecar = Path(f"{asset}.sha256")
     sidecar.write_text("digest  archive\n", encoding="utf-8")
     other_assets = []
     for name in (
-        "ai-sdlc-offline-3.2.1-windows-amd64.zip",
-        "ai-sdlc-offline-3.2.1-windows-amd64.zip.sha256",
-        "ai-sdlc-offline-3.2.1-macos-arm64.tar.gz",
-        "ai-sdlc-offline-3.2.1-macos-arm64.tar.gz.sha256",
+        "ai-sdlc-offline-3.2.2-windows-amd64.zip",
+        "ai-sdlc-offline-3.2.2-windows-amd64.zip.sha256",
+        "ai-sdlc-offline-3.2.2-macos-arm64.tar.gz",
+        "ai-sdlc-offline-3.2.2-macos-arm64.tar.gz.sha256",
     ):
         path = asset.parent / name
         path.write_bytes(name.encode("utf-8"))
@@ -656,8 +656,8 @@ fi
     base_env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "RELEASE_TAG": "v3.2.1",
-        "ALLOWED_RELEASE_TAG": "v3.2.1",
+        "RELEASE_TAG": "v3.2.2",
+        "ALLOWED_RELEASE_TAG": "v3.2.2",
         "DISPATCH_REF": "refs/heads/main",
         "DISPATCH_SHA": "a" * 40,
         "GITHUB_REPOSITORY": "panguosong/AI-SDLC",
@@ -817,14 +817,14 @@ def test_windows_user_guide_e2e_replays_existing_project_install_path() -> None:
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" in workflow
     assert "windows-latest" in workflow
-    assert "default: v3.2.1" in workflow
+    assert "default: v3.2.2" in workflow
     assert "Build Windows offline bundle for pull request replay" in workflow
     assert "build_offline_bundle.sh" in workflow
     assert 'AI_SDLC_OFFLINE_ASSET_SUFFIX="-windows-amd64"' in workflow
     assert "pull_request_local_bundle" in workflow
     assert "USER_GUIDE.zh-CN.md Chapter 2: existing project" in workflow
     assert "my-existing-project" in workflow
-    assert "v3.2.1" in workflow
+    assert "v3.2.2" in workflow
     assert "ai-sdlc-offline-$releaseVersion-windows-amd64" in workflow
     assert "releases/download/$env:RELEASE_TAG" in workflow
     assert "Invoke-WebRequest" in workflow
@@ -871,8 +871,8 @@ def test_posix_user_guide_e2e_replays_published_guide_commands() -> None:
     driver = driver_path.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" in workflow
-    assert 'default: "v3.2.1"' in workflow
-    assert "v3.2.1" in workflow
+    assert 'default: "v3.2.2"' in workflow
+    assert "v3.2.2" in workflow
     for path_filter in (
         '      - "src/**"',
         '      - "pyproject.toml"',
@@ -1255,7 +1255,7 @@ def test_linux_offline_compatibility_gates_execute_on_glibc_and_musl_hosts() -> 
     assert 'test "$(command -v ldd)" = "/guards/ldd"' in replay
     assert "无法确定此主机使用的 libc" in replay
     assert "grep -Ei 'glibc|GNU C Library|GNU libc' /evidence/host.txt" not in replay
-    assert "不得使用 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" in replay
+    assert "不得使用 ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" in replay
     assert "actions/upload-artifact@v7" in str(job["steps"])
 
 
@@ -1279,7 +1279,7 @@ def test_linux_online_existing_python_path_replays_on_opensuse() -> None:
     assert 'source "/replay/${project_state}-acquire.sh"' in replay
     assert 'source "/replay/${project_state}-verify.sh"' in replay
     assert (
-        "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.1/packaging/install_online.sh"
+        "https://raw.githubusercontent.com/panguosong/AI-SDLC/v3.2.2/packaging/install_online.sh"
         in replay
     )
     assert 'test -s "${INSTALLER_PATH}"' in replay
@@ -1290,7 +1290,7 @@ def test_linux_online_existing_python_path_replays_on_opensuse() -> None:
     assert "AI_SDLC_PACKAGE_SPEC=/workspace" in replay
     assert "bash /evidence/new-install_online.sh /tmp/ai-sdlc-venv" in replay
     assert "/tmp/ai-sdlc-venv/bin/python -m ai_sdlc --version" in replay
-    assert "grep -F '3.2.1' /evidence/version.txt" in replay
+    assert "grep -F '3.2.2' /evidence/version.txt" in replay
     assert '--volume "${GITHUB_WORKSPACE}:/workspace:ro"' in replay
     assert "actions/upload-artifact@v7" in str(job["steps"])
 
@@ -1535,7 +1535,7 @@ def test_linux_unsupported_python_bootstrap_fails_closed_without_mutation() -> N
     assert 'test "${installer_exit}" -ne 0' in run
     assert "distro=ubuntu version=22\\.04" in run
     assert "Debian GNU/Linux 12 (bookworm)" in run
-    assert "ai-sdlc-offline-3.2.1-linux-amd64.tar.gz" in run
+    assert "ai-sdlc-offline-3.2.2-linux-amd64.tar.gz" in run
     assert "route 6/12" in run
     assert 'test "${python_package_install_calls}" -eq 0' in run
     assert 'test ! -e "${install_root}"' in run
@@ -1563,7 +1563,7 @@ def test_linux_unsupported_python_bootstrap_fails_closed_without_mutation() -> N
         '"python_package_install_calls":%s',
         '"venv_created":%s',
         '"project_mutated":%s',
-        '"offline_recovery_asset":"ai-sdlc-offline-3.2.1-linux-amd64.tar.gz"',
+        '"offline_recovery_asset":"ai-sdlc-offline-3.2.2-linux-amd64.tar.gz"',
     ):
         assert evidence_field in run
 

@@ -142,6 +142,14 @@ AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负�
 
 ## 验收接口
 
+### Requirement 修复依据补录
+
+对于 `stage-simulation-v1` 的 Requirement，已完成的 R1 仅因准备度缺资料进入 `repair-unavailable`，且尚未产生 R2 或冻结凭据时，宿主可按 Next 使用 `loop review-repair-prepare` 准备补充材料，再由原 R1 各角色的全新独立只读上下文核验修复前提。材料放在项目内 `.ai-sdlc/reviews/`，每次读取必须绑定准备摘要；原 R1、冻结合同、所选路线和原始业务材料须保持未漂移。
+
+三项准备度（已有修复授权、事实依据、验证办法）都获证据支持后，`loop review-repair-record` 只追加一次 `repair-readiness-supplement.json`。专家的只读权限不等于宿主没有修复授权；需求文档修复的验证办法也不要求尚未开发的系统已通过运行验收。准备度存在明确 FAIL、平台拒绝、未知项、角色缺失或证据漂移时不允许补录放行。
+
+补录不修改 R1 的问题、评分、结果、原时间计划或正式轮次，也不表示质量通过。作者随后修复原需求，仍须通过原 R2 才能正常冻结；R2 摘要同时绑定补录材料，篡改或删除会阻止继续消费。补充证据是不可变依赖，须与原 Loop 一同保留。这不是通用历史恢复入口，其他 Loop 和已退役的 Implementation continuation 不受此能力影响。
+
 以下是诊断与验收命令参考，不是普通用户进入 AI 对话前必须逐项执行的清单；正常推进读取 `ai-sdlc run` 返回的 Next。`adapter status` 和 `run --dry-run` 仅在需要排查时使用，发行身份脚本仅存在于框架源码仓库。
 
 ```powershell

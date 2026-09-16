@@ -391,7 +391,21 @@ def prepare_loop_review(
         )
 
     first_actual = _actual_review_data(first)
-    if first_actual is not None and first_actual.decision.action == "blocked":
+    from ai_sdlc.core.loop_repair_readiness import (
+        read_verified_repair_readiness,
+        repair_readiness_can_prepare,
+    )
+
+    repair_ready = (
+        read_verified_repair_readiness(root, loop_dir, first, first_snapshot.context)
+        if first_snapshot is not None and loop_type == "requirement"
+        else False
+    )
+    if (
+        first_actual is not None
+        and first_actual.decision.action == "blocked"
+        and not repair_ready
+    ):
         if second is not None:
             raise LoopReviewServiceError("review-outcome-sequence-invalid")
         return _preparation(
@@ -400,10 +414,19 @@ def prepare_loop_review(
             first_path,
             status="needs_user",
             reason=first_actual.decision.reason,
-            next_action="The required repair is not available; do not start round 2.",
+            next_action=(
+                "Append new evidence of existing host authorization, repair facts and verification using "
+                f"ai-sdlc loop review-repair-prepare --type requirement --loop-id {loop_id} "
+                "--evidence <project-relative-file> before independent readiness assessment. "
+                "Round 2 remains blocked until the evidence is accepted and the original gaps are repaired."
+                if repair_readiness_can_prepare(first, first_snapshot)
+                else "The required repair is not available; do not start round 2."
+            ),
             b1_snapshot=first_snapshot,
         )
-    first_actionable = _first_review_action(first_snapshot, first) in {"repair", "improve"}
+    first_actionable = repair_ready or _first_review_action(first_snapshot, first) in {
+        "repair", "improve",
+    }
     if not first_actionable:
         if first.input_digest != first_input.input_digest:
             return _drifted_preparation(first_input, first, first_path)
@@ -427,9 +450,11 @@ def prepare_loop_review(
             first,
             first_path,
             status="needs_fix",
-            reason=first_actual.decision.reason
-            if first_actual
-            else "review-findings-actionable",
+            reason=(
+                "repair-readiness-supplemented" if repair_ready
+                else first_actual.decision.reason if first_actual
+                else "review-findings-actionable"
+            ),
             next_action=(
                 "Apply the sealed conditional improvement within its original plan, then run round 2."
                 if first_actual and first_actual.decision.action == "improve"

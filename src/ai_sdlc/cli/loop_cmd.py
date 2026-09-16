@@ -13,6 +13,10 @@ import typer
 from rich.console import Console
 
 from ai_sdlc.cli.cli_hooks import run_ide_adapter_if_initialized
+from ai_sdlc.cli.loop_repair_cmd import (
+    loop_review_repair_prepare,
+    loop_review_repair_record,
+)
 from ai_sdlc.cli.loop_review_cmd import (
     ReviewInputGuardError,
     loop_review,
@@ -2231,5 +2235,7 @@ loop_app.add_typer(implementation_app, name="implementation")
 loop_app.add_typer(frontend_evidence_app, name="frontend-evidence")
 loop_app.command(name="review")(loop_review)
 loop_app.command(name="review-record")(loop_review_record)
+loop_app.command(name="review-repair-prepare")(loop_review_repair_prepare)
+loop_app.command(name="review-repair-record")(loop_review_repair_record)
 
 __all__ = ["loop_app"]

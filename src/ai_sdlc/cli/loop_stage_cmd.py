@@ -283,6 +283,7 @@ def _closed_document_review(root, host):
         close_name,
         "review-outcome-round-1.json",
         "review-outcome-round-2.json",
+        "repair-readiness-supplement.json",
     )
 
     def capture():
@@ -346,6 +347,8 @@ def _closed_document_review(root, host):
     previous = None
     final = None
     final_snapshot = None
+    supplemented_repair = False
+    repair_supplement = None
     for number in (1, 2):
         content = original[f"review-outcome-round-{number}.json"]
         if content is None:
@@ -366,7 +369,8 @@ def _closed_document_review(root, host):
             or (
                 previous is not None
                 and (
-                    previous.decision.action not in {"repair", "improve"}
+                    (previous.decision.action not in {"repair", "improve"}
+                     and not supplemented_repair)
                     or previous.input_digest == data.input_digest
                 )
             )
@@ -395,6 +399,17 @@ def _closed_document_review(root, host):
             has_actionable_findings=has_actionable_findings(outcome),
             baseline=previous,
         )
+        if number == 1 and original["repair-readiness-supplement.json"] is not None:
+            from ai_sdlc.core.loop_repair_readiness import (
+                read_verified_repair_supplement,
+            )
+
+            # 补录只解释原 R1 到 R2 的准入；原 R1 的 blocked 判断仍按原证据复算。
+            repair_supplement = read_verified_repair_supplement(
+                root, directory, outcome, context
+            )
+            supplemented_repair = repair_supplement is not None
+            repair_first = outcome
         previous, final, final_snapshot = data, outcome, probe
     if (
         final is None
@@ -408,14 +423,29 @@ def _closed_document_review(root, host):
         directory / "decision-context.json",
         *(root / source.path for source in context.sources),
     }
-    current_manifest = {
-        path.relative_to(root).as_posix(): hashlib.sha256(
-            read_stable_bytes(root, path)
-        ).hexdigest()
+    if original["repair-readiness-supplement.json"] is not None:
+        paths.add(directory / "repair-readiness-supplement.json")
+        if repair_supplement is None:
+            raise DecisionPreparationError("repair-readiness-input-drift")
+        paths.update(root / path for path in repair_supplement.evidence_manifest)
+    material_captured = {
+        path.relative_to(root).as_posix(): read_stable_bytes(root, path)
         for path in paths
+    }
+    current_manifest = {
+        path: hashlib.sha256(content).hexdigest()
+        for path, content in material_captured.items()
     }
     if current_manifest != previous.manifest:
         raise DecisionPreparationError("simulation-closed-review-material-drift")
+    # 最终材料中的原始依据与最初捕获的补录/R1/合同必须仍为同一版本。
+    if repair_supplement is not None and (
+        read_verified_repair_supplement(
+            root, directory, repair_first, context,
+            captured_artifacts={**material_captured, **captured},
+        ) != repair_supplement
+    ):
+        raise DecisionPreparationError("repair-readiness-input-drift")
     if capture() != original:
         raise DecisionPreparationError("review-input-drift")
     return ClosedStageReviewReplay(

@@ -176,7 +176,14 @@ def _require_stage_revision(root, stage, directory, context):
     validate_stage_review_data(
         snapshot, data, has_actionable_findings=has_actionable_findings(outcome)
     )
-    if data.decision.action not in {"repair", "improve"}:
+    from ai_sdlc.core.loop_repair_readiness import read_verified_repair_readiness
+
+    repair_ready = (
+        read_verified_repair_readiness(root, directory, outcome, context)
+        if stage == "requirement"
+        else False
+    )
+    if data.decision.action not in {"repair", "improve"} and not repair_ready:
         raise ValueError("simulation-stage-r1-does-not-permit-revision")
     run = LoopRun.model_validate_json(
         read_stable_bytes(root, directory / "loop-run.json")

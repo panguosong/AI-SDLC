@@ -255,10 +255,12 @@ def read_verified_implementation_close(
             or impl_input.work_item_id != run.work_item_id
             or (impl_input.decision_mode, impl_input.decision_capability)
             != (run.decision_mode, run.decision_capability)
-            or implementation_input_digest(impl_input) != run.input_digest
+            or (run.input_digest and implementation_input_digest(impl_input) != run.input_digest)
         ):
             raise LoopReviewServiceError("decision-identity-mismatch")
-        validate_implementation_requirement(root, impl_input)
+        validate_implementation_requirement(
+            root, impl_input, allow_unbound_legacy=not run.input_digest,
+        )
     if run.decision_capability in {
         "implementation-simulation-v1",
         "stage-simulation-v1",

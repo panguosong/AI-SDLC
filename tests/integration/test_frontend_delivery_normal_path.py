@@ -238,6 +238,33 @@ def _write_closed_implementation(root: Path, work_item_id: str) -> None:
     )
 
 
+@pytest.mark.parametrize("binding", ["implementation-input", "explicit-requirement"])
+def test_historical_close_compatibility_cannot_hide_a_bound_design_run(tmp_path, binding):
+    from ai_sdlc.core.implementation_models import ImplementationInput
+    from ai_sdlc.core.implementation_store import implementation_input_digest
+    from ai_sdlc.core.loop_review_service import read_verified_implementation_close
+
+    work_item = tmp_path / "specs/001-ui"
+    work_item.mkdir(parents=True)
+    for name in ("spec.md", "plan.md", "tasks.md"):
+        (work_item / name).write_text("# Historical frontend\n", encoding="utf-8")
+    _write_closed_implementation(tmp_path, "001-ui")
+    artifacts = implementation_artifacts(tmp_path, "impl-frontend-normal")
+    if binding == "implementation-input":
+        run = json.loads(artifacts.loop_run_path.read_bytes())
+        run["input_digest"] = implementation_input_digest(
+            ImplementationInput.model_validate_json(artifacts.input_path.read_bytes())
+        )
+        artifacts.loop_run_path.write_text(json.dumps(run), encoding="utf-8")
+    else:
+        path = tmp_path / ".ai-sdlc/loops/design-contract/dc-frontend-normal/design-contract-input.json"
+        contract = json.loads(path.read_bytes())
+        contract["requirement_loop_id"] = "missing-requirement"
+        path.write_text(json.dumps(contract), encoding="utf-8")
+    with pytest.raises(ValueError, match="decision-upstream-changed"):
+        read_verified_implementation_close(tmp_path, "impl-frontend-normal")
+
+
 def _record_clean_review(root: Path, loop_id: str) -> str:
     prepared, loop_dir = prepare_current_loop_review(
         root,

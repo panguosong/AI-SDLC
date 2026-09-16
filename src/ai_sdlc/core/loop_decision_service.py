@@ -686,8 +686,10 @@ def _check_sources(root: Path, loop_dir: Path, request: DecisionPrepareInput) ->
 
 def validate_implementation_requirement(
     root: Path, impl_input: ImplementationInput,
+    *, allow_unbound_legacy: bool = False,
 ) -> None:
     """legacy 也须保留显式 Requirement 依据，但不重新冻结当前设计文档。"""
+    from ai_sdlc.core.design_contract_models import DesignContractInput
     from ai_sdlc.core.design_contract_store import (
         design_contract_artifacts,
         require_design_check_published,
@@ -707,18 +709,30 @@ def validate_implementation_requirement(
         artifacts = design_contract_artifacts(root, validate_design_id(design_id))
         require_design_check_published(artifacts.input_path.parent)
         captured = {
-            path: read_stable_bytes(root, path)
-            for path in (artifacts.loop_run_path, artifacts.input_path)
+            artifacts.loop_run_path: _optional_bytes(root, artifacts.loop_run_path),
+            artifacts.input_path: read_stable_bytes(root, artifacts.input_path),
         }
-        contract_input = _bound_design_input(
-            LoopRun.model_validate_json(captured[artifacts.loop_run_path]),
-            captured[artifacts.input_path], design_id, impl_input.work_item_id,
-        )
+        run_content = captured[artifacts.loop_run_path]
+        if run_content is None:
+            # 无摘要的历史关闭凭据可附带未绑定 Requirement 的旧输入；原生绑定不能降级。
+            contract_input = DesignContractInput.model_validate_json(captured[artifacts.input_path])
+            if (
+                not allow_unbound_legacy
+                or contract_input.requirement_loop_id.strip()
+                or contract_input.loop_id != design_id
+                or contract_input.work_item_id != impl_input.work_item_id
+            ):
+                raise ValueError("design-contract bound run unavailable")
+        else:
+            contract_input = _bound_design_input(
+                LoopRun.model_validate_json(run_content),
+                captured[artifacts.input_path], design_id, impl_input.work_item_id,
+            )
         blocker, _ = _design_requirement_issue(root, contract_input)
         if blocker:
             raise ValueError(blocker)
         require_design_check_published(artifacts.input_path.parent)
-        if any(read_stable_bytes(root, path) != content for path, content in captured.items()):
+        if any(_optional_bytes(root, path) != content for path, content in captured.items()):
             raise ValueError("design-contract bound input changed during verification")
     except (OSError, ValueError) as exc:
         raise DecisionPreparationError(f"decision-upstream-changed: {exc}") from exc

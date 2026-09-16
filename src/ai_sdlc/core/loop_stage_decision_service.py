@@ -584,7 +584,8 @@ def _prepare_stage(root, stage_kind, loop_id, request, resolver):
         {}
         if context is None
         or context.phase == "initial_search"
-        or request.operation in {"correct-input", "revise-time-plan"}
+        or request.operation
+        in {"correct-input", "revise-time-plan", "authorize-comparison"}
         else before["referenced_sources"],
     )
     if context is not None and context.phase == "improvement_search":

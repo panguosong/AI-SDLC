@@ -216,6 +216,12 @@ def _check_independent_cost_sources(prior_sources, new_sources):
 def _check_time_plan_revision(context, request):
     if not time_plan_revision_available(context):
         raise ValueError("simulation-time-revision-unavailable")
+    _check_time_only_contracts(context, request)
+
+
+def _check_time_only_contracts(
+    context, request, *, allow_same_window=False, required_time_basis_refs=None
+):
     _check_bundle(request.contracts)
     originals = {c.profile_id: c for c in context.contracts}
     if {c.profile_id for c in request.contracts} != set(originals):
@@ -226,15 +232,20 @@ def _check_time_plan_revision(context, request):
             contract.model_dump(exclude={"time_plan"})
             != old.model_dump(exclude={"time_plan"})
             or contract.time_plan.scope != old.time_plan.scope
-            or contract.time_plan.window_seconds <= old.time_plan.window_seconds
+            or contract.time_plan.window_seconds < old.time_plan.window_seconds
+            or not allow_same_window
+            and contract.time_plan.window_seconds == old.time_plan.window_seconds
             or not set(old.time_plan.basis_refs) <= set(contract.time_plan.basis_refs)
         ):
             raise ValueError("simulation-time-revision-contract-changed")
     _check_independent_cost_sources(context.sources, request.sources)
     _check_sources(request.contracts, (*context.sources, *request.sources))
-    if not {s.id for s in request.sources} <= set(
-        request.contracts[0].time_plan.basis_refs
-    ):
+    required_refs = (
+        {s.id for s in request.sources}
+        if required_time_basis_refs is None
+        else set(required_time_basis_refs)
+    )
+    if not required_refs <= set(request.contracts[0].time_plan.basis_refs):
         raise ValueError("simulation-time-revision-source-unbound")
 
 
@@ -401,9 +412,8 @@ def _continuation_stop_reason(context, batch, selection, judgement, elapsed):
     proposal = judgement.initial_search_continuation
     if proposal is None:
         return "no_supported_improvement"
-    criteria = {
-        c.id: c for c in context.plan.criteria if c.applicability == "applicable"
-    }
+    contract = context.contract_for_batch(batch)
+    criteria = {c.id: c for c in contract.criteria if c.applicability == "applicable"}
     if not set(proposal.criterion_ids) <= criteria.keys():
         return "continuation_criterion_unbound"
     assessment = next(
@@ -420,17 +430,14 @@ def _continuation_stop_reason(context, batch, selection, judgement, elapsed):
     )
     cost = proposal.future_cost_estimate
     references = {b.id for b in candidate.basis} | {s.id for s in context.sources}
-    if (
-        cost.scope != context.plan.time_plan.scope
-        or not set(cost.basis_refs) <= references
-    ):
+    if cost.scope != contract.time_plan.scope or not set(cost.basis_refs) <= references:
         return "continuation_cost_unbound"
     if (
         candidate.future_cost_estimate is None
         or cost.upper_seconds < candidate.future_cost_estimate.upper_seconds
     ):
         return "continuation_cost_incomplete"
-    if elapsed + cost.upper_seconds > context.plan.time_plan.window_seconds:
+    if elapsed + cost.upper_seconds > contract.time_plan.window_seconds:
         return "model_plan_not_feasible"
     return None
 
@@ -562,12 +569,21 @@ def validate_simulation_context(context: SimulationContext) -> SimulationContext
             raise ValueError("simulation-clock-moved-backwards")
     if (
         tuple(b.number for b in batches) != tuple(range(1, len(batches) + 1))
-        or not 1 <= len(batches) <= 2
+        or not 1 <= len(batches) <= context.effective_max_batches
     ):
         raise ValueError("simulation-batch-sequence-invalid")
     if len({r.request_id for r in context.receipts}) != len(context.receipts):
         raise ValueError("simulation-request-ids-duplicate")
-    _validate_input_correction(context, batches)
+    if context.comparison_extension is None:
+        if len(context.receipts) > 12:
+            raise ValueError("simulation-receipt-limit")
+        _validate_input_correction(context, batches)
+    else:
+        from ai_sdlc.core.loop_comparison_authorization import (
+            validate_comparison_extension,
+        )
+
+        validate_comparison_extension(context, batches)
     winner = None
     for batch in batches:
         improving = batch.decision_point == "before-improvement"
@@ -661,7 +677,14 @@ def validate_simulation_context(context: SimulationContext) -> SimulationContext
         correction_next = (
             has_next and previous.number == 1 and context.input_correction is not None
         )
-        if has_next != (admitted or improvement_next or correction_next):
+        authorized_next = (
+            has_next
+            and previous.number == 2
+            and context.comparison_extension is not None
+        )
+        if has_next != (
+            admitted or improvement_next or correction_next or authorized_next
+        ):
             raise ValueError("simulation-continuation-sequence-invalid")
     if context.initial_selection_id != winner:
         raise ValueError("simulation-initial-selection-invalid")
@@ -765,6 +788,17 @@ def transition_simulation(
     payload["receipts"].append(receipt)
     if context.capability == STAGE_CAPABILITY and review_started:
         raise ValueError("simulation-review-already-started")
+    if request.operation == "authorize-comparison":
+        from ai_sdlc.core.loop_comparison_authorization import authorize_comparison
+
+        return authorize_comparison(
+            context,
+            request,
+            payload,
+            source_digest,
+            now_ms,
+            execution_started=execution_started,
+        )
     if request.operation in {"correct-input", "revise-time-plan"}:
         if execution_started is not False:
             raise ValueError("simulation-correction-before-execution-required")
@@ -901,7 +935,22 @@ def transition_simulation(
                 raise ValueError("simulation-source-id-conflict")
             sources[source.id] = source
         _check_sources(context.contracts, tuple(sources.values()), request.candidates)
-        if context.input_correction is not None:
+        if batch.number == 3 and context.comparison_extension is not None:
+            from ai_sdlc.core.loop_comparison_authorization import (
+                check_authorized_candidates,
+            )
+
+            check_authorized_candidates(
+                context, request.candidates, tuple(sources.values())
+            )
+            if any(
+                Fraction(now_ms - context.started_at_ms, 1000)
+                + Fraction(candidate.future_cost_estimate.upper_seconds)
+                > Fraction(context.plan.time_plan.window_seconds)
+                for candidate in request.candidates
+            ):
+                raise ValueError("simulation-authorized-cost-not-feasible")
+        elif context.input_correction is not None:
             _check_corrected_candidates(
                 context, request.candidates, tuple(sources.values())
             )

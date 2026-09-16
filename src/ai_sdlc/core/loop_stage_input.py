@@ -103,6 +103,8 @@ def validate_stage_material_update(root, stage, directory, previous, current):
         return False
     identity = stage_input_identity(stage, current)
     if previous is not None and stage_input_identity(stage, previous) != identity:
+        if _unstarted_design_correction(root, stage, directory, previous, current):
+            return False
         raise ValueError("simulation-stage-input-identity-change")
     if not context_path.exists():
         if any(outcome_path(directory, n).exists() for n in (1, 2)):
@@ -126,6 +128,61 @@ def validate_stage_material_update(root, stage, directory, previous, current):
         require_simulation_time_admission(context)
         return False
     _require_stage_revision(root, stage, directory, context)
+    return True
+
+
+def _unstarted_design_correction(root, stage, directory, previous, current):
+    """确定性检查失败可修正文档；首次 begin 后仍冻结原合同和原轮次。"""
+    from ai_sdlc.core.design_contract_models import DesignContractReport
+    from ai_sdlc.core.design_contract_store import (
+        design_contract_input_digest,
+        require_design_check_published,
+    )
+    from ai_sdlc.core.stable_file_read import _stable_regular_file_exists
+
+    if stage != "design-contract":
+        return False
+    mutable = {
+        "created_at", "spec_digest", "plan_digest", "tasks_digest",
+        "verification_contract_ref", "verification_contract_digest",
+    }
+    if previous.model_dump(exclude=mutable) != current.model_dump(exclude=mutable):
+        return False
+    require_design_check_published(directory)
+    # begin 先写 run 标记，再写 context；删掉 context 不能重新获得修正入口。
+    run = LoopRun.model_validate_json(read_stable_bytes(root, directory / "loop-run.json"))
+    if (
+        run.decision_started_at_ms is not None
+        or run.decision_begin_pending_digest is not None
+        or run.status != "needs_fix" or run.current_round != 1
+        or len(run.rounds) != 1 or run.rounds[0].round_number != 1
+        or run.rounds[0].status != "needs_fix"
+        or run.rounds[0].result != "needs_fix"
+        or run.input_digest != design_contract_input_digest(previous)
+    ):
+        return False
+    names = {"decision-context.json", "design-contract-close.json"}
+    names.update(path.name for path in directory.iterdir() if path.name.startswith("review-"))
+    if any(_stable_regular_file_exists(root, directory / name) for name in names):
+        return False
+    report = DesignContractReport.model_validate_json(
+        read_stable_bytes(root, directory / "design-contract-report.json")
+    )
+    if (
+        (report.loop_id, report.work_item_id, report.work_item_path)
+        != (previous.loop_id, previous.work_item_id, previous.work_item_path)
+        or report.status != "needs_fix" or report.blocker_count <= 0
+        or report.blocker_count != sum(f.severity == "blocker" for f in report.findings)
+    ):
+        return False
+    if previous.verification_contract_ref:
+        expected = directory / f"verification-contract-{previous.verification_contract_digest}.json"
+        if previous.verification_contract_ref != expected.relative_to(root).as_posix():
+            return False
+        # 原合同保留自身字节；其旧来源摘要不能拿来否决尚未正式送审的文档修正。
+        if hashlib.sha256(read_stable_bytes(root, expected)).hexdigest() != previous.verification_contract_digest:
+            raise ValueError("counterexample-contract-digest-mismatch")
+    # check 的既有发布日志保存旧新六件原件；新合同仍在原写入口完整复验并不可变存储。
     return True
 
 

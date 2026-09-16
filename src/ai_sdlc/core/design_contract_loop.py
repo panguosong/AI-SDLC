@@ -83,6 +83,7 @@ from ai_sdlc.core.requirement_loop import (
 from ai_sdlc.core.requirement_loop import (
     _validate_explicit_loop_id as _validate_requirement_loop_id,
 )
+from ai_sdlc.core.requirement_repair_gate import validate_frozen_requirement_repair
 from ai_sdlc.core.review_kernel import (
     ReviewInputValidator,
     revalidate_review_input_at_transition,
@@ -1513,6 +1514,14 @@ def _requirement_loop_gate(
     )
     if blocker:
         return blocker, next_action, {}
+    try:
+        validate_frozen_requirement_repair(root, artifacts, intake, freeze)
+    except (ValueError, OSError) as exc:
+        return (
+            f"Requirement repair-readiness dependency for {safe_loop_id} is invalid: {exc}",
+            f"Run ai-sdlc loop review --type requirement --loop-id {safe_loop_id}.",
+            {},
+        )
     return (
         "",
         "",

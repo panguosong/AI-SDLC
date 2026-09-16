@@ -1,7 +1,9 @@
 """准备度补录只解锁原 R2；真实文件与原生评分保持绑定。"""
 
+import hashlib
 import importlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -345,6 +347,109 @@ def test_supplement_cannot_self_prove_business_quality(blocked):
         validate_stage_source_boundary(
             blocked[0], [blocked[1].loop_dir / "repair-readiness-supplement.json"]
         )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "source-resolution.json",
+        "model-resolution.json",
+        "redaction-report.json",
+        "future-provider-metadata.json",
+        "findings.json",
+    ],
+)
+def test_framework_pr_artifacts_cannot_supply_new_readiness(blocked, name):
+    root, current, _, _, _, kwargs = blocked
+    derived = root / ".ai-sdlc/reviews/pr/previous-review" / name
+    derived.parent.mkdir(parents=True)
+    derived.write_text('{"access_status":"resolved"}', encoding="utf-8")
+    original = (current.loop_dir / "review-outcome-round-1.json").read_bytes()
+    with pytest.raises(ValueError, match="derived.*forbidden"):
+        api().prepare_repair_readiness(
+            root,
+            loop_type="requirement",
+            loop_id=current.loop_id,
+            evidence_paths=(derived,),
+            **kwargs,
+        )
+    assert (current.loop_dir / "review-outcome-round-1.json").read_bytes() == original
+    assert not (current.loop_dir / "repair-readiness-supplement.json").exists()
+    assert not (current.loop_dir / "review-outcome-round-2.json").exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "source-resolution.json",
+        "model-resolution.json",
+        "redaction-report.json",
+        "future-provider-metadata.json",
+    ],
+)
+def test_framework_pr_metadata_cannot_self_prove_actual_assessment(blocked, name):
+    from ai_sdlc.core.loop_decision_models import B1Assessment
+
+    root, _, _, _, _, kwargs = blocked
+    derived = root / ".ai-sdlc/reviews/pr/previous-review" / name
+    derived.parent.mkdir(parents=True)
+    derived.write_text('{"access_status":"resolved"}', encoding="utf-8")
+    relative = derived.relative_to(root).as_posix()
+    digest = hashlib.sha256(derived.read_bytes()).hexdigest()
+    original_snapshot = kwargs["b1_snapshot_resolver"](1)
+    bound = replace(
+        original_snapshot,
+        manifest={**original_snapshot.manifest, relative: digest},
+        review_input=original_snapshot.review_input.model_copy(
+            update={"upstream_context_paths": [relative]}
+        ),
+    )
+    rows = assessments(bound)
+    bad = rows["evidence-review"].model_dump()
+    bad["evidence"][0].update(path=relative, sha256=digest)
+    rows["evidence-review"] = B1Assessment.model_validate(bad)
+    with pytest.raises(ValueError, match="derived.*forbidden"):
+        build_b1_review_data(bound, rows, has_actionable_findings=False)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".ai-sdlc/reviews/repair-basis.md",
+        ".ai-sdlc/reviews/requirement-readiness/author-authorization.md",
+    ],
+)
+def test_original_user_readiness_documents_remain_usable(blocked, relative):
+    root, current, context, outcome, _, kwargs = blocked
+    evidence = root / relative
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("用户原始授权、具体修法和原剩余 R2 验法。", encoding="utf-8")
+    with_original_basis = (root, current, context, outcome, evidence, kwargs)
+    proposal = prepared(with_original_basis)
+    record(with_original_basis, proposal)
+    assert review(with_original_basis).status == "needs_fix"
+    assert proposal.evidence_manifest.keys() == {relative}
+    assert not (current.loop_dir / "review-outcome-round-2.json").exists()
+
+
+def test_business_metadata_basename_remains_valid_readiness_evidence(tmp_path):
+    evidence = tmp_path / "business/source-resolution.json"
+    evidence.parent.mkdir()
+    content = '{"user_authorization":"repair the original documented scope"}'
+    evidence.write_text(content, encoding="utf-8")
+    assert api()._evidence_bytes(tmp_path, evidence) == content.encode()
+
+
+def test_framework_pr_namespace_cannot_use_case_alias_for_evidence(tmp_path):
+    from ai_sdlc.core.loop_stage_decision_service import validate_stage_source_boundary
+
+    derived = tmp_path / ".AI-SDLC/ReViEwS/Pr/previous-review/source-resolution.json"
+    derived.parent.mkdir(parents=True)
+    derived.write_text('{"access_status":"resolved"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="derived.*forbidden"):
+        api()._evidence_bytes(tmp_path, derived)
+    with pytest.raises(ValueError, match="derived.*forbidden"):
+        validate_stage_source_boundary(tmp_path, [derived])
 
 
 def test_deleted_supplement_does_not_restore_repair_authority(blocked):

@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.integration.test_quantified_implementation import _cli, _payload
 from tests.integration.test_stage_quantified_pipeline import (
     CAPABILITY,
@@ -13,10 +15,7 @@ from tests.integration.test_stage_quantified_pipeline import (
 )
 
 
-def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
-    initialized_project_dir,
-):
-    root = initialized_project_dir
+def _frozen_supplemented_requirement(root):
     stage_selected(root, "requirement")
     stage_apply(
         root, "requirement", {"operation": "seal-for-review", "request_id": "seal"}
@@ -326,3 +325,115 @@ def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
     for name, original in originals.items():
         assert (directory / name).read_bytes() == original
     assert not (directory / "review-outcome-round-3.json").exists()
+    return directory, basis
+
+
+def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
+    initialized_project_dir,
+):
+    _frozen_supplemented_requirement(initialized_project_dir)
+
+
+@pytest.mark.parametrize(
+    "damage", ["basis-deleted", "basis-changed", "supplement-deleted"]
+)
+def test_design_check_and_rerun_revalidate_supplemented_requirement(
+    initialized_project_dir, damage
+):
+    from tests.unit.test_design_contract_loop import _write_work_item
+
+    root = initialized_project_dir
+    requirement_dir, basis = _frozen_supplemented_requirement(root)
+    work_item = _write_work_item(
+        root,
+        relative_path="specs/stage-requirement",
+        with_frozen_requirement=False,
+    )
+
+    def check(loop_id):
+        return _cli(
+            root, "loop", "design-contract", "check",
+            "--wi", work_item.relative_to(root).as_posix(),
+            "--requirement-loop-id", LOOP, "--loop-id", loop_id,
+            "--decision-mode", "adaptive-quantified",
+            "--decision-capability", CAPABILITY, "--json",
+        )
+
+    existing_loop = "design-with-supplement"
+    assert _payload(check(existing_loop))["status"] == "ready"
+    assert _payload(check(existing_loop))["status"] == "ready"
+    tracked = [
+        *(requirement_dir / name for name in (
+            "loop-run.json", "review-outcome-round-1.json",
+            "review-outcome-round-2.json", "decision-context.json",
+        )),
+        root / ".ai-sdlc/loops/requirement/current-requirement.json",
+        root / ".ai-sdlc/loops/design-contract/current-design-contract.json",
+        root / ".ai-sdlc/loops/design-contract" / existing_loop / "loop-run.json",
+    ]
+    originals = {path: path.read_bytes() for path in tracked}
+    if damage == "basis-deleted":
+        basis.unlink()
+    elif damage == "basis-changed":
+        basis.write_text("冻结之后改变原始修复授权依据", encoding="utf-8")
+    else:
+        (requirement_dir / "repair-readiness-supplement.json").unlink()
+
+    # 同时覆盖首次消费和同一 Design 的正常重检，不通过 CLI review 代替前置 gate。
+    attempts = [check("design-after-drift"), check(existing_loop)]
+    for result in attempts:
+        assert result.returncode == 1, result.stdout + result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "blocked"
+        assert "repair-readiness" in payload["blocker"]
+        assert f"loop review --type requirement --loop-id {LOOP}" in payload["next_action"]
+    assert not (root / ".ai-sdlc/loops/design-contract/design-after-drift").exists()
+    for path, original in originals.items():
+        assert path.read_bytes() == original
+
+
+def test_design_gate_rechecks_basis_after_final_metadata_capture(
+    initialized_project_dir, monkeypatch
+):
+    import ai_sdlc.core.requirement_repair_gate as repair_gate
+    from ai_sdlc.core.design_contract_loop import (
+        DesignContractCheckOptions,
+        check_design_contract_loop,
+    )
+    from tests.unit.test_design_contract_loop import _write_work_item
+
+    root = initialized_project_dir
+    requirement_dir, basis = _frozen_supplemented_requirement(root)
+    work_item = _write_work_item(
+        root, relative_path="specs/stage-requirement", with_frozen_requirement=False
+    )
+    originals = {
+        path: path.read_bytes() for path in requirement_dir.iterdir() if path.is_file()
+    }
+    supplement = requirement_dir / "repair-readiness-supplement.json"
+    original_read = repair_gate.read_stable_bytes
+    supplement_reads = 0
+
+    def change_basis_at_final_capture(project_root, path):
+        nonlocal supplement_reads
+        content = original_read(project_root, path)
+        if path == supplement:
+            supplement_reads += 1
+            # 初次 metadata、material、末次 metadata；在原有 basis 尾读之后改动。
+            if supplement_reads == 3:
+                basis.write_text("末次元数据捕获期间改变授权依据", encoding="utf-8")
+        return content
+
+    monkeypatch.setattr(repair_gate, "read_stable_bytes", change_basis_at_final_capture)
+    result = check_design_contract_loop(DesignContractCheckOptions(
+        root=root, work_item=work_item.relative_to(root).as_posix(),
+        requirement_loop_id=LOOP, loop_id="design-final-capture-race",
+        decision_mode="adaptive-quantified", decision_capability=CAPABILITY,
+    ))
+    assert supplement_reads >= 3
+    assert result.status == "blocked", result
+    assert "repair-readiness" in result.blocker
+    assert f"loop review --type requirement --loop-id {LOOP}" in result.next_action
+    assert not (root / ".ai-sdlc/loops/design-contract/design-final-capture-race").exists()
+    for path, original in originals.items():
+        assert path.read_bytes() == original

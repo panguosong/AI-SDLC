@@ -124,6 +124,14 @@ def stage_decision_write_guard(root: Path, stage_kind: str, loop_id: str):
 def validate_stage_source_boundary(root: Path, paths: Sequence[Path]) -> None:
     """保留原始材料和血缘，但各阶段及 PR 自己生成的裁决不能自证。"""
     validate_implementation_source_boundary(root, paths)
+    pr_actual_source_names = {
+        "review-pack.json",
+        "current.diff",
+        "diff.patch",
+        "verification-evidence.json",
+        "findings.json",
+        "resolution.yaml",
+    }
     review_state_names = {
         "loop-run.json",
         "review-run.json",
@@ -144,6 +152,11 @@ def validate_stage_source_boundary(root: Path, paths: Sequence[Path]) -> None:
     }
     for path in paths:
         relative = path.relative_to(root).parts
+        # PR 保留目录只准入原合同已有实际输入；未知元数据默认拒绝，不追补名称黑名单。
+        if tuple(part.casefold() for part in relative[:3]) == (
+            ".ai-sdlc", "reviews", "pr"
+        ) and (len(relative) != 5 or path.name not in pr_actual_source_names):
+            raise DecisionPreparationError("decision-source-derived-state-forbidden")
         if (
             relative[:2] == (".ai-sdlc", "reviews")
             and (

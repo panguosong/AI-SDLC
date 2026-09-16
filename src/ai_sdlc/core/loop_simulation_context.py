@@ -53,6 +53,45 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
+def comparison_judge_input(context, batch, *, candidates=None, sources=None, manifest=None):
+    """冻结、送审和重放共用同一材料；第三批不能在摘要之后追加决定依据。"""
+    candidates = batch.candidates if candidates is None else candidates
+    sources = context.sources if sources is None else sources
+    manifest = batch.source_manifest if manifest is None else manifest
+    contract = context.contract_for_batch(batch)
+    material = {
+        "contract": contract.model_dump(mode="json"),
+        "candidates": [
+            candidate.model_dump(mode="json")
+            for candidate in sorted(candidates, key=lambda item: item.candidate_id)
+        ],
+        "sources": [source.model_dump(mode="json") for source in sources],
+        "source_manifest": manifest,
+    }
+    if batch.number == 3 and context.comparison_extension is not None:
+        revision = context.comparison_extension
+        material.update(
+            prior_comparisons=[
+                previous.model_dump(mode="json")
+                for previous in context.comparisons[:2]
+            ],
+            prior_contracts=[
+                context.contract_for_batch(previous).model_dump(mode="json")
+                for previous in context.comparisons[:2]
+            ],
+            comparison_authorization=revision.revision_request["comparison_authorization"],
+            authorization_reason=revision.revision_request["reason"],
+            authorized_at_ms=revision.corrected_at_ms,
+            original_started_at_ms=context.started_at_ms,
+            baseline_digest=batch.base_input_digest,
+        )
+        # 第一、二批保留原协议；未发布第三批的弱摘要不降级为可执行凭据。
+        digest = _digest(material)
+    else:
+        digest = judge_input_digest(contract, candidates, manifest)
+    return {"judge_input_digest": digest, **material}
+
+
 def request_digest(request: SimulationPrepareRequest) -> str:
     return _digest(request.model_dump(mode="json", exclude_unset=True))
 
@@ -604,11 +643,7 @@ def validate_simulation_context(context: SimulationContext) -> SimulationContext
             raise ValueError("simulation-improvement-baseline-unbound")
         _check_sources(context.contracts, context.sources, batch.candidates)
         if batch.candidates:
-            expected = judge_input_digest(
-                context.contract_for_batch(batch),
-                batch.candidates,
-                batch.source_manifest,
-            )
+            expected = comparison_judge_input(context, batch)["judge_input_digest"]
             if batch.judge_input_digest != expected:
                 raise ValueError("simulation-judge-input-drift")
         elif batch.judge_input_digest is not None or batch.judgement is not None:
@@ -1003,9 +1038,10 @@ def transition_simulation(
             > 65536
         ):
             raise ValueError("simulation-candidate-payload-too-large")
-        digest = judge_input_digest(
-            context.contract_for_batch(batch), request.candidates, source_manifest
-        )
+        digest = comparison_judge_input(
+            context, batch, candidates=request.candidates,
+            sources=tuple(sources.values()), manifest=source_manifest,
+        )["judge_input_digest"]
         payload["sources"] = [s.model_dump(mode="json") for s in sources.values()]
         payload["pending_batch"] = {
             **batch.model_dump(mode="json"),

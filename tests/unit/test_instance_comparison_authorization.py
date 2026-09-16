@@ -19,7 +19,7 @@ from tests.unit.test_quantified_input_correction import (
 )
 
 
-def rejected_history(*, selected=False, technical=False):
+def rejected_history(*, selected=False, technical=False, cost_reason="合成成本判断，不表示业务验收"):
     original = _cost_rejected_history()
     revised = advance(original, now=4_000_000, **time_revision_request(original))
     frozen = advance(
@@ -60,7 +60,7 @@ def rejected_history(*, selected=False, technical=False):
                 {
                     **assessment_data(name),
                     "cost_check": "supported" if selected else "incomplete",
-                    "cost_reason": "合成成本判断，不表示业务验收",
+                    "cost_reason": cost_reason,
                 }
                 for name in ("A", "B")
             ],

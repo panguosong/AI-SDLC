@@ -3,7 +3,7 @@
 import hashlib
 import json
 
-from ai_sdlc.core.loop_simulation_context import SimulationContext
+from ai_sdlc.core.loop_simulation_context import SimulationContext, _digest
 from tests.integration.test_quantified_implementation import _cli, _payload
 from tests.integration.test_stage_quantified_pipeline import (
     CAPABILITY,
@@ -182,9 +182,38 @@ def test_native_third_batch_authorization_reaches_original_task_without_new_loop
         ),
     )
     judge_input = frozen["judge_input"]
+    material = {
+        key: value for key, value in judge_input.items()
+        if key not in {"judge_input_digest", "instructions", "result_schema"}
+    }
+    assert _digest(material) == judge_input["judge_input_digest"]
+    assert material["prior_comparisons"] == [
+        batch.model_dump(mode="json") for batch in old.comparisons
+    ]
+    assert material["comparison_authorization"] == request["comparison_authorization"]
+    assert material["original_started_at_ms"] == old.started_at_ms
+    assert len(material["prior_contracts"]) == 2
     assert judge_input["judge_input_digest"] not in {
         b.judge_input_digest for b in old.comparisons
     }
+    authorization_path = root / request["sources"][0]["path"]
+    original_authorization = authorization_path.read_bytes()
+    before_record = (directory / "decision-context.json").read_bytes()
+    authorization_path.write_text("替换原授权正文", encoding="utf-8")
+    drifted = _cli_prepare(
+        root,
+        dict(
+            operation="record-comparison", request_id="judge-replaced-authorization",
+            judgement=dict(
+                judge_input_digest=judge_input["judge_input_digest"],
+                assessments=[assessment_data(name) for name in ("A", "B")],
+            ),
+        ),
+        apply=False,
+    )
+    assert drifted.returncode == 1
+    assert (directory / "decision-context.json").read_bytes() == before_record
+    authorization_path.write_bytes(original_authorization)
     selected = _cli_prepare(
         root,
         dict(

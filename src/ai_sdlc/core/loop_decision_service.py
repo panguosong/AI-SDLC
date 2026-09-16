@@ -425,6 +425,7 @@ def validate_implementation_context(
         )
         if _optional_bytes(root, path) is not None:
             raise DecisionPreparationError("decision-context-conflicts-with-legacy")
+        validate_legacy_implementation_identity(root, run, impl_input)
         validate_implementation_requirement(root, impl_input)
         return None
     _check_identity(run, impl_input, run.loop_id)
@@ -682,6 +683,61 @@ def _check_sources(root: Path, loop_dir: Path, request: DecisionPrepareInput) ->
             raise DecisionPreparationError("decision-source-self-reference")
         if hashlib.sha256(read_stable_bytes(root, path)).hexdigest() != source.sha256:
             raise DecisionPreparationError("decision-source-digest-mismatch")
+
+
+def validate_legacy_implementation_identity(
+    root: Path, run: LoopRun, impl_input: ImplementationInput | None,
+) -> bool:
+    """只把没有原生绑定足迹的历史凭据视为 opaque；返回是否可沿用旧读取协议。"""
+    artifacts = implementation_artifacts(root, run.loop_id)
+    reviews = {
+        path: _optional_bytes(root, path)
+        for path in (
+            artifacts.loop_dir / f"review-outcome-round-{number}.json"
+            for number in (1, 2)
+        )
+    }
+    native_footprint = any(
+        item.input_artifacts or item.output_artifacts for item in run.rounds
+    ) or any(content is not None for content in reviews.values())
+    bound = bool(run.input_digest) or native_footprint
+    if (
+        run.loop_type != "implementation"
+        or run.decision_mode != "legacy"
+        or (bound and (impl_input is None or not run.input_digest))
+    ):
+        raise DecisionPreparationError("decision-identity-mismatch")
+    if impl_input is not None:
+        if (
+            impl_input.loop_id != run.loop_id
+            or impl_input.work_item_id != run.work_item_id
+            or (impl_input.decision_mode, impl_input.decision_capability)
+            != (run.decision_mode, run.decision_capability)
+            or (bound and implementation_input_digest(impl_input) != run.input_digest)
+        ):
+            raise DecisionPreparationError("decision-identity-mismatch")
+        if native_footprint:
+            execution = next(
+                (item for item in run.rounds if item.round_kind == "execution"), None,
+            )
+            # 原始执行路径是独立的上游身份；重算已改输入的摘要不能替换原 Design。
+            expected = [
+                impl_input.spec_path, impl_input.plan_path, impl_input.tasks_path,
+                impl_input.design_contract_report_path,
+            ]
+            design_report = (
+                Path(".ai-sdlc/loops/design-contract")
+                / impl_input.design_contract_loop_id / "design-contract-report.json"
+            ).as_posix()
+            if (
+                execution is None or execution.input_artifacts != expected
+                or (impl_input.design_contract_loop_id
+                    and impl_input.design_contract_report_path != design_report)
+            ):
+                raise DecisionPreparationError("decision-identity-mismatch")
+    if any(_optional_bytes(root, path) != content for path, content in reviews.items()):
+        raise DecisionPreparationError("decision-identity-mismatch")
+    return not bound
 
 
 def validate_implementation_requirement(

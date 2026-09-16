@@ -6,7 +6,7 @@ on:
       tag:
         description: Published release tag to verify against the user guide.
         required: true
-        default: v3.2.1
+        default: v3.2.2
   pull_request:
     paths:
       - ".github/workflows/windows-user-guide-e2e.yml"
@@ -36,7 +36,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     env:
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.1' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.2' || inputs.tag }}
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
 
@@ -138,7 +138,7 @@ jobs:
           $ChecksumName = "$PackageName.sha256"
           $PackageDir = (Get-Location).Path
           $ExtractRoot = Join-Path $PackageDir ".ai-sdlc-install"
-          $expectedTag = if ($env:GITHUB_EVENT_NAME -eq "pull_request") { "v3.2.1" } else { "v3.2.1" }
+          $expectedTag = if ($env:GITHUB_EVENT_NAME -eq "pull_request") { "v3.2.2" } else { "v3.2.2" }
           if ($env:RELEASE_TAG -ne $expectedTag) {
             throw "Guide replay tag $env:RELEASE_TAG differs from the expected candidate/published split $expectedTag."
           }
@@ -343,7 +343,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
-      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.1' || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'pull_request' && 'v3.2.2' || inputs.tag }}
       PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
 

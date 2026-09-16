@@ -80,6 +80,7 @@ def _record_clean_review(root: Path, loop_type: str, loop_id: str):
         loop_type=loop_type,
         round_number=1,
         input_digest=review_input.input_digest,
+        implementation_input_digest=review_input.implementation_input_digest,
         status="completed",
         expert_roles=review_input.expert_roles,
         findings=[],
@@ -1488,8 +1489,9 @@ def test_loop_implementation_start_record_status_and_close_json(
     assert close_payload["next_action"] == "Run ai-sdlc pr-review start."
 
 
+@pytest.mark.parametrize("legacy_binding", [False, True])
 def test_loop_implementation_close_uses_reviewed_state_across_aba(
-    tmp_path: Path,
+    tmp_path: Path, legacy_binding: bool,
 ) -> None:
     _write_design_contract_work_item(tmp_path)
     with patch("ai_sdlc.cli.loop_cmd.find_project_root", return_value=tmp_path):
@@ -1535,6 +1537,11 @@ def test_loop_implementation_close_uses_reviewed_state_across_aba(
 
     assert start.exit_code == 0
     reviewed = _record_clean_review(tmp_path, "implementation", "impl-aba")
+    if legacy_binding:
+        outcome_path = tmp_path / ".ai-sdlc/loops/implementation/impl-aba/review-outcome-round-1.json"
+        old_outcome = json.loads(outcome_path.read_bytes())
+        old_outcome.pop("implementation_input_digest")
+        outcome_path.write_text(json.dumps(old_outcome))
     reviewed_bytes = {
         path: (tmp_path / path).read_bytes() for path in reviewed.artifact_paths
     }

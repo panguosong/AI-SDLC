@@ -1,6 +1,6 @@
 # Pull Request 检查清单
 
-本仓库 v3.2.1 必要修复发行沿用[本次发行路径与分层验证](框架自迭代开发与发布约定.md#v320-本次发行路径替代)。本次以当前提交的实际线上 Codex review 承接下方本地复核条目，不执行已撤销的本地整包复评或 Local PR Close；普通用户的产品流程不变。
+本仓库 v3.2.2 必要修复发行沿用[本次发行路径与分层验证](框架自迭代开发与发布约定.md#v320-本次发行路径替代)。本次以当前提交的实际线上 Codex review 承接下方本地复核条目，不执行已撤销的本地整包复评或 Local PR Close；普通用户的产品流程不变。
 
 ## 范围与契约
 
@@ -51,7 +51,7 @@
 - [ ] 12 条路线的在线/离线安装、全新/已有项目和三平台命令均有真实环境证据；
 - [ ] `uv run python scripts/validate_user_guide_standard.py .` 通过；
 - [ ] `README.md`、`USER_GUIDE.zh-CN.md` 与 `packaging/offline/README.md` 描述一致；
-- [ ] 源码、发布文档目标、workflow 默认 tag 与制品名称均为 `3.2.1` / `v3.2.1`；正式发布状态另有对应 Release 与发布后验证证据；
+- [ ] 源码、发布文档目标、workflow 默认 tag 与制品名称均为 `3.2.2` / `v3.2.2`；正式发布状态另有对应 Release 与发布后验证证据；
 - [ ] 发布变更只使用普通 GitHub Release、tag、跨平台 smoke 和分支保护；
 - [ ] 包版本、源码版本、锁文件和工作流一致；
 - [ ] README、用户指南和打包说明一致；

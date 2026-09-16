@@ -460,7 +460,7 @@ def test_repeated_seal_cannot_hide_baseline_drift(stage_project):
         prepare(root, current, {"operation": "seal-for-review", "request_id": "seal"})
 
 
-def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path):
+def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path, monkeypatch):
     from ai_sdlc.core.implementation_loop import start_implementation_loop
     from ai_sdlc.core.implementation_models import ImplementationStartOptions
     from ai_sdlc.core.implementation_store import read_input, read_loop_run
@@ -503,6 +503,16 @@ def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path)
     )
     content = (current.loop_dir / "decision-context.json").read_bytes()
     assert parse_implementation_context(content) == saved.context
+    from ai_sdlc.core import implementation_loop
+
+    original_report = implementation_loop._build_report
+    report_calls = []
+
+    def counted_report(*args, **kwargs):
+        report_calls.append(True)
+        return original_report(*args, **kwargs)
+
+    monkeypatch.setattr(implementation_loop, "_build_report", counted_report)
     assert (
         validate_implementation_context(
             root,
@@ -511,6 +521,24 @@ def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path)
         )
         == saved.context
     )
+    for purpose, reason in (
+        ("execute", "simulation-time-estimate-unavailable"),
+        ("verification", "simulation-initial-selection-missing"),
+    ):
+        with pytest.raises(ValueError, match=reason):
+            validate_implementation_context(
+                root,
+                read_loop_run(current.loop_dir / "loop-run.json"),
+                read_input(current.loop_dir / "implementation-input.json"),
+                purpose=purpose,
+            )
+    from ai_sdlc.cli.loop_stage_cmd import read_stage_decision_context
+
+    assert read_stage_decision_context(root, "implementation", "stage-real") == saved.context
+    # 两个决定读取入口均不消费验收就绪值；真实阶段准备仍计算完整报告。
+    assert report_calls == []
+    assert implementation_stage_host(root, loop_id="stage-real") == current
+    assert len(report_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -982,3 +1010,469 @@ def test_actual_r1_snapshot_cannot_accept_changed_declared_source(stage_project)
     snap = snapshot(root, current, context)
     with pytest.raises(ValueError, match="source-digest-mismatch"):
         build_b1_review_data(snap, assessments(snap), has_actionable_findings=False)
+
+
+def _cost_rejected_host(root, monkeypatch, current=None):
+    """真实文件宿主配合合成候选和判断，不代表业务或模型验收。"""
+    current = current or host(root)
+    context = prepare(root, current, begin(root, current)).context
+    frozen = prepare(
+        root,
+        current,
+        {
+            "operation": "freeze-comparison",
+            "request_id": "cost-first-freeze",
+            "candidates": [
+                candidate_data(context.plan, name, seconds=(1800, 3600))
+                for name in ("A", "B")
+            ],
+        },
+    ).context
+    monkeypatch.setattr(
+        "ai_sdlc.core.loop_stage_decision_service.time.time_ns",
+        lambda: 101_000_000_000,
+    )
+    rejected = prepare(
+        root,
+        current,
+        {
+            "operation": "record-comparison",
+            "request_id": "cost-first-judge",
+            "judgement": {
+                "judge_input_digest": frozen.pending_batch.judge_input_digest,
+                "assessments": [assessment_data(name) for name in ("A", "B")],
+            },
+        },
+    ).context
+    assert rejected.initial_selection_id is None
+    assert {row.reason for row in rejected.comparisons[0].selection.excluded} == {
+        "time_plan_exceeded"
+    }
+    return current, rejected
+
+
+def _cost_preparation_fact(root, path="evidence/completed-preparation.json"):
+    fact = root / path
+    fact.parent.mkdir(parents=True, exist_ok=True)
+    fact.write_text('{"synthetic_preparation": "completed"}\n', encoding="utf-8")
+    return fact, {
+        "id": "completed-preparation",
+        "path": path,
+        "sha256": hashlib.sha256(fact.read_bytes()).hexdigest(),
+        "locator": "synthetic_preparation",
+        "claim": "合成准备回执，只供宿主来源绑定测试。",
+    }
+
+
+def _cost_revision_request(context, source):
+    candidates = []
+    for original in context.comparisons[0].candidates:
+        candidate = original.model_dump(mode="json")
+        candidate["basis"].append(
+            {
+                "id": "prepared",
+                "kind": "project_fact",
+                "source_ref": source["id"],
+                "locator": source["locator"],
+                "statement": "合成准备事实；剩余成本仍包含判断、实施与验收。",
+            }
+        )
+        candidate["future_cost_estimate"].update(
+            lower_seconds=1700,
+            upper_seconds=3500,
+            basis_refs=[*original.future_cost_estimate.basis_refs, "prepared"],
+        )
+        candidates.append(candidate)
+    return {
+        "operation": "freeze-comparison",
+        "request_id": "cost-second-freeze",
+        "candidates": candidates,
+        "sources": [source],
+    }
+
+
+def _cost_host_bytes(current):
+    return {
+        name: (current.loop_dir / name).read_bytes()
+        for name in ("decision-context.json", "loop-run.json")
+    }
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_cost_correction_host_preserves_history_and_records_late_rejection(
+    stage_project, monkeypatch, late
+):
+    root = stage_project
+    current, original = _cost_rejected_host(root, monkeypatch)
+    _, source = _cost_preparation_fact(root)
+    payload = {"operation": "correct-input", "request_id": "cost-correction"}
+    before = _cost_host_bytes(current)
+    preview = prepare(root, current, payload, preview=True)
+    assert preview.status == "preview"
+    assert _cost_host_bytes(current) == before
+    corrected = prepare(root, current, payload).context
+    assert corrected.comparisons == original.comparisons
+    assert corrected.started_at_ms == original.started_at_ms
+    assert corrected.contracts == original.contracts
+    assert (current.loop_dir / "loop-run.json").read_bytes() == before["loop-run.json"]
+    frozen = prepare(root, current, _cost_revision_request(original, source)).context
+    assert frozen.pending_batch.number == 2
+    assert frozen.pending_batch.source_manifest[source["path"]] == source["sha256"]
+    assert frozen.sources[-1].sha256 == source["sha256"]
+    assert frozen.pending_batch.judge_input_digest != (
+        original.comparisons[0].judge_input_digest
+    )
+    frozen_bytes = _cost_host_bytes(current)
+    with pytest.raises(ValueError, match="judgement-input"):
+        prepare(
+            root,
+            current,
+            {
+                "operation": "record-comparison",
+                "request_id": "cost-reject-first-judge-replay",
+                "judgement": original.comparisons[0].judgement.model_dump(mode="json"),
+            },
+        )
+    assert _cost_host_bytes(current) == frozen_bytes
+    monkeypatch.setattr(
+        "ai_sdlc.core.loop_stage_decision_service.time.time_ns",
+        lambda: 220_000_000_000 if late else 104_000_000_000,
+    )
+    completed = prepare(
+        root,
+        current,
+        {
+            "operation": "record-comparison",
+            "request_id": "cost-second-judge",
+            "judgement": {
+                "judge_input_digest": frozen.pending_batch.judge_input_digest,
+                "assessments": [assessment_data(name) for name in ("A", "B")],
+            },
+        },
+    ).context
+    assert len(completed.comparisons) == 2
+    assert completed.comparisons[0] == original.comparisons[0]
+    assert completed.started_at_ms == original.started_at_ms
+    assert completed.contracts == original.contracts
+    assert completed.initial_selection_id == (None if late else "A")
+    if late:
+        assert completed.comparisons[-1].selection.reason == "model_plan_not_feasible"
+        assert completed.comparisons[-1].elapsed_seconds == 120
+    # 后来的墙钟不应令已保存的选择或否定结果无法历史回读。
+    monkeypatch.setattr(
+        "ai_sdlc.core.loop_stage_decision_service.time.time_ns",
+        lambda: 5_000_000_000_000,
+    )
+    completed_bytes = _cost_host_bytes(current)
+    assert read_stage_simulation_context(root, current) == completed
+    assert _cost_host_bytes(current) == completed_bytes
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["correction-preview", "freeze-preview", "record-new-fact", "record-original"],
+)
+def test_cost_correction_host_rejects_fact_drift_without_writing_state(
+    stage_project, monkeypatch, boundary
+):
+    root = stage_project
+    current, original = _cost_rejected_host(root, monkeypatch)
+    fact, source = _cost_preparation_fact(root)
+    payload = {"operation": "correct-input", "request_id": "cost-correction"}
+    if boundary != "correction-preview":
+        prepare(root, current, payload)
+        payload = _cost_revision_request(original, source)
+    if boundary.startswith("record-"):
+        frozen = prepare(root, current, payload).context
+        payload = {
+            "operation": "record-comparison",
+            "request_id": "cost-drift-judge",
+            "judgement": {
+                "judge_input_digest": frozen.pending_batch.judge_input_digest,
+                "assessments": [assessment_data(name) for name in ("A", "B")],
+            },
+        }
+    before = _cost_host_bytes(current)
+    preview = prepare(root, current, payload, preview=True)
+    assert _cost_host_bytes(current) == before
+    changed = root / "source.md" if boundary == "record-original" else fact
+    changed.write_text("来源字节已经变化，不能沿用旧摘要。", encoding="utf-8")
+    with pytest.raises(ValueError, match="(prepare-digest|source.*(mismatch|drift))"):
+        prepare_stage_simulation_decision(
+            root,
+            current.stage_kind,
+            current.loop_id,
+            SimulationPrepareRequest.model_validate(payload),
+            host_resolver=lambda: current,
+            dry_run=False,
+            expected_digest=preview.prepare_digest,
+        )
+    assert _cost_host_bytes(current) == before
+
+
+@pytest.mark.parametrize("invalid", ["fake-sha", "framework-source"])
+def test_cost_correction_host_rejects_false_or_framework_fact_sources(
+    stage_project, monkeypatch, invalid
+):
+    root = stage_project
+    current, original = _cost_rejected_host(root, monkeypatch)
+    path = (
+        ".ai-sdlc/state/completed-preparation.json"
+        if invalid == "framework-source"
+        else "evidence/completed-preparation.json"
+    )
+    _, source = _cost_preparation_fact(root, path)
+    prepare(
+        root,
+        current,
+        {"operation": "correct-input", "request_id": "cost-correction"},
+    )
+    if invalid == "fake-sha":
+        source["sha256"] = "b" * 64
+    before = _cost_host_bytes(current)
+    with pytest.raises(ValueError, match="(source-digest-mismatch|correction-cost)"):
+        prepare(root, current, _cost_revision_request(original, source))
+    assert _cost_host_bytes(current) == before
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_time_revision_host_preview_apply_freeze_judge_and_execution_read(
+    stage_project, monkeypatch, late
+):
+    from tests.unit.test_quantified_input_correction import (
+        time_revision_candidates,
+        time_revision_request,
+    )
+
+    root = stage_project
+    current, original = _cost_rejected_host(root, monkeypatch)
+    _, source = _cost_preparation_fact(root)
+    payload = time_revision_request(original, [source])
+    before = _cost_host_bytes(current)
+    preview = prepare(root, current, payload, preview=True)
+    assert _cost_host_bytes(current) == before
+    revised = prepare(root, current, payload).context
+    assert revised.context_digest == preview.context.context_digest
+    assert revised.comparisons == original.comparisons
+    assert revised.input_correction.old_contracts == original.contracts
+    assert revised.sources[-1].sha256 == source["sha256"]
+    assert (current.loop_dir / "loop-run.json").read_bytes() == before["loop-run.json"]
+    candidates = time_revision_candidates(original, revised)
+    for candidate in candidates:
+        candidate["basis"][-1]["source_ref"] = source["id"]
+    frozen = prepare(
+        root,
+        current,
+        dict(
+            operation="freeze-comparison",
+            request_id="revised-freeze",
+            candidates=candidates,
+        ),
+    ).context
+    assert frozen.pending_batch.source_manifest[source["path"]] == source["sha256"]
+    monkeypatch.setattr(
+        "ai_sdlc.core.loop_stage_decision_service.time.time_ns",
+        lambda: 6_100_000_000_000 if late else 104_000_000_000,
+    )
+    completed = prepare(
+        root,
+        current,
+        dict(
+            operation="record-comparison",
+            request_id="revised-judge",
+            judgement={
+                "judge_input_digest": frozen.pending_batch.judge_input_digest,
+                "assessments": [assessment_data(name) for name in ("A", "B")],
+            },
+        ),
+    ).context
+    assert completed.comparisons[0] == original.comparisons[0]
+    assert completed.initial_selection_id == (None if late else "A")
+    if late:
+        assert completed.comparisons[-1].elapsed_seconds == 6000
+        with pytest.raises(ValueError, match="simulation-time-estimate-unavailable"):
+            read_stage_simulation_context(root, current, purpose="execute")
+    else:
+        assert (
+            read_stage_simulation_context(root, current, purpose="execute") == completed
+        )
+    monkeypatch.setattr(
+        "ai_sdlc.core.loop_stage_decision_service.time.time_ns",
+        lambda: 20_000_000_000_000,
+    )
+    assert read_stage_simulation_context(root, current) == completed
+
+
+@pytest.mark.parametrize("boundary", ["revise-preview", "freeze-preview", "record"])
+def test_time_revision_host_fact_drift_never_writes_context_or_run(
+    stage_project, monkeypatch, boundary
+):
+    from tests.unit.test_quantified_input_correction import (
+        time_revision_candidates,
+        time_revision_request,
+    )
+
+    root = stage_project
+    current, original = _cost_rejected_host(root, monkeypatch)
+    fact, source = _cost_preparation_fact(root)
+    payload = time_revision_request(original, [source])
+    if boundary != "revise-preview":
+        revised = prepare(root, current, payload).context
+        candidates = time_revision_candidates(original, revised)
+        for candidate in candidates:
+            candidate["basis"][-1]["source_ref"] = source["id"]
+        payload = dict(
+            operation="freeze-comparison",
+            request_id="revised-freeze",
+            candidates=candidates,
+        )
+    if boundary == "record":
+        frozen = prepare(root, current, payload).context
+        payload = dict(
+            operation="record-comparison",
+            request_id="revised-judge",
+            judgement={
+                "judge_input_digest": frozen.pending_batch.judge_input_digest,
+                "assessments": [assessment_data(name) for name in ("A", "B")],
+            },
+        )
+    before = _cost_host_bytes(current)
+    preview = prepare(root, current, payload, preview=True)
+    fact.write_text("修订依据已经漂移。", encoding="utf-8")
+    with pytest.raises(ValueError, match="(prepare-digest|source.*(mismatch|drift))"):
+        prepare_stage_simulation_decision(
+            root,
+            current.stage_kind,
+            current.loop_id,
+            SimulationPrepareRequest.model_validate(payload),
+            host_resolver=lambda: current,
+            dry_run=False,
+            expected_digest=preview.prepare_digest,
+        )
+    assert _cost_host_bytes(current) == before
+
+
+def test_time_revision_reaches_native_implementation_in_progress(
+    initialized_project_dir, monkeypatch
+):
+    import json
+
+    from typer.testing import CliRunner
+
+    from ai_sdlc.cli.loop_stage_cmd import resolve_stage_decision_host
+    from ai_sdlc.cli.main import app
+    from ai_sdlc.core.implementation_loop import (
+        ImplementationRecordOptions,
+        ImplementationStartOptions,
+        record_implementation_progress,
+        start_implementation_loop,
+    )
+    from ai_sdlc.core.loop_simulation_context import SimulationContext
+    from tests.integration.test_quantified_implementation import _ready_project
+    from tests.unit.test_quantified_input_correction import (
+        time_revision_candidates,
+        time_revision_request,
+    )
+
+    root = _ready_project(initialized_project_dir)
+    (root / "source.md").write_text("合成冻结目标", encoding="utf-8")
+    started = start_implementation_loop(
+        ImplementationStartOptions(
+            root=root,
+            work_item="specs/demo-implementation-loop",
+            loop_id="stage-test",
+            decision_mode="adaptive-quantified",
+            decision_capability="stage-simulation-v1",
+        )
+    )
+    assert started.status == "ready", started
+    monkeypatch.setattr(
+        "ai_sdlc.core.loop_stage_decision_service.time.time_ns", lambda: 100_000_000_000
+    )
+    current = resolve_stage_decision_host(root, "implementation", "stage-test")
+    current, original = _cost_rejected_host(root, monkeypatch, current)
+    blocked = record_implementation_progress(
+        ImplementationRecordOptions(
+            root=root,
+            loop_id="stage-test",
+            task_id="T11",
+            status="in_progress",
+        )
+    )
+    assert blocked.status == "blocked"
+    _, source = _cost_preparation_fact(root)
+    monkeypatch.chdir(root)
+    runner = CliRunner()
+
+    def cli_prepare(payload):
+        path = root.parent / f"{payload['request_id']}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        args = [
+            "loop",
+            "decision-prepare",
+            "--type",
+            "implementation",
+            "--loop-id",
+            "stage-test",
+            "--input",
+            str(path),
+            "--json",
+        ]
+        before = _cost_host_bytes(current)
+        preview = runner.invoke(app, [*args, "--dry-run"])
+        assert preview.exit_code == 0, preview.output
+        assert _cost_host_bytes(current) == before
+        applied = runner.invoke(
+            app,
+            [*args, "--expect-digest", json.loads(preview.output)["prepare_digest"]],
+        )
+        assert applied.exit_code == 0, applied.output
+        result = json.loads(applied.output)
+        if "judge_input" in result:
+            assert "time-plan revision" in result["judge_input"]["instructions"]
+            assert (
+                result["judge_input"]["contract"]["time_plan"]["window_seconds"]
+                == "10800"
+            )
+        return SimulationContext.model_validate(result["context"])
+
+    revised = cli_prepare(time_revision_request(original, [source]))
+    candidates = time_revision_candidates(original, revised)
+    for candidate in candidates:
+        candidate["basis"][-1]["source_ref"] = source["id"]
+    frozen = cli_prepare(
+        dict(
+            operation="freeze-comparison",
+            request_id="revised-freeze",
+            candidates=candidates,
+        ),
+    )
+    completed = cli_prepare(
+        dict(
+            operation="record-comparison",
+            request_id="revised-judge",
+            judgement={
+                "judge_input_digest": frozen.pending_batch.judge_input_digest,
+                "assessments": [assessment_data(name) for name in ("A", "B")],
+            },
+        ),
+    )
+    assert completed.initial_selection_id == "A"
+    result = record_implementation_progress(
+        ImplementationRecordOptions(
+            root=root,
+            loop_id="stage-test",
+            task_id="T11",
+            status="in_progress",
+        )
+    )
+    assert result.status == "ready", result
+    from ai_sdlc.core.loop_decision_service import implementation_execution_started
+
+    assert implementation_execution_started(root, "stage-test")
+    assert (
+        read_stage_simulation_context(
+            root, resolve_stage_decision_host(root, "implementation", "stage-test")
+        )
+        == completed
+    )

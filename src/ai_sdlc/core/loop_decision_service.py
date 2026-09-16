@@ -55,7 +55,7 @@ from ai_sdlc.core.loop_simulation_context import (
     validate_simulation_context,
 )
 from ai_sdlc.core.quality_command import _RUNTIME_PREFIXES, quality_command_environment
-from ai_sdlc.core.review_kernel import ReviewInput
+from ai_sdlc.core.review_kernel import ReviewInput, ReviewInputValidator
 from ai_sdlc.core.stable_file_read import _stable_regular_file_exists, read_stable_bytes
 
 
@@ -407,7 +407,8 @@ def prepare_implementation_decision(
 
 
 def validate_implementation_context(
-    root: Path, run: LoopRun, impl_input: ImplementationInput, *, purpose: str = "read"
+    root: Path, run: LoopRun, impl_input: ImplementationInput, *, purpose: str = "read",
+    reviewed_input: ReviewInput | None = None,
 ) -> DecisionContext | SimulationContext | None:
     run = LoopRun.model_validate(run.model_dump())
     impl_input = ImplementationInput.model_validate(impl_input.model_dump())
@@ -425,6 +426,11 @@ def validate_implementation_context(
         )
         if _optional_bytes(root, path) is not None:
             raise DecisionPreparationError("decision-context-conflicts-with-legacy")
+        validate_legacy_implementation_identity(
+            root, run, impl_input, preparing_review=purpose == "review",
+            reviewed_input=reviewed_input,
+        )
+        validate_implementation_requirement(root, impl_input)
         return None
     _check_identity(run, impl_input, run.loop_id)
     validate_implementation_upstream(root, impl_input)
@@ -447,7 +453,10 @@ def validate_implementation_context(
             read_stage_simulation_context,
         )
 
-        host = implementation_stage_host(root, run, impl_input)
+        # 此处只读取决定身份；反例每步前后验不能重复计算未被消费的验收报告。
+        host = implementation_stage_host(
+            root, run, impl_input, _evaluate_actual_readiness=False
+        )
         context = read_stage_simulation_context(root, host, purpose=purpose)
         if purpose in {"execute", "verification"} and (
             context.initial_selection_id is None
@@ -681,6 +690,256 @@ def _check_sources(root: Path, loop_dir: Path, request: DecisionPrepareInput) ->
             raise DecisionPreparationError("decision-source-self-reference")
         if hashlib.sha256(read_stable_bytes(root, path)).hexdigest() != source.sha256:
             raise DecisionPreparationError("decision-source-digest-mismatch")
+
+
+def _capture_opaque_implementation_receipt(
+    root: Path, run: LoopRun, impl_input: ImplementationInput | None,
+) -> dict[Path, bytes | None]:
+    """旧凭据须有明确完整的旧结构；擦除绑定本身不能证明历史身份。"""
+    from ai_sdlc.core.implementation_models import (
+        ImplementationClose,
+        ImplementationReport,
+    )
+
+    artifacts = implementation_artifacts(root, run.loop_id)
+    sidecars = (artifacts.tasks_path, artifacts.progress_path, artifacts.evidence_path)
+    captured = {
+        path: _optional_bytes(root, path)
+        for path in (artifacts.input_path, artifacts.report_json_path, artifacts.close_path, *sidecars)
+    }
+    report_bytes, close_bytes = captured[artifacts.report_json_path], captured[artifacts.close_path]
+    if run.status != LoopStatus.CLOSED or report_bytes is None or close_bytes is None:
+        raise DecisionPreparationError("decision-identity-mismatch")
+    report = ImplementationReport.model_validate_json(report_bytes)
+    close = ImplementationClose.model_validate_json(close_bytes)
+    if (
+        report.status != LoopStatus.PASSED
+        or report.loop_id != run.loop_id
+        or report.work_item_id != run.work_item_id
+        or close.loop_id != run.loop_id
+        or close.review_binding is not None
+    ):
+        raise DecisionPreparationError("decision-identity-mismatch")
+    input_bytes = captured[artifacts.input_path]
+    if impl_input is None:
+        # 最早的 receipt-only 格式没有输入和执行工件，不补造过去的绑定。
+        valid = input_bytes is None and all(captured[path] is None for path in sidecars)
+    else:
+        # 带输入的旧凭据保留三个空对象；缺件、非空或破损工件均不能冒充占位符。
+        valid = (
+            input_bytes is not None
+            and ImplementationInput.model_validate_json(input_bytes) == impl_input
+            and all(captured[path] is not None and json.loads(captured[path]) == {} for path in sidecars)
+        )
+    if not valid:
+        raise DecisionPreparationError("decision-identity-mismatch")
+    return captured
+
+
+def validate_legacy_implementation_identity(
+    root: Path, run: LoopRun, impl_input: ImplementationInput | None,
+    *, preparing_review: bool = False,
+    reviewed_input: ReviewInput | None = None,
+    review_input_validator: ReviewInputValidator | None = None,
+    captured_artifacts: dict[Path, bytes | None] | None = None,
+) -> bool:
+    """仅完整匹配旧凭据时沿用 opaque 读取；原生绑定缺失不改变记录身份。"""
+    artifacts = implementation_artifacts(root, run.loop_id)
+    reviews = {
+        path: _optional_bytes(root, path)
+        for path in (
+            artifacts.loop_dir / f"review-outcome-round-{number}.json"
+            for number in (1, 2)
+        )
+    }
+    from ai_sdlc.core.loop_review_models import LoopReviewOutcome
+
+    outcomes = []
+    for number, content in enumerate(reviews.values(), 1):
+        if content is None:
+            continue
+        outcome = LoopReviewOutcome.model_validate_json(content)
+        if (outcome.loop_id, outcome.loop_type, outcome.round_number) != (
+            run.loop_id, "implementation", number,
+        ) or outcome.b1 is not None or outcome.simulation is not None:
+            raise DecisionPreparationError("decision-identity-mismatch")
+        outcomes.append(outcome)
+    if outcomes and outcomes[0].round_number != 1:
+        raise DecisionPreparationError("review-outcome-sequence-invalid")
+    native_footprint = any(
+        item.input_artifacts or item.output_artifacts for item in run.rounds
+    ) or any(content is not None for content in reviews.values())
+    bound = bool(run.input_digest) or native_footprint
+    if (
+        run.loop_type != "implementation"
+        or run.decision_mode != "legacy"
+        or (bound and (impl_input is None or not run.input_digest))
+    ):
+        raise DecisionPreparationError("decision-identity-mismatch")
+    opaque_material = (
+        _capture_opaque_implementation_receipt(root, run, impl_input)
+        if not native_footprint else {}
+    )
+    if captured_artifacts is not None:
+        # 分类与最终消费者必须使用同份原件，不能拼接不同时间读到的合法片段。
+        if any(
+            path in captured_artifacts and captured_artifacts[path] != content
+            for path, content in opaque_material.items()
+        ):
+            raise DecisionPreparationError("decision-identity-mismatch")
+        captured_artifacts.update(opaque_material)
+    if native_footprint and run.status == LoopStatus.CLOSED:
+        from ai_sdlc.core.loop_review_service import has_actionable_findings
+
+        # 窄摘要只证明输入身份；原生闭后消费仍须保留完整、已通过的正式评审序列。
+        if not outcomes:
+            raise DecisionPreparationError("review-result-missing")
+        if len(outcomes) == 2 and (
+            outcomes[0].status != "completed" or not has_actionable_findings(outcomes[0])
+        ):
+            raise DecisionPreparationError("review-outcome-sequence-invalid")
+        if outcomes[-1].status != "completed":
+            raise DecisionPreparationError("review-execution-failed")
+        if has_actionable_findings(outcomes[-1]):
+            raise DecisionPreparationError("review-findings-actionable")
+    if impl_input is not None:
+        if reviewed_input is not None and (
+            reviewed_input.loop_id, reviewed_input.loop_type,
+            reviewed_input.implementation_input_digest,
+        ) != (
+            run.loop_id, "implementation", implementation_input_digest(impl_input),
+        ):
+            raise DecisionPreparationError("decision-identity-mismatch")
+        if (
+            impl_input.loop_id != run.loop_id
+            or impl_input.work_item_id != run.work_item_id
+            or (impl_input.decision_mode, impl_input.decision_capability)
+            != (run.decision_mode, run.decision_capability)
+            or (bound and implementation_input_digest(impl_input) != run.input_digest)
+        ):
+            raise DecisionPreparationError("decision-identity-mismatch")
+        if native_footprint:
+            execution = next(
+                (item for item in run.rounds if item.round_kind == "execution"), None,
+            )
+            # 原始执行路径是独立的上游身份；重算已改输入的摘要不能替换原 Design。
+            expected = [
+                impl_input.spec_path, impl_input.plan_path, impl_input.tasks_path,
+                impl_input.design_contract_report_path,
+            ]
+            design_report = (
+                Path(".ai-sdlc/loops/design-contract")
+                / impl_input.design_contract_loop_id / "design-contract-report.json"
+            ).as_posix()
+            if (
+                execution is None or execution.input_artifacts != expected
+                or (impl_input.design_contract_loop_id
+                    and impl_input.design_contract_report_path != design_report)
+            ):
+                raise DecisionPreparationError("decision-identity-mismatch")
+        for outcome in outcomes:
+            if (
+                outcome.implementation_input_digest is not None
+                and outcome.implementation_input_digest != implementation_input_digest(impl_input)
+            ):
+                raise DecisionPreparationError("decision-identity-mismatch")
+        if outcomes and outcomes[-1].implementation_input_digest is None:
+            final = outcomes[-1]
+            if reviewed_input is None and review_input_validator is not None:
+                reviewed_input = review_input_validator(
+                    root, loop_type="implementation", loop_id=run.loop_id,
+                    expected_digest=final.input_digest,
+                )
+            elif reviewed_input is None and not preparing_review:
+                from ai_sdlc.cli.loop_review_cmd import (
+                    resolve_review_input,
+                    validate_review_input_for_close,
+                )
+
+                # 构造快照时沿 purpose=review 返回，外层再核原摘要；闭后仍须通过质量门禁。
+                if run.status == LoopStatus.CLOSED:
+                    reviewed_input = validate_review_input_for_close(
+                        root, loop_type="implementation", loop_id=run.loop_id,
+                        expected_digest=final.input_digest,
+                    )
+                else:
+                    reviewed_input = resolve_review_input(
+                        root, loop_type="implementation", loop_id=run.loop_id,
+                        review_round_number=final.round_number,
+                    )
+            if reviewed_input is not None:
+                if not isinstance(reviewed_input, ReviewInput) or (
+                    reviewed_input.loop_id, reviewed_input.loop_type,
+                    reviewed_input.round_number, reviewed_input.input_digest,
+                    reviewed_input.implementation_input_digest,
+                ) != (
+                    run.loop_id, "implementation", final.round_number,
+                    final.input_digest, implementation_input_digest(impl_input),
+                ):
+                    raise DecisionPreparationError("decision-legacy-review-binding-unavailable")
+            elif not preparing_review:
+                # 仅允许只读构造完整旧快照；执行/写入仍须得到可核对的原摘要。
+                raise DecisionPreparationError("decision-legacy-review-binding-unavailable")
+    if any(
+        _optional_bytes(root, path) != content
+        for path, content in (reviews | opaque_material).items()
+    ):
+        raise DecisionPreparationError("decision-identity-mismatch")
+    return not bound
+
+
+def validate_implementation_requirement(
+    root: Path, impl_input: ImplementationInput,
+    *, allow_unbound_legacy: bool = False,
+) -> None:
+    """legacy 也须保留显式 Requirement 依据，但不重新冻结当前设计文档。"""
+    from ai_sdlc.core.design_contract_models import DesignContractInput
+    from ai_sdlc.core.design_contract_store import (
+        design_contract_artifacts,
+        require_design_check_published,
+    )
+    from ai_sdlc.core.design_contract_store import (
+        validate_explicit_loop_id as validate_design_id,
+    )
+    from ai_sdlc.core.implementation_loop import (
+        _bound_design_input,
+        _design_requirement_issue,
+    )
+
+    design_id = impl_input.design_contract_loop_id.strip()
+    if not design_id:
+        return
+    try:
+        artifacts = design_contract_artifacts(root, validate_design_id(design_id))
+        require_design_check_published(artifacts.input_path.parent)
+        captured = {
+            artifacts.loop_run_path: _optional_bytes(root, artifacts.loop_run_path),
+            artifacts.input_path: read_stable_bytes(root, artifacts.input_path),
+        }
+        run_content = captured[artifacts.loop_run_path]
+        if run_content is None:
+            # 无摘要的历史关闭凭据可附带未绑定 Requirement 的旧输入；原生绑定不能降级。
+            contract_input = DesignContractInput.model_validate_json(captured[artifacts.input_path])
+            if (
+                not allow_unbound_legacy
+                or contract_input.requirement_loop_id.strip()
+                or contract_input.loop_id != design_id
+                or contract_input.work_item_id != impl_input.work_item_id
+            ):
+                raise ValueError("design-contract bound run unavailable")
+        else:
+            contract_input = _bound_design_input(
+                LoopRun.model_validate_json(run_content),
+                captured[artifacts.input_path], design_id, impl_input.work_item_id,
+            )
+        blocker, _ = _design_requirement_issue(root, contract_input)
+        if blocker:
+            raise ValueError(blocker)
+        require_design_check_published(artifacts.input_path.parent)
+        if any(_optional_bytes(root, path) != content for path, content in captured.items()):
+            raise ValueError("design-contract bound input changed during verification")
+    except (OSError, ValueError) as exc:
+        raise DecisionPreparationError(f"decision-upstream-changed: {exc}") from exc
 
 
 def validate_implementation_upstream(
@@ -972,6 +1231,7 @@ def implementation_stage_host(
     impl_input: ImplementationInput | None = None,
     *,
     loop_id: str = "",
+    _evaluate_actual_readiness: bool = True,
 ):
     """从真实任务、质量证据和原生命周期构建阶段适配；不递归读决策门禁。"""
     from ai_sdlc.core.implementation_loop import _build_report
@@ -1011,7 +1271,8 @@ def implementation_stage_host(
             raise
         initial_ready = False
     actual_ready = (
-        _build_report(root, impl_input, tasks, progress).status
+        _evaluate_actual_readiness
+        and _build_report(root, impl_input, tasks, progress).status
         == LoopStatus.NEEDS_REVIEW
     )
     actual_paths = (

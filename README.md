@@ -1,10 +1,10 @@
-# AI-SDLC 3.2.1
+# AI-SDLC 3.2.2
 
 AI-SDLC 是一个本地优先、可恢复、可验证的 AI 原生软件研发框架。它把需求澄清、设计契约、任务执行、质量门禁、对抗审查和交付证据组织成一套可由 AI 代理与工程师共同执行的命令行工作流。
 
 项目地址：<https://github.com/panguosong/AI-SDLC>
 
-> 本文为 `v3.2.1` 发布文档；安装前请确认对应正式 Release 和目标平台资产已经可用，未发布时不要用开发分支替代正式安装来源。第一次使用时，请在下面的 12 条路线中只选择一条完整执行；从 `v2.0.0` 升级前请阅读 [v3 迁移说明](docs/v3-migration.zh-CN.md)，从 `v1.0.2` 跨大版本升级还应先阅读 [v2 迁移说明](docs/v2-migration.zh-CN.md)。
+> 本文为 `v3.2.2` 发布文档；安装前请确认对应正式 Release 和目标平台资产已经可用，未发布时不要用开发分支替代正式安装来源。第一次使用时，请在下面的 12 条路线中只选择一条完整执行；从 `v2.0.0` 升级前请阅读 [v3 迁移说明](docs/v3-migration.zh-CN.md)，从 `v1.0.2` 跨大版本升级还应先阅读 [v2 迁移说明](docs/v2-migration.zh-CN.md)。
 
 自 `v3.1.0` 起，有界模拟量化覆盖五个 Loop、六个评分视角：先比较少量候选草案，再用真实产物完成独立评审和原有关闭门禁。历史版本 `v3.0.1` 是维护补丁版本，运行时能力与 `v3.0.0` 保持一致，启用了 12 条新用户安装、初始化与恢复路线；它不包含 `v3.1.0` 引入的全阶段量化能力。
 
@@ -40,7 +40,7 @@ AI-SDLC 是一个本地优先、可恢复、可验证的 AI 原生软件研发�
 | 已有项目 | 在线 | [执行路线](USER_GUIDE.zh-CN.md#route-existing-online-windows-amd64) | [执行路线](USER_GUIDE.zh-CN.md#route-existing-online-macos-arm64) | [执行路线](USER_GUIDE.zh-CN.md#route-existing-online-linux-amd64) |
 | 已有项目 | 离线 | [执行路线](USER_GUIDE.zh-CN.md#route-existing-offline-windows-amd64) | [执行路线](USER_GUIDE.zh-CN.md#route-existing-offline-macos-arm64) | [执行路线](USER_GUIDE.zh-CN.md#route-existing-offline-linux-amd64) |
 
-Linux 选择边界：已存在 Python 3.11+ 的 Linux 主机保持发行版无关的在线兼容路径。缺少 Python 时，在线自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc；其他缺少 Python 的 amd64/x86_64 + glibc Linux 主机使用路线 6/12 的 ai-sdlc-offline-3.2.1-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机没有兼容的 v3.2.1 Linux 发行资产，不得使用路线 6/12 的 AMD64 离线包。
+Linux 选择边界：已存在 Python 3.11+ 的 Linux 主机保持发行版无关的在线兼容路径。缺少 Python 时，在线自动 bootstrap 仅认证 Debian GNU/Linux 12 (bookworm) + amd64/x86_64 + glibc；其他缺少 Python 的 amd64/x86_64 + glibc Linux 主机使用路线 6/12 的 ai-sdlc-offline-3.2.2-linux-amd64.tar.gz。非 AMD64 或非 glibc 的 Linux 主机没有兼容的 v3.2.2 Linux 发行资产，不得使用路线 6/12 的 AMD64 离线包。
 
 普通用户优先使用安装器创建的 `ai-sdlc`。若当前终端还没有刷新 PATH，就使用该路线给出的 `python -m ai_sdlc ...` 命令；不要自行创建 Python 环境或手工补依赖。
 
@@ -49,18 +49,18 @@ Linux 选择边界：已存在 Python 3.11+ 的 Linux 主机保持发行版无�
 ### 高级安装：从 Git 安装
 
 ```powershell
-python -m pip install "git+https://github.com/panguosong/AI-SDLC.git@v3.2.1"
+python -m pip install "git+https://github.com/panguosong/AI-SDLC.git@v3.2.2"
 ai-sdlc --version
 ```
 
-版本输出应为 `3.2.1`。
+版本输出应为 `3.2.2`。
 
 需要验证尚未发布的开发版时，可显式把安装地址末尾改为 `@main`；开发版不承诺输出稳定版版本号。
 
 ### 开发者入口：从源码运行
 
 ```powershell
-git clone --branch v3.2.1 --depth 1 https://github.com/panguosong/AI-SDLC.git
+git clone --branch v3.2.2 --depth 1 https://github.com/panguosong/AI-SDLC.git
 Set-Location AI-SDLC
 uv sync
 uv run ai-sdlc --version
@@ -266,11 +266,11 @@ AI-SDLC 将前端质量作为可验证交付的一部分：
 
 ## 离线打包
 
-离线包会包含 AI-SDLC wheel、依赖 wheel、安装脚本、包内 `SHA256SUMS` 校验清单和可选的 Python 运行时。每个正式压缩包同时发布同名 `.sha256` 文件。`v3.2.1` 的目标发行产物名称如下；下载前须核对正式 Release 已提供这些文件及匹配摘要：
+离线包会包含 AI-SDLC wheel、依赖 wheel、安装脚本、包内 `SHA256SUMS` 校验清单和可选的 Python 运行时。每个正式压缩包同时发布同名 `.sha256` 文件。`v3.2.2` 的目标发行产物名称如下；下载前须核对正式 Release 已提供这些文件及匹配摘要：
 
-- `ai-sdlc-offline-3.2.1-windows-amd64.zip`
-- `ai-sdlc-offline-3.2.1-macos-arm64.tar.gz`
-- `ai-sdlc-offline-3.2.1-linux-amd64.tar.gz`
+- `ai-sdlc-offline-3.2.2-windows-amd64.zip`
+- `ai-sdlc-offline-3.2.2-macos-arm64.tar.gz`
+- `ai-sdlc-offline-3.2.2-linux-amd64.tar.gz`
 
 具体下载与校验命令见[中文用户指南](USER_GUIDE.zh-CN.md)。
 

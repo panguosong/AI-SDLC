@@ -9,7 +9,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterator, MutableMapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
@@ -510,6 +510,14 @@ def _b1_review_protocol_payload(snapshot: B1ReviewSnapshot) -> dict[str, object]
             "Evidence IDs must exactly cover results and repair_readiness refs. "
             "Non-UNKNOWN repair readiness requires evidence; missing authority, "
             "facts or verification must not become PASS.",
+            "Repair authorization refers to the host author's evidenced scope, "
+            "not the expert's read-only execution mode. Facts and verification "
+            "must support a concrete repair at the current stage; a document-stage "
+            "repair does not require the unimplemented product to pass runtime tests first.",
+            "decision-context.json and repair-readiness-supplement.json are contract "
+            "and audit metadata, never assessment.evidence for obligations or repair "
+            "readiness. Cite the original evidence_manifest documents instead; "
+            "verified supplemental basis documents are included in the R2 snapshot.",
             "Check actual changes follow the selected mechanism and authorized "
             "scope; unauthorized alternate or extra routes need an important or "
             "blocker finding. Do not submit aggregate scores or inferred permissions.",
@@ -677,6 +685,7 @@ def _resolve_review_input(
     b1_context = None
     upstream_context = []
     recovery_originals = None
+    repair_supplement = None
     authority_only_paths = []
     if loop_type == "local-pr-review":
         loop_dir, pointer_path, run_path = _find_local_review_dir(root, safe_loop_id)
@@ -788,6 +797,33 @@ def _resolve_review_input(
                 *stage_source_material,
             ]
         )
+        supplement_path = loop_dir / "repair-readiness-supplement.json"
+        if (
+            loop_type == "requirement"
+            and review_round_number == 2
+            and supplement_path.exists()
+        ):
+            from ai_sdlc.core.loop_repair_readiness import (
+                read_verified_repair_supplement,
+            )
+
+            if b1_context is None:
+                raise ValueError("repair-readiness-original-missing")
+            repair_first = _read_outcome(
+                root, outcome_path(loop_dir, 1), "requirement", safe_loop_id, 1
+            )
+            repair_supplement = read_verified_repair_supplement(
+                root, loop_dir, repair_first, b1_context
+            )
+            if repair_supplement is None:
+                raise ValueError("repair-readiness-input-drift")
+            # 仅 R2 展开原始依据；补录本身只绑定身份，不替代专家的业务证据。
+            artifacts = _unique_paths([
+                *artifacts,
+                supplement_path,
+                *(root / path for path in repair_supplement.evidence_manifest),
+            ])
+            authority_only_paths.append(outcome_path(loop_dir, 1))
         upstream_context = _exclude_paths(
             _stage_upstream_context(root, loop_type, loop_dir),
             excluded=artifacts,
@@ -844,6 +880,12 @@ def _resolve_review_input(
             and capture_paths is None
         ):
             capture_artifact_paths.append(loop_dir / "decision-context.json")
+            if supplement_path in artifacts:
+                assert repair_supplement is not None
+                capture_artifact_paths.extend([
+                    supplement_path,
+                    *(root / path for path in repair_supplement.evidence_manifest),
+                ])
     else:
         raise ValueError(f"Unsupported review Loop type: {loop_type}")
 
@@ -861,10 +903,14 @@ def _resolve_review_input(
         ]
         capture_only_paths = [run_path]
     capture_only_paths = _unique_paths([*capture_only_paths, *authority_only_paths])
-    # 量化模式以生成摘要的同次读取校验身份；不在读取后另开文件拼证据。
+    # 阶段身份使用生成摘要的同次读取；内核只捕获原件，不依赖业务模型。
+    identity_capture_paths = (
+        [loop_dir / "implementation-input.json"] if loop_type == "implementation" else []
+    )
     target_captures = captured_artifacts
     if (
-        b1_context is not None
+        bool(identity_capture_paths)
+        or b1_context is not None
         or (recovery_originals is not None and recovery_originals.originals)
         or (capture_paths is not None and captured_artifacts is not None)
     ):
@@ -882,7 +928,7 @@ def _resolve_review_input(
         capture_artifact_paths=(
             [*artifacts, *upstream_context, *capture_artifact_paths]
             if b1_context is not None or (recovery_originals is not None and recovery_originals.originals)
-            else capture_artifact_paths
+            else [*capture_artifact_paths, *identity_capture_paths]
         ),
         capture_only_paths=(
             _unique_paths([run_path, *capture_only_paths])
@@ -891,6 +937,9 @@ def _resolve_review_input(
         ),
         captured_artifacts=target_captures,
     )
+    if identity_capture_paths:
+        assert target_captures is not None
+        reviewed = _bind_implementation_review_identity(reviewed, target_captures)
     if recovery_originals is not None and recovery_originals.originals:
         assert target_captures is not None
         material_run = ReviewRun.model_validate_json(target_captures[run_path.relative_to(root).as_posix()])
@@ -910,6 +959,14 @@ def _resolve_review_input(
         material = {*reviewed.artifact_paths, *reviewed.upstream_context_paths}
         if any(source.path not in material for source in context.sources):
             raise ValueError("decision-source-missing-from-snapshot")
+        # 展开清单与同次捕获须来自同一补录；原 R1 仅作身份原件，不改变摘要。
+        if repair_supplement is not None and (
+            read_verified_repair_supplement(
+                root, loop_dir, repair_first, context,
+                captured_artifacts=target_captures,
+            ) != repair_supplement
+        ):
+            raise ValueError("repair-readiness-input-drift")
     if captured_artifacts is not None and target_captures is not captured_artifacts:
         assert target_captures is not None
         # 内部完整校验仍用同次原件；显式读取只返回请求的材料，统一普通及量化出口。
@@ -940,6 +997,24 @@ def _resolve_review_input(
             )
             captured_artifacts[relative] = target_captures[relative]
     return reviewed
+
+
+def _bind_implementation_review_identity(
+    reviewed: ReviewInput, captured: Mapping[str, bytes],
+) -> ReviewInput:
+    """窄身份从整体摘要已捕获的原件派生，不重新读取可变输入。"""
+    from ai_sdlc.core.implementation_models import ImplementationInput
+    from ai_sdlc.core.implementation_store import implementation_input_digest
+
+    input_key = (
+        f".ai-sdlc/loops/implementation/{reviewed.loop_id}/implementation-input.json"
+    )
+    impl_input = ImplementationInput.model_validate_json(captured[input_key])
+    identity = (
+        implementation_input_digest(impl_input)
+        if impl_input.decision_mode == "legacy" else None
+    )
+    return reviewed.model_copy(update={"implementation_input_digest": identity})
 
 
 def resolve_b1_review_snapshot(

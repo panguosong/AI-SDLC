@@ -35,6 +35,25 @@ class SimulationFailure(DecisionValue):
     prior_call_terminated: StrictBool = False
 
 
+class ComparisonAuthorization(DecisionValue):
+    """显式实例授权，不改变默认合同中的两批上限。"""
+
+    loop_id: Identifier
+    source_context_digest: Digest
+    max_batches: Literal[3]
+    authorization_ref: Identifier
+    fact_refs: tuple[Identifier, ...] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _distinct_facts(self):
+        if (
+            len(set(self.fact_refs)) != len(self.fact_refs)
+            or self.authorization_ref in self.fact_refs
+        ):
+            raise ValueError("simulation-comparison-authorization-facts-invalid")
+        return self
+
+
 class SimulationPrepareRequest(DecisionValue):
     operation: Literal[
         "begin",
@@ -43,6 +62,8 @@ class SimulationPrepareRequest(DecisionValue):
         "seal-for-review",
         "begin-improvement",
         "correct-input",
+        "revise-time-plan",
+        "authorize-comparison",
     ]
     request_id: Identifier
     contracts: tuple[StageScoreContract, ...] = Field(default=(), max_length=2)
@@ -53,6 +74,7 @@ class SimulationPrepareRequest(DecisionValue):
     continue_search: StrictBool = False
     reason: str = Field(default="", max_length=2048)
     improvement: ImprovementSearch | None = None
+    comparison_authorization: ComparisonAuthorization | None = None
 
     @model_validator(mode="after")
     def _shape(self):
@@ -64,11 +86,31 @@ class SimulationPrepareRequest(DecisionValue):
             "seal-for-review": set(),
             "begin-improvement": {"improvement"},
             "correct-input": set(),
+            "revise-time-plan": {"contracts", "sources", "reason"},
+            "authorize-comparison": {
+                "contracts",
+                "sources",
+                "reason",
+                "comparison_authorization",
+            },
         }[self.operation]
         if supplied - allowed:
             raise ValueError("simulation-operation-fields-invalid")
         if self.operation == "begin" and (not self.contracts or not self.sources):
             raise ValueError("simulation-begin-requires-profile-bundle-and-sources")
+        if self.operation == "revise-time-plan" and (
+            not self.contracts or not self.sources or not self.reason.strip()
+        ):
+            raise ValueError(
+                "simulation-time-revision-contracts-sources-reason-required"
+            )
+        if self.operation == "authorize-comparison" and (
+            not self.contracts
+            or not self.sources
+            or not self.reason.strip()
+            or self.comparison_authorization is None
+        ):
+            raise ValueError("simulation-comparison-authorization-required")
         if self.operation == "begin-improvement" and self.improvement is None:
             raise ValueError("simulation-improvement-required")
         if self.operation == "freeze-comparison" and not self.candidates:
@@ -87,7 +129,7 @@ class SimulationPrepareRequest(DecisionValue):
 
 
 class SimulationBatch(DecisionValue):
-    number: int = Field(strict=True, ge=1, le=2)
+    number: int = Field(strict=True, ge=1, le=3)
     decision_point: Text
     base_input_digest: Digest
     candidates: tuple[SimulatedCandidate, ...] = Field(default=(), max_length=3)
@@ -119,6 +161,25 @@ class InputCorrectionReceipt(DecisionValue):
     corrected_at_ms: int = Field(strict=True, ge=0)
     request_id: Identifier
     corrected_base_input_digest: Digest
+    old_contracts: tuple[StageScoreContract, ...] | None = Field(
+        default=None, min_length=1, max_length=2
+    )
+    revision_request: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def _revision_pair(self):
+        if (self.old_contracts is None) != (self.revision_request is None):
+            raise ValueError("simulation-time-revision-receipt-incomplete")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _preserve_original_receipt(self, handler):
+        payload = handler(self)
+        if self.old_contracts is None:
+            # 历史纠错原件不能因新增能力自动补字段而改变摘要。
+            payload.pop("old_contracts", None)
+            payload.pop("revision_request", None)
+        return payload
 
 
 class SimulationContext(DecisionValue):
@@ -134,20 +195,23 @@ class SimulationContext(DecisionValue):
         "initial_search", "initial_selected", "improvement_search", "review_sealed"
     ] = "initial_search"
     pending_batch: SimulationBatch | None = None
-    comparisons: tuple[SimulationBatch, ...] = Field(default=(), max_length=2)
+    comparisons: tuple[SimulationBatch, ...] = Field(default=(), max_length=3)
     initial_selection_id: Identifier | None = None
-    receipts: tuple[RequestReceipt, ...] = Field(min_length=1, max_length=12)
+    receipts: tuple[RequestReceipt, ...] = Field(min_length=1, max_length=16)
     review_seal: Digest | None = None
     context_digest: Digest
     improvement: ImprovementSearch | None = None
     conditional_improvement: ConditionalImprovement | None = None
     input_correction: InputCorrectionReceipt | None = None
+    comparison_extension: InputCorrectionReceipt | None = None
 
     @model_serializer(mode="wrap")
     def _preserve_d1_payload(self, handler):
         payload = handler(self)
         if self.input_correction is None:
             payload.pop("input_correction", None)
+        if self.comparison_extension is None:
+            payload.pop("comparison_extension", None)
         if self.capability == CAPABILITY:
             payload.pop("last_observed_at_ms", None)
             payload.pop("improvement", None)
@@ -168,11 +232,36 @@ class SimulationContext(DecisionValue):
 
     def contract_for_batch(self, batch: SimulationBatch) -> StageScoreContract:
         if (
+            batch.number == 1
+            and self.input_correction is not None
+            and self.input_correction.old_contracts is not None
+        ):
+            return next(
+                c
+                for c in self.input_correction.old_contracts
+                if c.profile_id == STAGE_PROFILES[self.loop_type][0]
+            )
+        if batch.number <= 2 and self.comparison_extension is not None:
+            return next(
+                c
+                for c in self.comparison_extension.old_contracts
+                if c.profile_id == STAGE_PROFILES[self.loop_type][0]
+            )
+        if (
             batch.decision_point == "before-improvement"
             and self.loop_type == "implementation"
         ):
             return next(c for c in self.contracts if c.profile_id == "code-result-v1")
         return self.plan
+
+    @property
+    def default_max_batches(self) -> int:
+        return self.plan.simulation_policy.max_batches
+
+    @property
+    def effective_max_batches(self) -> int:
+        # 消费者仍须先 validate；这里只呈现回执承载的实例值。
+        return 3 if self.comparison_extension is not None else self.default_max_batches
 
     @property
     def current_contract(self) -> StageScoreContract:

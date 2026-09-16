@@ -188,9 +188,12 @@ def read_verified_implementation_close(
     """读取可消费的关闭凭据；量化结果仍须绑定当前完整审查输入。"""
     from ai_sdlc.core.implementation_models import (
         ImplementationClose,
+        ImplementationInput,
         ImplementationReport,
     )
-    from ai_sdlc.core.implementation_store import implementation_artifacts
+    from ai_sdlc.core.implementation_store import (
+        implementation_artifacts,
+    )
     from ai_sdlc.core.loop_models import LoopRun, LoopStatus
 
     if not _SAFE_IDENTIFIER.fullmatch(loop_id):
@@ -233,6 +236,25 @@ def read_verified_implementation_close(
     # 保留旧凭据字段的只读解析，但已退休的续办凭据不能变成普通关闭凭据。
     if close.review_binding is not None:
         raise LoopReviewServiceError("implementation-continuation-retired")
+    if run.decision_mode == "legacy":
+        from ai_sdlc.core.loop_decision_service import (
+            validate_implementation_requirement,
+            validate_legacy_implementation_identity,
+        )
+
+        impl_input = None
+        if _stable_regular_file_exists(root, artifacts.input_path):
+            captured[artifacts.input_path] = read_stable_bytes(root, artifacts.input_path)
+            impl_input = ImplementationInput.model_validate_json(captured[artifacts.input_path])
+        # 缺失摘要不是历史身份：执行路径或评审足迹仍须保留原生输入绑定。
+        opaque = validate_legacy_implementation_identity(
+            root, run, impl_input, review_input_validator=review_input_validator,
+            captured_artifacts=captured,
+        )
+        if impl_input is not None:
+            validate_implementation_requirement(
+                root, impl_input, allow_unbound_legacy=opaque,
+            )
     if run.decision_capability in {
         "implementation-simulation-v1",
         "stage-simulation-v1",
@@ -245,7 +267,8 @@ def read_verified_implementation_close(
             raise LoopReviewServiceError("closed-loop-identity-mismatch")
         _verify_simulation_close_review(root, loop_id, review_input_validator)
     if any(
-        read_stable_bytes(root, path) != content for path, content in captured.items()
+        (read_stable_bytes(root, path) if _stable_regular_file_exists(root, path) else None)
+        != content for path, content in captured.items()
     ):
         raise LoopReviewServiceError("closed-loop-receipt-drift")
     return close
@@ -391,7 +414,21 @@ def prepare_loop_review(
         )
 
     first_actual = _actual_review_data(first)
-    if first_actual is not None and first_actual.decision.action == "blocked":
+    from ai_sdlc.core.loop_repair_readiness import (
+        read_verified_repair_readiness,
+        repair_readiness_can_prepare,
+    )
+
+    repair_ready = (
+        read_verified_repair_readiness(root, loop_dir, first, first_snapshot.context)
+        if first_snapshot is not None and loop_type == "requirement"
+        else False
+    )
+    if (
+        first_actual is not None
+        and first_actual.decision.action == "blocked"
+        and not repair_ready
+    ):
         if second is not None:
             raise LoopReviewServiceError("review-outcome-sequence-invalid")
         return _preparation(
@@ -400,10 +437,19 @@ def prepare_loop_review(
             first_path,
             status="needs_user",
             reason=first_actual.decision.reason,
-            next_action="The required repair is not available; do not start round 2.",
+            next_action=(
+                "Append new evidence of existing host authorization, repair facts and verification using "
+                f"ai-sdlc loop review-repair-prepare --type requirement --loop-id {loop_id} "
+                "--evidence <project-relative-file> before independent readiness assessment. "
+                "Round 2 remains blocked until the evidence is accepted and the original gaps are repaired."
+                if repair_readiness_can_prepare(first, first_snapshot)
+                else "The required repair is not available; do not start round 2."
+            ),
             b1_snapshot=first_snapshot,
         )
-    first_actionable = _first_review_action(first_snapshot, first) in {"repair", "improve"}
+    first_actionable = repair_ready or _first_review_action(first_snapshot, first) in {
+        "repair", "improve",
+    }
     if not first_actionable:
         if first.input_digest != first_input.input_digest:
             return _drifted_preparation(first_input, first, first_path)
@@ -427,9 +473,11 @@ def prepare_loop_review(
             first,
             first_path,
             status="needs_fix",
-            reason=first_actual.decision.reason
-            if first_actual
-            else "review-findings-actionable",
+            reason=(
+                "repair-readiness-supplemented" if repair_ready
+                else first_actual.decision.reason if first_actual
+                else "review-findings-actionable"
+            ),
             next_action=(
                 "Apply the sealed conditional improvement within its original plan, then run round 2."
                 if first_actual and first_actual.decision.action == "improve"
@@ -644,6 +692,10 @@ def _record_loop_review_locked(
         loop_type=options.loop_type,
         round_number=prepared.review_input.round_number,
         input_digest=prepared.review_input.input_digest,
+        implementation_input_digest=(
+            prepared.review_input.implementation_input_digest
+            if prepared.b1_snapshot is None else None
+        ),
         status=merged.status,
         expert_roles=prepared.review_input.expert_roles,
         findings=merged.findings,
@@ -677,6 +729,25 @@ def _record_loop_review_locked(
             or fresh.b1_snapshot != prepared.b1_snapshot
         ):
             raise LoopReviewServiceError("review-input-drift")
+        if outcome.implementation_input_digest is not None:
+            from ai_sdlc.core.implementation_models import ImplementationInput
+            from ai_sdlc.core.loop_decision_service import (
+                validate_legacy_implementation_identity,
+            )
+            from ai_sdlc.core.loop_models import LoopRun
+
+            identity_bytes = {
+                path: read_stable_bytes(options.root, path)
+                for path in (loop_dir / "loop-run.json", loop_dir / "implementation-input.json")
+            }
+            validate_legacy_implementation_identity(
+                options.root,
+                LoopRun.model_validate_json(identity_bytes[loop_dir / "loop-run.json"]),
+                ImplementationInput.model_validate_json(identity_bytes[loop_dir / "implementation-input.json"]),
+                reviewed_input=fresh.review_input,
+            )
+            if any(read_stable_bytes(options.root, path) != content for path, content in identity_bytes.items()):
+                raise LoopReviewServiceError("review-input-drift")
         if (
             isinstance(fresh.b1_snapshot, StageReviewSnapshot)
             and outcome.status == "completed"
@@ -692,7 +763,7 @@ def _record_loop_review_locked(
 
     # 模型在锁外完成；临时文件写好后仍须复验同一量化候选，不能靠持锁时长代替输入绑定。
     # 最终 precommit 会完整重读并重算当前时间；进入 writer 前不重复同一次验证。
-    if prepared.b1_snapshot is not None:
+    if prepared.b1_snapshot is not None or outcome.implementation_input_digest is not None:
         _write_outcome(
             options.root, prepared.outcome_path, outcome, precommit=revalidate
         )

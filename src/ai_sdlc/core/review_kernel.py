@@ -54,6 +54,10 @@ class ReviewInput(BaseModel):
     loop_type: LoopReviewType
     round_number: int = Field(ge=1)
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    implementation_input_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
     artifact_paths: list[str] = Field(min_length=1)
     upstream_context_paths: list[str] = Field(default_factory=list)
     risk_signals: list[str] = Field(default_factory=list)

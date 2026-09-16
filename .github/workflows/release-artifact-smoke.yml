@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to verify.
         required: true
-        default: v3.2.1
+        default: v3.2.2
       assurance_run_id:
         description: Compatibility Gate run; otherwise read the Release assurance marker.
         required: false

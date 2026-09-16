@@ -106,6 +106,7 @@ from ai_sdlc.core.quality_command import (
     run_quality_command,
 )
 from ai_sdlc.core.review_kernel import (
+    ReviewInput,
     ReviewInputValidator,
     revalidate_review_input_at_transition,
 )
@@ -119,6 +120,11 @@ _TASK_ID = re.compile(r"\bT\d{2,}\b")
 _TASK_SECTION = re.compile(r"(?m)^###\s+(?:Task|任务)\b.*$")
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _PRIORITY = re.compile(r"(?:优先级|priority)[^\n]*(P[0-9])\b", re.IGNORECASE)
+_REQUIRED = re.compile(
+    r"^\s*(?:[-*]\s+)?(?:required|\*\*required\*\*)\s*[:：]\s*(.*?)\s*$",
+    re.IGNORECASE,
+)
+_TASK_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _CANONICAL_SCOPE = re.compile(r"^\s*-\s*scope\s*:\s*(.*)$", re.IGNORECASE)
 _INDENTED_LIST_ITEM = re.compile(r"^\s{2,}-\s+(.+?)\s*$")
 _FRONTEND_SIGNAL = re.compile(
@@ -654,6 +660,7 @@ def close_implementation_loop(
     *,
     review_input_validator: ReviewInputValidator | None = None,
     reviewed_artifacts: Mapping[str, bytes] | None = None,
+    reviewed_input: ReviewInput | None = None,
 ) -> ImplementationCommandResult:
     """Close an implementation loop after required task evidence is complete."""
 
@@ -674,6 +681,7 @@ def close_implementation_loop(
                 replace(options, loop_id=loop_id),
                 review_input_validator=review_input_validator,
                 reviewed_artifacts=reviewed_artifacts,
+                reviewed_input=reviewed_input,
             )
     except _ImplementationWriteLockError as exc:
         return _blocked_result(str(exc), loop_id=options.loop_id.strip())
@@ -684,6 +692,7 @@ def _close_implementation_loop_locked(
     *,
     review_input_validator: ReviewInputValidator | None = None,
     reviewed_artifacts: Mapping[str, bytes] | None = None,
+    reviewed_input: ReviewInput | None = None,
 ) -> ImplementationCommandResult:
     root = options.root.resolve()
     expected_loop_id = options.loop_id.strip()
@@ -737,6 +746,7 @@ def _close_implementation_loop_locked(
         loop_id=loop_run.loop_id,
         input_digest=loop_run.input_digest,
         reviewed_artifacts=reviewed_artifacts,
+        reviewed_input=reviewed_input,
     )
     if isinstance(loaded, ImplementationCommandResult):
         return loaded
@@ -1002,6 +1012,7 @@ def _read_current_state(
     loop_id: str,
     input_digest: str = "",
     reviewed_artifacts: Mapping[str, bytes] | None = None,
+    reviewed_input: ReviewInput | None = None,
 ) -> (
     tuple[ImplementationInput, ImplementationTasks, ImplementationProgress]
     | ImplementationCommandResult
@@ -1085,7 +1096,8 @@ def _read_current_state(
             )
         else:
             validate_implementation_context(
-                root, read_loop_run(artifacts.loop_run_path), impl_input
+                root, read_loop_run(artifacts.loop_run_path), impl_input,
+                reviewed_input=reviewed_input,
             )
         from ai_sdlc.core.loop_review_service import (
             reject_retired_implementation_continuation,
@@ -1192,7 +1204,7 @@ def _design_contract_gate(
             "Run ai-sdlc loop review --type design-contract "
             f"--loop-id {loop_run.loop_id}.",
         )
-    input_issue = _design_close_input_issue(
+    input_issue, input_next = _design_close_input_issue(
         root,
         loop_run,
         artifacts,
@@ -1204,7 +1216,7 @@ def _design_contract_gate(
             "",
             "",
             input_issue,
-            "Rerun ai-sdlc loop design-contract check with a new loop id.",
+            input_next,
         )
     return (
         loop_run.loop_id,
@@ -1258,25 +1270,67 @@ def _design_close_input_issue(
     artifacts: DesignContractArtifacts,
     expected_loop_id: str,
     work_item_id: str,
-) -> str:
+) -> tuple[str, str]:
     try:
-        payload = LoopArtifactStore(root).read_json_artifact(artifacts.input_path)
-        contract_input = DesignContractInput.model_validate(payload)
-        if contract_input.loop_id != expected_loop_id:
-            raise ValueError("design-contract input loop id changed")
-        if contract_input.work_item_id != work_item_id:
-            raise ValueError("design-contract input work item changed")
-        if design_contract_input_digest(contract_input) != loop_run.input_digest:
-            raise ValueError("design-contract input changed after check")
+        contract_input = _bound_design_input(
+            loop_run, read_stable_bytes(root, artifacts.input_path),
+            expected_loop_id, work_item_id,
+        )
         _verify_design_document_snapshot(root, contract_input)
+        return _design_requirement_issue(root, contract_input)
     except (
         OSError,
         UnicodeError,
         ValueError,
         ValidationError,
     ) as exc:
-        return f"Design close input verification failed: {exc}"
-    return ""
+        return (
+            f"Design close input verification failed: {exc}",
+            "Rerun ai-sdlc loop design-contract check with a new loop id.",
+        )
+
+
+def _bound_design_input(
+    loop_run: LoopRun, content: bytes, expected_loop_id: str, work_item_id: str,
+) -> DesignContractInput:
+    contract_input = DesignContractInput.model_validate_json(content)
+    if (
+        loop_run.loop_id != expected_loop_id
+        or loop_run.loop_type != LoopType.DESIGN_CONTRACT
+        or loop_run.work_item_id != work_item_id
+        or loop_run.status != LoopStatus.CLOSED
+    ):
+        raise ValueError("design-contract closed identity changed")
+    if contract_input.loop_id != expected_loop_id:
+        raise ValueError("design-contract input loop id changed")
+    if contract_input.work_item_id != work_item_id:
+        raise ValueError("design-contract input work item changed")
+    if design_contract_input_digest(contract_input) != loop_run.input_digest:
+        raise ValueError("design-contract input changed after check")
+    return contract_input
+
+
+def _design_requirement_issue(
+    root: Path, contract_input: DesignContractInput,
+) -> tuple[str, str]:
+    # 只消费原 Design 显式绑定的上游，不把当前 pointer 追加成历史实例的新前置。
+    if not contract_input.requirement_loop_id.strip():
+        return "", ""
+    from ai_sdlc.core.design_contract_loop import _requirement_loop_gate
+
+    blocker, next_action, prerequisite = _requirement_loop_gate(
+        root, contract_input.requirement_loop_id,
+        work_item_id=contract_input.work_item_id,
+    )
+    if blocker:
+        return blocker, next_action
+    if contract_input.authorized_scope_families != prerequisite["authorized_scope_families"]:
+        return (
+            "Frozen requirement scope changed after design-contract check.",
+            "Run ai-sdlc loop review --type requirement "
+            f"--loop-id {contract_input.requirement_loop_id}.",
+        )
+    return "", ""
 
 
 def _design_contract_blocker(
@@ -1343,12 +1397,15 @@ def _parse_tasks_file(
         if not task_id:
             continue
         priority = _task_priority(section)
+        required, blocker = _task_required(section, priority)
+        if blocker:
+            return [], f"{task_id}: {blocker}"
         items.append(
             ImplementationTaskItem(
                 task_id=task_id,
                 title=_task_title(section),
                 priority=priority,
-                required=priority in {"P0", "P1"},
+                required=required,
                 files=_task_files(section),
                 acceptance=_task_list_after_label(section, "验收标准", "acceptance"),
                 verification_hints=_task_list_after_label(
@@ -1360,11 +1417,16 @@ def _parse_tasks_file(
     if not items:
         return [], "tasks.md does not define executable task ids."
     if not any(item.required for item in items):
-        return [], "tasks.md must include at least one P0/P1 implementation task."
+        return [], (
+            "tasks.md must include at least one required implementation task "
+            "(required: true or P0/P1 priority)."
+        )
     return items, ""
 
 
 def _task_sections(text: str) -> list[str]:
+    # 先去掉围栏示例，避免其中的任务标题截断真实任务并丢失围栏上下文。
+    text = _task_text_without_fenced_code(text)
     matches = list(_TASK_SECTION.finditer(text))
     sections: list[str] = []
     for index, match in enumerate(matches):
@@ -1391,6 +1453,51 @@ def _task_title(section: str) -> str:
 def _task_priority(section: str) -> str:
     match = _PRIORITY.search(section)
     return match.group(1).upper() if match else ""
+
+
+def _task_text_without_fenced_code(text: str) -> str:
+    lines: list[str] = []
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        marker = _TASK_FENCE.fullmatch(line.rstrip("\r\n"))
+        # 围栏只由相同字符且足够长的空尾标记结束；保留行边界和真实嵌套列表。
+        if fence:
+            if (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+                and not marker.group(2).strip()
+            ):
+                fence = ""
+            lines.append("\n")
+            continue
+        if marker and (marker.group(1)[0] != "`" or "`" not in marker.group(2)):
+            fence = marker.group(1)
+            lines.append("\n")
+            continue
+        lines.append(line)
+    return "".join(lines)
+
+
+def _task_required(section: str, priority: str) -> tuple[bool, str]:
+    """显式必做与优先级分开保留，缺省兼容旧规则且不允许降级高优先级任务。"""
+    values: list[str] = []
+    for line in _task_text_without_fenced_code(section).splitlines():
+        # 缩进代码示例不能声明字段。
+        if line.expandtabs(4).startswith("    "):
+            continue
+        if match := _REQUIRED.fullmatch(line):
+            values.append(match.group(1).casefold())
+    if len(values) > 1:
+        return False, "required must be declared at most once."
+    if not values:
+        return priority in {"P0", "P1"}, ""
+    value = values[0]
+    if value not in {"true", "false"}:
+        return False, "required must be true or false."
+    if value == "false" and priority in {"P0", "P1"}:
+        return False, f"required: false conflicts with {priority} priority."
+    return value == "true", ""
 
 
 def _task_files(section: str) -> list[str]:

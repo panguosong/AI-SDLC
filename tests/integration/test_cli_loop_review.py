@@ -1788,7 +1788,7 @@ def test_stage_review_binds_recursive_predecessor_evidence(tmp_path: Path) -> No
         content = "{}" if filename.endswith(".json") else filename
         (requirement_dir / filename).write_text(content, encoding="utf-8")
     _write_legacy_design_input(
-        tmp_path, design_dir, {"requirement_loop_id": "requirement-001"}
+        tmp_path, design_dir, {"requirement_loop_id": "requirement-001"}, closed=True
     )
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text(filename, encoding="utf-8")
@@ -1854,6 +1854,11 @@ def test_stage_review_binds_recursive_predecessor_evidence(tmp_path: Path) -> No
 
 
 def test_stage_review_binds_each_stage_source_material(tmp_path: Path) -> None:
+    from ai_sdlc.core.requirement_loop import (
+        RequirementFreezeOptions,
+        freeze_requirement_loop,
+    )
+
     work_item = tmp_path / "specs" / "demo"
     work_item.mkdir(parents=True)
     for filename in ("spec.md", "plan.md", "tasks.md"):
@@ -1887,6 +1892,9 @@ def test_stage_review_binds_each_stage_source_material(tmp_path: Path) -> None:
     loop_dirs: dict[str, Path] = {}
     for loop_type, (loop_id,) in loop_specs.items():
         loop_dir = tmp_path / ".ai-sdlc" / "loops" / loop_type / loop_id
+        if loop_type == "requirement":
+            loop_dirs[loop_type] = loop_dir
+            continue
         loop_dir.mkdir(parents=True)
         (loop_dir / "loop-run.json").write_text(
             json.dumps(
@@ -1902,25 +1910,21 @@ def test_stage_review_binds_each_stage_source_material(tmp_path: Path) -> None:
         loop_dirs[loop_type] = loop_dir
 
     requirement_dir = loop_dirs["requirement"]
-    (requirement_dir / "requirement-intake.json").write_text(
-        json.dumps(
-            {
-                "clarification_questions": ["Which users?"],
-                "design_scope_families": ["implementation"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    for filename in (
-        "requirement-brief.md",
-        "clarification-questions.md",
-        "acceptance-checklist.md",
-    ):
-        (requirement_dir / filename).write_text(filename, encoding="utf-8")
+    # 下游实际消费此绑定，用原生冻结产生完整上游夹具。
+    assert start_requirement_loop(RequirementStartOptions(
+        root=tmp_path, loop_id="requirement-001", work_item_id="demo",
+        idea="Bind each stage to its real source material.",
+        acceptance=("Changing source material changes its review digest.",),
+        design_scope_families=("implementation",),
+    )).status == "ready"
+    assert freeze_requirement_loop(RequirementFreezeOptions(
+        root=tmp_path, loop_id="requirement-001", yes=True,
+    )).frozen
 
     design_dir = loop_dirs["design-contract"]
     _write_legacy_design_input(
-        tmp_path, design_dir, {"requirement_loop_id": "requirement-001"}
+        tmp_path, design_dir, {"requirement_loop_id": "requirement-001",
+         "authorized_scope_families": ["implementation"]}, closed=True
     )
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
@@ -2183,7 +2187,7 @@ def test_stage_review_keeps_symlink_when_scope_also_matches_target(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2229,7 +2233,7 @@ def test_implementation_review_represents_deleted_declared_scope(
         tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-delete-001"
     )
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
     loop_dir = _write_stage_current_state(
@@ -2273,7 +2277,7 @@ def test_implementation_review_represents_deleted_declared_scope(
 def test_implementation_review_binds_repository_evidence_files(tmp_path: Path) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2336,7 +2340,7 @@ def test_implementation_review_binds_repository_evidence_directories(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2391,7 +2395,7 @@ def test_implementation_review_rejects_nested_evidence_directory_symlink(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2439,7 +2443,7 @@ def test_implementation_review_rejects_escaped_evidence_symlink(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -2488,7 +2492,7 @@ def test_implementation_review_does_not_scan_through_ancestor_symlink(
 ) -> None:
     design_dir = tmp_path / ".ai-sdlc" / "loops" / "design-contract" / "design-001"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(tmp_path, design_dir)
+    _write_legacy_design_input(tmp_path, design_dir, closed=True)
     for filename in ("design-contract-report.json", "design-contract-report.md"):
         (design_dir / filename).write_text("{}", encoding="utf-8")
 
@@ -3159,6 +3163,10 @@ def _write_legacy_implementation_input(loop_dir: Path, payload: dict) -> None:
             "spec_path": "specs/demo/spec.md",
             "plan_path": "specs/demo/plan.md",
             "tasks_path": "specs/demo/tasks.md",
+            "design_contract_report_path": (
+                f".ai-sdlc/loops/design-contract/{payload.get('design_contract_loop_id', '')}"
+                "/design-contract-report.json"
+            ),
             **payload,
         }
     )
@@ -3176,7 +3184,14 @@ def _write_legacy_implementation_input(loop_dir: Path, payload: dict) -> None:
         work_item_id=value.work_item_id,
         input_digest=implementation_input_digest(value),
         rounds=[
-            LoopRound(round_number=number).model_dump(mode="json")
+            # 与原生 start 一样保留执行来源，不能把待审夹具伪装成无来源旧凭据。
+            LoopRound(
+                round_number=number,
+                input_artifacts=[
+                    value.spec_path, value.plan_path, value.tasks_path,
+                    value.design_contract_report_path,
+                ],
+            ).model_dump(mode="json")
             for number in range(1, run_payload["current_round"] + 1)
         ],
     )
@@ -3189,7 +3204,7 @@ def _write_legacy_implementation_input(loop_dir: Path, payload: dict) -> None:
 
 
 def _write_legacy_design_input(
-    root: Path, loop_dir: Path, payload: dict | None = None
+    root: Path, loop_dir: Path, payload: dict | None = None, *, closed: bool = False,
 ) -> None:
     from ai_sdlc.core.design_contract_models import DesignContractInput
     from ai_sdlc.core.design_contract_store import design_contract_input_digest
@@ -3226,6 +3241,9 @@ def _write_legacy_design_input(
             "current_round": 1,
         }
     )
+    if closed:
+        # 此处合成已关闭的上游身份；本阶段待审夹具仍保持原状态。
+        run_payload["status"] = "closed"
     run_payload.update(
         work_item_id=value.work_item_id,
         input_digest=design_contract_input_digest(value),
@@ -3280,7 +3298,7 @@ def _write_predecessor_fixture(
 
     design_dir = root / ".ai-sdlc" / "loops" / "design-contract" / "design-upstream"
     design_dir.mkdir(parents=True)
-    _write_legacy_design_input(root, design_dir)
+    _write_legacy_design_input(root, design_dir, closed=True)
     design_files = {
         "design-contract-input.json",
         "design-contract-report.json",
@@ -3439,7 +3457,7 @@ def test_implementation_material_keeps_upstream_verification_binding(tmp_path):
             "verification_capability": "counterexample-acceptance-v1",
             "verification_contract_ref": "specs/demo/verification.json",
             "verification_contract_digest": "a" * 64,
-        },
+        }, closed=True,
     )
     loop_dir = _write_stage_current_state(tmp_path, "implementation", "missing-binding")
     _write_legacy_implementation_input(

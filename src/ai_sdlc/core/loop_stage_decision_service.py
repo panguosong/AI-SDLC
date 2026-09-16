@@ -124,6 +124,14 @@ def stage_decision_write_guard(root: Path, stage_kind: str, loop_id: str):
 def validate_stage_source_boundary(root: Path, paths: Sequence[Path]) -> None:
     """保留原始材料和血缘，但各阶段及 PR 自己生成的裁决不能自证。"""
     validate_implementation_source_boundary(root, paths)
+    pr_actual_source_names = {
+        "review-pack.json",
+        "current.diff",
+        "diff.patch",
+        "verification-evidence.json",
+        "findings.json",
+        "resolution.yaml",
+    }
     review_state_names = {
         "loop-run.json",
         "review-run.json",
@@ -133,6 +141,7 @@ def validate_stage_source_boundary(root: Path, paths: Sequence[Path]) -> None:
         "implementation-close.json",
         "frontend-evidence-close.json",
         "review-continuation.json",
+        "repair-readiness-supplement.json",
         "current-review.json",
         "final-report.md",
         "reviewer-invocation.json",
@@ -143,6 +152,11 @@ def validate_stage_source_boundary(root: Path, paths: Sequence[Path]) -> None:
     }
     for path in paths:
         relative = path.relative_to(root).parts
+        # PR 保留目录只准入原合同已有实际输入；未知元数据默认拒绝，不追补名称黑名单。
+        if tuple(part.casefold() for part in relative[:3]) == (
+            ".ai-sdlc", "reviews", "pr"
+        ) and (len(relative) != 5 or path.name not in pr_actual_source_names):
+            raise DecisionPreparationError("decision-source-derived-state-forbidden")
         if (
             relative[:2] == (".ai-sdlc", "reviews")
             and (
@@ -151,7 +165,9 @@ def validate_stage_source_boundary(root: Path, paths: Sequence[Path]) -> None:
             )
         ) or (
             relative[:2] == (".ai-sdlc", "loops")
-            and path.name in {"decision-context.json", "review-run.json"}
+            and path.name in {
+                "decision-context.json", "review-run.json", "repair-readiness-supplement.json",
+            }
         ):
             raise DecisionPreparationError("decision-source-derived-state-forbidden")
 
@@ -364,12 +380,20 @@ def read_stage_simulation_context(
 
 
 def _completed_r1_allows_revision(root, host, context):
+    from ai_sdlc.core.loop_repair_readiness import read_verified_repair_readiness
     from ai_sdlc.core.loop_review_models import LoopReviewOutcome
 
     content = _optional_bytes(root, host.loop_dir / "review-outcome-round-1.json")
     if content is None:
+        if host.stage_kind == "requirement":
+            read_verified_repair_readiness(root, host.loop_dir, None, context)
         return False
     outcome = LoopReviewOutcome.model_validate_json(content)
+    repair_ready = (
+        read_verified_repair_readiness(root, host.loop_dir, outcome, context)
+        if host.stage_kind == "requirement"
+        else False
+    )
     return (
         outcome.loop_id == host.loop_id
         and outcome.loop_type == host.stage_kind
@@ -378,7 +402,7 @@ def _completed_r1_allows_revision(root, host, context):
         and outcome.simulation is not None
         and outcome.simulation.context_digest == context.context_digest
         and outcome.simulation.selected_route_id == context.initial_selection_id
-        and outcome.simulation.decision.action in {"repair", "improve"}
+        and (outcome.simulation.decision.action in {"repair", "improve"} or repair_ready)
     )
 
 
@@ -560,7 +584,8 @@ def _prepare_stage(root, stage_kind, loop_id, request, resolver):
         {}
         if context is None
         or context.phase == "initial_search"
-        or request.operation == "correct-input"
+        or request.operation
+        in {"correct-input", "revise-time-plan", "authorize-comparison"}
         else before["referenced_sources"],
     )
     if context is not None and context.phase == "improvement_search":

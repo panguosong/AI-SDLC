@@ -72,7 +72,9 @@ def stage_input_identity(stage, stage_input):
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def validate_stage_material_update(root, stage, directory, previous, current):
+def validate_stage_material_update(
+    root, stage, directory, previous, current, *, verification_contract_bytes=None,
+):
     """写入前核对同一目标与原评审许可，返回是否属于唯一的 R2 成果刷新。"""
     from ai_sdlc.core.loop_decision_service import require_simulation_time_admission
     from ai_sdlc.core.loop_review_service import outcome_path
@@ -103,6 +105,10 @@ def validate_stage_material_update(root, stage, directory, previous, current):
         return False
     identity = stage_input_identity(stage, current)
     if previous is not None and stage_input_identity(stage, previous) != identity:
+        if _unstarted_design_correction(
+            root, stage, directory, previous, current, verification_contract_bytes,
+        ):
+            return False
         raise ValueError("simulation-stage-input-identity-change")
     if not context_path.exists():
         if any(outcome_path(directory, n).exists() for n in (1, 2)):
@@ -127,6 +133,89 @@ def validate_stage_material_update(root, stage, directory, previous, current):
         return False
     _require_stage_revision(root, stage, directory, context)
     return True
+
+
+def _unstarted_design_correction(
+    root, stage, directory, previous, current, verification_contract_bytes,
+):
+    """首次 begin 前可修正文档；确定性检查通过不等于已封存量化合同。"""
+    from ai_sdlc.core.design_contract_models import DesignContractReport
+    from ai_sdlc.core.design_contract_store import (
+        design_contract_input_digest,
+        require_design_check_published,
+    )
+    from ai_sdlc.core.stable_file_read import _stable_regular_file_exists
+
+    # 没有已绑定的反例合同可复验语义时，原 spec 摘要仍是目标身份，不开放修正豁免。
+    if stage != "design-contract" or not previous.verification_contract_ref:
+        return False
+    mutable = {
+        "created_at", "spec_digest", "plan_digest", "tasks_digest",
+        "verification_contract_ref", "verification_contract_digest",
+    }
+    if previous.model_dump(exclude=mutable) != current.model_dump(exclude=mutable):
+        return False
+    require_design_check_published(directory)
+    # begin 先写 run 标记，再写 context；删掉 context 不能重新获得修正入口。
+    run = LoopRun.model_validate_json(read_stable_bytes(root, directory / "loop-run.json"))
+    if (
+        run.decision_started_at_ms is not None
+        or run.decision_begin_pending_digest is not None
+        or run.status not in {"needs_fix", "needs_review"} or run.current_round != 1
+        or len(run.rounds) != 1 or run.rounds[0].round_number != 1
+        or run.rounds[0].status != run.status
+        or run.rounds[0].result != run.status
+        or run.input_digest != design_contract_input_digest(previous)
+    ):
+        return False
+    names = {"decision-context.json", "design-contract-close.json"}
+    names.update(path.name for path in directory.iterdir() if path.name.startswith("review-"))
+    if any(_stable_regular_file_exists(root, directory / name) for name in names):
+        return False
+    report = DesignContractReport.model_validate_json(
+        read_stable_bytes(root, directory / "design-contract-report.json")
+    )
+    if (
+        (report.loop_id, report.work_item_id, report.work_item_path)
+        != (previous.loop_id, previous.work_item_id, previous.work_item_path)
+        or report.status != run.status
+        or (report.blocker_count > 0) != (run.status == "needs_fix")
+        or report.blocker_count != sum(f.severity == "blocker" for f in report.findings)
+    ):
+        return False
+    if previous.verification_contract_ref:
+        expected = directory / f"verification-contract-{previous.verification_contract_digest}.json"
+        if previous.verification_contract_ref != expected.relative_to(root).as_posix():
+            return False
+        # 原合同保留自身字节；其旧来源摘要不能拿来否决尚未正式送审的文档修正。
+        original_contract = read_stable_bytes(root, expected)
+        if hashlib.sha256(original_contract).hexdigest() != previous.verification_contract_digest:
+            raise ValueError("counterexample-contract-digest-mismatch")
+        if (
+            current.verification_contract_digest != previous.verification_contract_digest
+            and (
+                verification_contract_bytes is None
+                or hashlib.sha256(verification_contract_bytes).hexdigest()
+                != current.verification_contract_digest
+                or _verification_semantics(original_contract)
+                != _verification_semantics(verification_contract_bytes)
+            )
+        ):
+            return False
+    # check 的既有发布日志保存旧新六件原件；新合同仍在原写入口完整复验并不可变存储。
+    return True
+
+
+def _verification_semantics(content):
+    """文档刷新仅同步来源摘要，不能借此改变反例义务、判据或资源权限。"""
+    from ai_sdlc.core.counterexample_models import VerificationContract
+
+    value = VerificationContract.model_validate_json(content).model_dump(mode="json")
+    for source in value["sources"]:
+        source.pop("sha256", None)
+        source.pop("entry_sha256", None)
+    value["budget_ref"].pop("sha256", None)
+    return value
 
 
 def _require_stage_revision(root, stage, directory, context):
@@ -176,7 +265,14 @@ def _require_stage_revision(root, stage, directory, context):
     validate_stage_review_data(
         snapshot, data, has_actionable_findings=has_actionable_findings(outcome)
     )
-    if data.decision.action not in {"repair", "improve"}:
+    from ai_sdlc.core.loop_repair_readiness import read_verified_repair_readiness
+
+    repair_ready = (
+        read_verified_repair_readiness(root, directory, outcome, context)
+        if stage == "requirement"
+        else False
+    )
+    if data.decision.action not in {"repair", "improve"} and not repair_ready:
         raise ValueError("simulation-stage-r1-does-not-permit-revision")
     run = LoopRun.model_validate_json(
         read_stable_bytes(root, directory / "loop-run.json")

@@ -453,7 +453,10 @@ def validate_implementation_context(
             read_stage_simulation_context,
         )
 
-        host = implementation_stage_host(root, run, impl_input)
+        # 此处只读取决定身份；反例每步前后验不能重复计算未被消费的验收报告。
+        host = implementation_stage_host(
+            root, run, impl_input, _evaluate_actual_readiness=False
+        )
         context = read_stage_simulation_context(root, host, purpose=purpose)
         if purpose in {"execute", "verification"} and (
             context.initial_selection_id is None
@@ -1168,6 +1171,7 @@ def implementation_stage_host(
     impl_input: ImplementationInput | None = None,
     *,
     loop_id: str = "",
+    _evaluate_actual_readiness: bool = True,
 ):
     """从真实任务、质量证据和原生命周期构建阶段适配；不递归读决策门禁。"""
     from ai_sdlc.core.implementation_loop import _build_report
@@ -1207,7 +1211,8 @@ def implementation_stage_host(
             raise
         initial_ready = False
     actual_ready = (
-        _build_report(root, impl_input, tasks, progress).status
+        _evaluate_actual_readiness
+        and _build_report(root, impl_input, tasks, progress).status
         == LoopStatus.NEEDS_REVIEW
     )
     actual_paths = (

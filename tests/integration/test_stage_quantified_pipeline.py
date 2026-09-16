@@ -574,7 +574,7 @@ def test_stage_snapshot_preserves_fresh_hosts_and_complete_material(
     )
     assert len(hosts) == 1
     if stage == "implementation":
-        assert len(reports) == 1
+        assert len(reports) == 0
     hosts.clear()
     reports.clear()
     snapshot = stage_command.stage_review_snapshot(root, stage, LOOP, 1)

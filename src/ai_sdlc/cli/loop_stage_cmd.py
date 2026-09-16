@@ -58,7 +58,9 @@ def _validate_identity(stage, loop_id, run, stage_input):
         raise DecisionPreparationError("decision-identity-mismatch")
 
 
-def resolve_stage_decision_host(root: Path, stage: str, loop_id: str):
+def resolve_stage_decision_host(
+    root: Path, stage: str, loop_id: str, *, _evaluate_actual_readiness: bool = True
+):
     from ai_sdlc.cli.loop_review_cmd import (
         _STAGE_ARTIFACTS,
         _resolve_current_stage_state,
@@ -82,7 +84,10 @@ def resolve_stage_decision_host(root: Path, stage: str, loop_id: str):
     if stage == "implementation":
         from ai_sdlc.core.loop_decision_service import implementation_stage_host
 
-        return implementation_stage_host(root, run, stage_input)
+        return implementation_stage_host(
+            root, run, stage_input,
+            _evaluate_actual_readiness=_evaluate_actual_readiness,
+        )
     artifacts = [directory / name for name in _STAGE_ARTIFACTS[stage]]
     actual = _unique_paths(
         [
@@ -242,11 +247,14 @@ def _read_stage_decision_context(
         from ai_sdlc.core.loop_decision_service import validate_implementation_context
 
         return validate_implementation_context(root, run, stage_input, purpose=purpose)
-    # 私有快照路径只沿用同次首读的宿主；原件和决策门禁仍在此重新校验。
+    # 私有快照路径沿用同次首读的完整宿主；单独读 context 不消费验收报告。
+    # 原件和决策门禁仍在此重新校验，快照首尾及 prepare/seal 默认仍建完整宿主。
     host = (
         stage_host
         if stage_host is not None
-        else resolve_stage_decision_host(root, stage, loop_id)
+        else resolve_stage_decision_host(
+            root, stage, loop_id, _evaluate_actual_readiness=False
+        )
     )
     return read_stage_simulation_context(
         root,

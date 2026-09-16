@@ -460,7 +460,7 @@ def test_repeated_seal_cannot_hide_baseline_drift(stage_project):
         prepare(root, current, {"operation": "seal-for-review", "request_id": "seal"})
 
 
-def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path):
+def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path, monkeypatch):
     from ai_sdlc.core.implementation_loop import start_implementation_loop
     from ai_sdlc.core.implementation_models import ImplementationStartOptions
     from ai_sdlc.core.implementation_store import read_input, read_loop_run
@@ -503,6 +503,16 @@ def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path)
     )
     content = (current.loop_dir / "decision-context.json").read_bytes()
     assert parse_implementation_context(content) == saved.context
+    from ai_sdlc.core import implementation_loop
+
+    original_report = implementation_loop._build_report
+    report_calls = []
+
+    def counted_report(*args, **kwargs):
+        report_calls.append(True)
+        return original_report(*args, **kwargs)
+
+    monkeypatch.setattr(implementation_loop, "_build_report", counted_report)
     assert (
         validate_implementation_context(
             root,
@@ -511,6 +521,24 @@ def test_real_implementation_old_entrypoints_dispatch_stage_capability(tmp_path)
         )
         == saved.context
     )
+    for purpose, reason in (
+        ("execute", "simulation-time-estimate-unavailable"),
+        ("verification", "simulation-initial-selection-missing"),
+    ):
+        with pytest.raises(ValueError, match=reason):
+            validate_implementation_context(
+                root,
+                read_loop_run(current.loop_dir / "loop-run.json"),
+                read_input(current.loop_dir / "implementation-input.json"),
+                purpose=purpose,
+            )
+    from ai_sdlc.cli.loop_stage_cmd import read_stage_decision_context
+
+    assert read_stage_decision_context(root, "implementation", "stage-real") == saved.context
+    # 两个决定读取入口均不消费验收就绪值；真实阶段准备仍计算完整报告。
+    assert report_calls == []
+    assert implementation_stage_host(root, loop_id="stage-real") == current
+    assert len(report_calls) == 1
 
 
 @pytest.mark.parametrize(

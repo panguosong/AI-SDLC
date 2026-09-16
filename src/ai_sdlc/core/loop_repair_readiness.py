@@ -32,7 +32,11 @@ from ai_sdlc.core.loop_stage_decision_service import (
     StageReviewSnapshot,
     validate_stage_source_boundary,
 )
-from ai_sdlc.core.stable_file_read import _stable_regular_file_exists, read_stable_bytes
+from ai_sdlc.core.stable_file_read import (
+    _stable_regular_file_exists,
+    _stat_identity,
+    read_stable_bytes,
+)
 
 if TYPE_CHECKING:
     from ai_sdlc.core.loop_review_service import (
@@ -85,7 +89,11 @@ class RepairReadinessPreparation(DecisionValue):
             DecisionSource._canonical_relative_path(path)
         if len(set(self.expert_roles)) != len(self.expert_roles):
             raise ValueError("repair-readiness-role-mismatch")
-        if set(self.evidence_manifest) & set(self.original_manifest):
+        evidence_paths = {path.casefold() for path in self.evidence_manifest}
+        if (
+            len(evidence_paths) != len(self.evidence_manifest)
+            or evidence_paths & {path.casefold() for path in self.original_manifest}
+        ):
             raise ValueError("repair-readiness-new-evidence-required")
         return self
 
@@ -179,7 +187,8 @@ def _evidence_bytes(root: Path, path: Path) -> bytes:
     ):
         raise _error("repair-readiness-derived-evidence-forbidden")
     validate_stage_source_boundary(root, [path])
-    if path.name in {
+    name = path.name.casefold()
+    if name in {
         SUPPLEMENT_NAME,
         "loop-run.json",
         "decision-context.json",
@@ -191,9 +200,20 @@ def _evidence_bytes(root: Path, path: Path) -> bytes:
         "review-continuation.json",
         "verdict.json",
         "status.json",
-    } or re.fullmatch(r"review-outcome-round-\d+\.json", path.name):
+    } or re.fullmatch(r"review-outcome-round-\d+\.json", name):
         raise _error("repair-readiness-derived-evidence-forbidden")
+    if not _stable_regular_file_exists(root, path):
+        raise _error("repair-readiness-evidence-invalid")
+    before = path.lstat()
+    # 补录要求来源独立的普通文件，硬链接别名不能把原评审状态变成新依据。
+    if before.st_nlink != 1:
+        raise _error("repair-readiness-hardlink-evidence-forbidden")
     content = read_stable_bytes(root, path)
+    after = path.lstat()
+    if after.st_nlink != 1:
+        raise _error("repair-readiness-hardlink-evidence-forbidden")
+    if _stat_identity(before) != _stat_identity(after):
+        raise _error("repair-readiness-evidence-drift")
     if not content.strip() or len(content) > 1024 * 1024:
         raise _error("repair-readiness-evidence-invalid")
     content.decode("utf-8")
@@ -250,12 +270,14 @@ def prepare_repair_readiness(
     if not evidence_paths or len(evidence_paths) > 16:
         raise _error("repair-readiness-new-evidence-required")
     manifest = {}
+    occupied = {relative.casefold() for relative in data.manifest}
     for supplied in evidence_paths:
         path = supplied if supplied.is_absolute() else root / supplied
         relative = path.relative_to(root).as_posix()
-        if relative in data.manifest or relative in manifest:
+        if relative.casefold() in occupied:
             raise _error("repair-readiness-new-evidence-required")
         manifest[relative] = _sha(_evidence_bytes(root, path))
+        occupied.add(relative.casefold())
     context_bytes = read_stable_bytes(root, loop_dir / "decision-context.json")
     context_path = (loop_dir / "decision-context.json").relative_to(root).as_posix()
     if _sha(context_bytes) != data.manifest.get(context_path):

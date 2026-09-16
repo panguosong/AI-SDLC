@@ -452,6 +452,83 @@ def test_framework_pr_namespace_cannot_use_case_alias_for_evidence(tmp_path):
         validate_stage_source_boundary(tmp_path, [derived])
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Review-Outcome-Round-1.json", "LOOP-RUN.JSON", "Decision-Context.Json",
+     "Repair-Readiness-Supplement.JSON", "STATUS.JSON"],
+)
+def test_mixed_case_derived_basename_is_never_new_evidence(tmp_path, name):
+    derived = tmp_path / name
+    derived.write_text('{"derived": true}', encoding="utf-8")
+    with pytest.raises(ValueError, match="derived.*forbidden"):
+        api()._evidence_bytes(tmp_path, derived)
+
+
+@pytest.mark.parametrize("target", ["r1", "pr-metadata", "original"])
+def test_hardlink_alias_cannot_unlock_repair_readiness(blocked, target):
+    root, current, context, outcome, evidence, _ = blocked
+    if target == "r1":
+        original = current.loop_dir / "review-outcome-round-1.json"
+    elif target == "pr-metadata":
+        original = root / ".ai-sdlc/reviews/pr/prior/source-resolution.json"
+        original.parent.mkdir(parents=True)
+        original.write_text('{"access_status":"resolved"}', encoding="utf-8")
+    else:
+        original = current.actual_paths[0]
+    alias = evidence.parent / "new-authority.md"
+    alias.hardlink_to(original)
+    before = original.read_bytes()
+    with pytest.raises(ValueError, match="hardlink|new-evidence-required"):
+        prepared((root, current, context, outcome, alias, blocked[-1]))
+    assert original.read_bytes() == before
+    assert not (current.loop_dir / "repair-readiness-supplement.json").exists()
+    assert not (current.loop_dir / "review-outcome-round-2.json").exists()
+
+
+def test_preparation_rejects_case_alias_of_original_manifest(blocked):
+    from pydantic import ValidationError
+
+    proposal = prepared(blocked)
+    original_path, digest = next(iter(proposal.original_manifest.items()))
+    payload = proposal.model_dump()
+    payload["evidence_manifest"] = {original_path.upper(): digest}
+    with pytest.raises(ValidationError, match="new-evidence-required"):
+        api().RepairReadinessPreparation.model_validate(payload)
+
+
+def test_new_hardlink_after_prepare_cannot_be_recorded(blocked):
+    proposal = prepared(blocked)
+    (blocked[4].parent / "authority-alias.md").hardlink_to(blocked[4])
+    with pytest.raises(ValueError, match="hardlink"):
+        record(blocked, proposal)
+    assert not (blocked[1].loop_dir / "repair-readiness-supplement.json").exists()
+
+
+def test_hardlink_created_during_read_is_rejected(tmp_path, monkeypatch):
+    module = api()
+    evidence = tmp_path / "authority.md"
+    evidence.write_text("原始修复授权", encoding="utf-8")
+    original_read = module.read_stable_bytes
+
+    def read_and_link(root, path):
+        content = original_read(root, path)
+        (root / "alias.md").hardlink_to(path)
+        return content
+
+    monkeypatch.setattr(module, "read_stable_bytes", read_and_link)
+    with pytest.raises(ValueError, match="hardlink"):
+        module._evidence_bytes(tmp_path, evidence)
+
+
+def test_independent_original_document_with_same_content_remains_usable(tmp_path):
+    original = tmp_path / "original.md"
+    evidence = tmp_path / "authority.md"
+    original.write_text("原始修复授权", encoding="utf-8")
+    evidence.write_bytes(original.read_bytes())
+    assert not original.samefile(evidence)
+    assert api()._evidence_bytes(tmp_path, evidence) == original.read_bytes()
+
+
 def test_deleted_supplement_does_not_restore_repair_authority(blocked):
     proposal = prepared(blocked)
     record(blocked, proposal)

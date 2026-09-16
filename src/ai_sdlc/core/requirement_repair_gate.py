@@ -66,6 +66,27 @@ def validate_frozen_requirement_repair(
         for content in (original[f"review-outcome-round-{number}.json"],)
     ]
     first, final = outcomes
+    if intake.decision_capability == STAGE_CAPABILITY:
+        # 正常量化关闭也必须保留 R1/context；一起删除补录足迹不能伪装成未补录。
+        if (
+            first is None or first.loop_id != intake.loop_id
+            or first.loop_type != "requirement" or first.round_number != 1
+            or first.status != "completed"
+            or not isinstance(first.simulation, StageReviewData)
+            or original["decision-context.json"] is None
+        ):
+            raise ValueError("repair-readiness-closed-origin-missing-or-invalid")
+        origin_context = parse_stage_simulation_context(original["decision-context.json"])
+        if (
+            origin_context.phase != "review_sealed"
+            or origin_context.implementation_input_digest != stage_input_identity("requirement", intake)
+            or first.simulation.context_digest != origin_context.context_digest
+            or first.simulation.selected_route_id != origin_context.initial_selection_id
+        ):
+            raise ValueError("repair-readiness-closed-origin-mismatch")
+        validate_stage_start_binding(
+            LoopRun.model_validate_json(original["loop-run.json"]), origin_context
+        )
     supplement_relative = supplement_path.relative_to(root).as_posix()
     # 删除补录不能把原 blocked→R2 变成普通关闭；历史足迹仍要求同一补录。
     depends_on_repair = (

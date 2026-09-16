@@ -335,7 +335,7 @@ def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
 
 
 @pytest.mark.parametrize(
-    "damage", ["basis-deleted", "basis-changed", "supplement-deleted"]
+    "damage", ["basis-deleted", "basis-changed", "supplement-deleted", "all-repair-footprints-deleted"]
 )
 def test_design_check_and_rerun_revalidate_supplemented_requirement(
     initialized_project_dir, damage
@@ -372,10 +372,19 @@ def test_design_check_and_rerun_revalidate_supplemented_requirement(
         root / ".ai-sdlc/loops/design-contract" / existing_loop / "loop-run.json",
     ]
     originals = {path: path.read_bytes() for path in tracked}
+    deleted = set()
     if damage == "basis-deleted":
         basis.unlink()
     elif damage == "basis-changed":
         basis.write_text("冻结之后改变原始修复授权依据", encoding="utf-8")
+    elif damage == "all-repair-footprints-deleted":
+        deleted = {requirement_dir / name for name in (
+            "repair-readiness-supplement.json", "review-outcome-round-1.json",
+            "review-outcome-round-2.json",
+        )}
+        deleted.add(basis)
+        for path in deleted:
+            path.unlink()
     else:
         (requirement_dir / "repair-readiness-supplement.json").unlink()
 
@@ -389,7 +398,10 @@ def test_design_check_and_rerun_revalidate_supplemented_requirement(
         assert f"loop review --type requirement --loop-id {LOOP}" in payload["next_action"]
     assert not (root / ".ai-sdlc/loops/design-contract/design-after-drift").exists()
     for path, original in originals.items():
-        assert path.read_bytes() == original
+        if path in deleted:
+            assert not path.exists()
+        else:
+            assert path.read_bytes() == original
 
 
 def test_design_gate_rechecks_basis_after_final_metadata_capture(

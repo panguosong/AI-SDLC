@@ -335,7 +335,7 @@ def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
 
 
 @pytest.mark.parametrize(
-    "damage", ["basis-deleted", "basis-changed", "supplement-deleted", "all-repair-footprints-deleted"]
+    "damage", ["basis-deleted", "basis-changed", "supplement-deleted", "all-repair-footprints-deleted", "origin-decision-forged"]
 )
 def test_design_check_and_rerun_revalidate_supplemented_requirement(
     initialized_project_dir, damage
@@ -377,11 +377,20 @@ def test_design_check_and_rerun_revalidate_supplemented_requirement(
         basis.unlink()
     elif damage == "basis-changed":
         basis.write_text("冻结之后改变原始修复授权依据", encoding="utf-8")
-    elif damage == "all-repair-footprints-deleted":
+    elif damage in {"all-repair-footprints-deleted", "origin-decision-forged"}:
         deleted = {requirement_dir / name for name in (
-            "repair-readiness-supplement.json", "review-outcome-round-1.json",
-            "review-outcome-round-2.json",
+            "repair-readiness-supplement.json", "review-outcome-round-2.json",
         )}
+        first_path = requirement_dir / "review-outcome-round-1.json"
+        if damage == "all-repair-footprints-deleted":
+            deleted.add(first_path)
+        else:
+            forged = json.loads(first_path.read_bytes())
+            forged["simulation"]["decision"] = {
+                "action": "stop", "reason": "requirements-satisfied",
+            }
+            first_path.write_text(json.dumps(forged), encoding="utf-8")
+            originals[first_path] = first_path.read_bytes()
         deleted.add(basis)
         for path in deleted:
             path.unlink()

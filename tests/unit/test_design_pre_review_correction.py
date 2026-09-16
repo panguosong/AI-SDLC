@@ -12,16 +12,17 @@ from ai_sdlc.core.design_contract_store import design_contract_artifacts
 from tests.unit.test_counterexample_contract_binding import _contract
 
 
-def _needs_schema_fix(root):
+def _needs_schema_fix(root, *, initially_ready=False):
     work, _, options = _contract(root)
     spec = work / "spec.md"
     plan = work / "plan.md"
     original_plan = plan.read_bytes()
-    plan.write_text("# 实施计划\n")
+    if not initially_ready:
+        plan.write_text("# 实施计划\n")
     spec.write_text(spec.read_text() + "\n说明：原始表述。\n")
     _refresh_source_hashes(work)
     first = check_design_contract_loop(options)
-    assert first.status == "needs_fix", first
+    assert first.status == ("ready" if initially_ready else "needs_fix"), first
     artifacts = design_contract_artifacts(root, "design")
     old = {p.name: p.read_bytes() for p in artifacts.loop_dir.glob("*.json")}
     plan.write_bytes(original_plan)
@@ -38,8 +39,9 @@ def _refresh_source_hashes(work):
     (work / "verification.json").write_text(json.dumps(data, ensure_ascii=False))
 
 
-def test_pre_review_schema_correction_preserves_original_history(tmp_path):
-    _, options, artifacts, old = _needs_schema_fix(tmp_path.resolve())
+@pytest.mark.parametrize("initially_ready", [False, True])
+def test_pre_review_schema_correction_preserves_original_history(tmp_path, initially_ready):
+    _, options, artifacts, old = _needs_schema_fix(tmp_path.resolve(), initially_ready=initially_ready)
     before = json.loads(old["loop-run.json"])
 
     result = check_design_contract_loop(options)
@@ -106,6 +108,22 @@ def test_pre_review_schema_correction_rejects_changed_target(tmp_path):
         validate_stage_material_update(tmp_path.resolve(), "design-contract", artifacts.loop_dir, original, changed)
 
 
+@pytest.mark.parametrize("initially_ready", [False, True])
+def test_document_edit_cannot_replace_counterexample_semantics(tmp_path, initially_ready):
+    work, options, artifacts, old = _needs_schema_fix(tmp_path.resolve(), initially_ready=initially_ready)
+    path = work / "verification.json"
+    data = json.loads(path.read_bytes())
+    data["obligations"][0]["selection_reason"] = "借文档摘要更新更换反例合同"
+    path.write_text(json.dumps(data, ensure_ascii=False))
+
+    result = check_design_contract_loop(options)
+
+    assert result.status == "blocked", result
+    assert "input-identity-change" in result.blocker
+    assert artifacts.input_path.read_bytes() == old["design-contract-input.json"]
+    assert artifacts.loop_run_path.read_bytes() == old["loop-run.json"]
+
+
 @pytest.mark.parametrize("change", ["delete", "tamper"])
 def test_pre_review_schema_correction_requires_preserved_original_contract(tmp_path, change):
     _, options, artifacts, old = _needs_schema_fix(tmp_path.resolve())
@@ -121,3 +139,28 @@ def test_pre_review_schema_correction_requires_preserved_original_contract(tmp_p
     assert result.status == "blocked", result
     assert artifacts.input_path.read_bytes() == old["design-contract-input.json"]
     assert artifacts.loop_run_path.read_bytes() == old["loop-run.json"]
+
+
+def test_old_contract_drift_after_guard_cannot_publish_corrected_input(tmp_path, monkeypatch):
+    import ai_sdlc.core.design_contract_loop as design
+
+    _, options, artifacts, old = _needs_schema_fix(tmp_path.resolve(), initially_ready=True)
+    previous = DesignContractInput.model_validate_json(old["design-contract-input.json"])
+    old_contract = tmp_path / previous.verification_contract_ref
+    original_guard = design.validate_stage_material_update
+    journals = {p.name: p.read_bytes() for p in (artifacts.loop_dir / "design-check-publications").glob("*.json")}
+
+    def change_after_guard(*args, **kwargs):
+        result = original_guard(*args, **kwargs)
+        old_contract.write_bytes(b"{}")
+        return result
+
+    monkeypatch.setattr(design, "validate_stage_material_update", change_after_guard)
+    result = design.check_design_contract_loop(options)
+
+    assert result.status == "blocked", result
+    assert "source-drift" in result.blocker
+    assert artifacts.input_path.read_bytes() == old["design-contract-input.json"]
+    assert artifacts.loop_run_path.read_bytes() == old["loop-run.json"]
+    assert journals == {p.name: p.read_bytes() for p in (artifacts.loop_dir / "design-check-publications").glob("*.json")}
+    assert old_contract.read_bytes() == b"{}"

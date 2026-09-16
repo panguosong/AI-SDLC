@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 from ai_sdlc.core.loop_models import LoopRun
@@ -11,7 +12,10 @@ from ai_sdlc.core.loop_repair_readiness import (
     read_verified_repair_supplement,
 )
 from ai_sdlc.core.loop_review_models import LoopReviewOutcome
-from ai_sdlc.core.loop_review_service import has_actionable_findings
+from ai_sdlc.core.loop_review_service import (
+    effective_actual_action,
+    has_actionable_findings,
+)
 from ai_sdlc.core.loop_stage_decision_service import (
     STAGE_CAPABILITY,
     StageReviewData,
@@ -39,7 +43,7 @@ def validate_frozen_requirement_repair(
     intake: RequirementIntake,
     freeze: RequirementFreeze,
 ) -> None:
-    """只读校验补录依赖；普通未补录和 legacy Requirement 沿用原门禁。"""
+    """重放量化关闭结果及补录依赖；legacy Requirement 沿用原门禁。"""
     directory = artifacts.loop_dir
     supplement_path = directory / SUPPLEMENT_NAME
     has_supplement = _stable_regular_file_exists(root, supplement_path)
@@ -97,9 +101,9 @@ def validate_frozen_requirement_repair(
         or (final is not None and isinstance(final.simulation, StageReviewData)
             and supplement_relative in final.simulation.manifest)
     )
-    if not depends_on_repair:
-        return
-    if any(original[name] is None for name in names):
+    # 普通 R1 也须重算真实裁决，不能靠改写 action 隐去修复血缘。
+    required_names = names if depends_on_repair else names[:5]
+    if any(original[name] is None for name in required_names):
         raise ValueError("repair-readiness-closed-dependency-missing")
     run = LoopRun.model_validate_json(original["loop-run.json"])
     current_intake = RequirementIntake.model_validate_json(original["requirement-intake.json"])
@@ -120,17 +124,29 @@ def validate_frozen_requirement_repair(
     ):
         raise ValueError("repair-readiness-native-close-invalid")
     validate_stage_start_binding(run, context)
-    supplement = read_verified_repair_supplement(root, directory, first, context)
-    if supplement is None:
+    supplement = (
+        read_verified_repair_supplement(root, directory, first, context)
+        if depends_on_repair else None
+    )
+    if depends_on_repair and supplement is None:
         raise ValueError("repair-readiness-closed-dependency-missing")
 
     previous = None
-    for number, outcome in enumerate(outcomes, start=1):
+    completed = outcomes if final is not None else outcomes[:1]
+    for number, outcome in enumerate(completed, start=1):
         if (
             outcome is None or outcome.loop_id != intake.loop_id
             or outcome.loop_type != "requirement" or outcome.round_number != number
             or outcome.status != "completed"
+            or outcome.infra_retry_count is None
             or not isinstance(outcome.simulation, StageReviewData)
+            or outcome.simulation.input_digest != outcome.input_digest
+            or set(outcome.simulation.assessments) != set(outcome.expert_roles)
+            or (previous is not None and (
+                (previous.decision.action not in {"repair", "improve"}
+                 and supplement is None)
+                or previous.input_digest == outcome.input_digest
+            ))
         ):
             raise ValueError("repair-readiness-closed-review-invalid")
         data = outcome.simulation
@@ -141,22 +157,24 @@ def validate_frozen_requirement_repair(
                 expert_roles=outcome.expert_roles,
                 expert_reasons={role: "原已完成评审角色" for role in outcome.expert_roles},
             ),
-            context, data.manifest, data.source_digest, data.observed_at_ms,
+            context, data.manifest, data.source_digest, time.time_ns() // 1_000_000,
         )
         validate_stage_review_data(
             snapshot, data, has_actionable_findings=has_actionable_findings(outcome),
             baseline=previous,
         )
         previous = data
+    final = completed[-1]
     assert final is not None and previous is not None
-    if has_actionable_findings(final) or previous.decision.action != "stop":
+    if has_actionable_findings(final) or effective_actual_action(snapshot, final) != "stop":
         raise ValueError("repair-readiness-closed-review-invalid")
 
     paths = {
         artifacts.intake_path, artifacts.brief_path, artifacts.questions_path,
-        artifacts.checklist_path, directory / "decision-context.json", supplement_path,
+        artifacts.checklist_path, directory / "decision-context.json",
         *(root / source.path for source in context.sources),
-        *(root / path for path in supplement.evidence_manifest),
+        *({supplement_path, *(root / path for path in supplement.evidence_manifest)}
+          if supplement is not None else set()),
     }
     def capture_material():
         return {
@@ -176,9 +194,9 @@ def validate_frozen_requirement_repair(
     # 不把先后两次读取拼成有效证明；补录、原 R1、合同和 basis 必须绑定同次捕获。
     if (
         any(material[path] != content for path, content in captured.items() if path in material)
-        or read_verified_repair_supplement(
+        or (depends_on_repair and read_verified_repair_supplement(
             root, directory, first, context, captured_artifacts={**material, **captured},
-        ) != supplement
+        ) != supplement)
         or capture() != original
         # 末次元数据读取也可能与业务材料改动交错；放行前再核对完整消费材料。
         or capture_material() != material

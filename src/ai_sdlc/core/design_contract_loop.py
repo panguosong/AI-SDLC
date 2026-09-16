@@ -217,8 +217,20 @@ def _check_design_contract_loop_locked(
                 previous_input
             ):
                 raise ValueError("design-contract-persisted-input-identity-mismatch")
+        if (
+            previous_input is not None
+            and previous_input.verification_contract_ref
+            and previous_input.verification_contract_ref != contract_input.verification_contract_ref
+        ):
+            # 旧合同同样进入写前复读集合，校验后损坏不能发布指向它的新历史记录。
+            captured_contract[previous_input.verification_contract_ref] = read_stable_bytes(
+                root, root / previous_input.verification_contract_ref
+            )
         revision = validate_stage_material_update(
-            root, "design-contract", artifacts.loop_dir, previous_input, contract_input
+            root, "design-contract", artifacts.loop_dir, previous_input, contract_input,
+            verification_contract_bytes=captured_contract.get(
+                contract_input.verification_contract_ref
+            ),
         )
         if (
             previous_input is not None

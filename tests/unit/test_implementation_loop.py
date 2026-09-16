@@ -1397,6 +1397,77 @@ def test_start_implementation_loop_blocks_mutated_design_snapshot(
     assert "changed" in result.blocker.lower()
 
 
+@pytest.mark.parametrize(
+    "requirement_binding", ["explicit", "absent-legacy", "blank-legacy"]
+)
+def test_implementation_uses_only_the_saved_requirement_binding(
+    tmp_path: Path, requirement_binding: str,
+) -> None:
+    from ai_sdlc.core.design_contract_models import DesignContractInput
+    from ai_sdlc.core.design_contract_store import design_contract_input_digest
+
+    work_item = _write_ready_work_item(tmp_path)
+    _close_design_contract_for_work_item(tmp_path, work_item)
+    design = tmp_path / ".ai-sdlc/loops/design-contract/dc-demo-implementation-loop"
+    if requirement_binding != "explicit":
+        # 历史 schema 允许空绑定；不能把当前 pointer 追加成旧 Design 的新前置。
+        input_path = design / "design-contract-input.json"
+        payload = json.loads(input_path.read_bytes())
+        payload.pop("requirement_loop_id")
+        if requirement_binding == "blank-legacy":
+            payload["requirement_loop_id"] = " "
+        contract_input = DesignContractInput.model_validate(payload)
+        input_path.write_text(json.dumps(payload), encoding="utf-8")
+        run_path = design / "loop-run.json"
+        run = json.loads(run_path.read_bytes())
+        run["input_digest"] = design_contract_input_digest(contract_input)
+        run_path.write_text(json.dumps(run), encoding="utf-8")
+    requirement = tmp_path / ".ai-sdlc/loops/requirement"
+    (requirement / "current-requirement.json").write_text(
+        '{"loop_id": "unrelated-current", "loop_run_path": "missing.json"}',
+        encoding="utf-8",
+    )
+    before = {path: path.read_bytes() for path in design.iterdir() if path.is_file()}
+    result = start_implementation_loop(ImplementationStartOptions(
+        root=tmp_path, work_item="specs/demo-implementation-loop",
+        design_contract_loop_id="dc-demo-implementation-loop",
+        loop_id="impl-saved-binding",
+    ))
+    assert result.status == "ready", result.blocker
+    for path, content in before.items():
+        assert path.read_bytes() == content
+
+
+def test_implementation_rejects_changed_bound_requirement_scope(tmp_path: Path) -> None:
+    from ai_sdlc.core.design_contract_models import DesignContractInput
+    from ai_sdlc.core.design_contract_store import design_contract_input_digest
+
+    work_item = _write_ready_work_item(tmp_path)
+    _close_design_contract_for_work_item(tmp_path, work_item)
+    design = tmp_path / ".ai-sdlc/loops/design-contract/dc-demo-implementation-loop"
+    input_path = design / "design-contract-input.json"
+    payload = json.loads(input_path.read_bytes())
+    payload["authorized_scope_families"] = ["implementation", "frontend-evidence"]
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    run_path = design / "loop-run.json"
+    run = json.loads(run_path.read_bytes())
+    run["input_digest"] = design_contract_input_digest(
+        DesignContractInput.model_validate(payload)
+    )
+    run_path.write_text(json.dumps(run), encoding="utf-8")
+    before = {path: path.read_bytes() for path in design.iterdir() if path.is_file()}
+    result = start_implementation_loop(ImplementationStartOptions(
+        root=tmp_path, work_item="specs/demo-implementation-loop",
+        design_contract_loop_id="dc-demo-implementation-loop",
+        loop_id="impl-scope-drift",
+    ))
+    assert result.status == "blocked"
+    assert "scope changed" in result.blocker
+    assert not (tmp_path / ".ai-sdlc/loops/implementation").exists()
+    for path, content in before.items():
+        assert path.read_bytes() == content
+
+
 def test_start_implementation_loop_ignores_copied_legacy_authority_artifact(
     tmp_path: Path,
 ) -> None:

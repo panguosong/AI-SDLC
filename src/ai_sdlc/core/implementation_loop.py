@@ -1197,7 +1197,7 @@ def _design_contract_gate(
             "Run ai-sdlc loop review --type design-contract "
             f"--loop-id {loop_run.loop_id}.",
         )
-    input_issue = _design_close_input_issue(
+    input_issue, input_next = _design_close_input_issue(
         root,
         loop_run,
         artifacts,
@@ -1209,7 +1209,7 @@ def _design_contract_gate(
             "",
             "",
             input_issue,
-            "Rerun ai-sdlc loop design-contract check with a new loop id.",
+            input_next,
         )
     return (
         loop_run.loop_id,
@@ -1263,7 +1263,7 @@ def _design_close_input_issue(
     artifacts: DesignContractArtifacts,
     expected_loop_id: str,
     work_item_id: str,
-) -> str:
+) -> tuple[str, str]:
     try:
         payload = LoopArtifactStore(root).read_json_artifact(artifacts.input_path)
         contract_input = DesignContractInput.model_validate(payload)
@@ -1274,14 +1274,37 @@ def _design_close_input_issue(
         if design_contract_input_digest(contract_input) != loop_run.input_digest:
             raise ValueError("design-contract input changed after check")
         _verify_design_document_snapshot(root, contract_input)
+        # 只消费原 Design 显式绑定的上游，不把当前 pointer 追加成历史实例的新前置。
+        if contract_input.requirement_loop_id.strip():
+            from ai_sdlc.core.design_contract_loop import _requirement_loop_gate
+
+            blocker, next_action, prerequisite = _requirement_loop_gate(
+                root,
+                contract_input.requirement_loop_id,
+                work_item_id=contract_input.work_item_id,
+            )
+            if blocker:
+                return blocker, next_action
+            if (
+                contract_input.authorized_scope_families
+                != prerequisite["authorized_scope_families"]
+            ):
+                return (
+                    "Frozen requirement scope changed after design-contract check.",
+                    "Run ai-sdlc loop review --type requirement "
+                    f"--loop-id {contract_input.requirement_loop_id}.",
+                )
     except (
         OSError,
         UnicodeError,
         ValueError,
         ValidationError,
     ) as exc:
-        return f"Design close input verification failed: {exc}"
-    return ""
+        return (
+            f"Design close input verification failed: {exc}",
+            "Rerun ai-sdlc loop design-contract check with a new loop id.",
+        )
+    return "", ""
 
 
 def _design_contract_blocker(

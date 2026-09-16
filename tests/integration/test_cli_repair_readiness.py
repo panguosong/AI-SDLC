@@ -334,6 +334,107 @@ def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
     _frozen_supplemented_requirement(initialized_project_dir)
 
 
+def test_implementation_replays_requirement_dependency_after_design_close(
+    initialized_project_dir,
+):
+    import shutil
+
+    from ai_sdlc.core.implementation_models import ImplementationInput
+    from ai_sdlc.core.loop_decision_service import (
+        DecisionPreparationError,
+        validate_implementation_upstream,
+    )
+    from tests.integration.test_stage_quantified_pipeline import actual_record
+    from tests.unit.test_design_contract_loop import _write_work_item
+
+    root = initialized_project_dir
+    requirement_dir, basis = _frozen_supplemented_requirement(root)
+    work_item = _write_work_item(
+        root, relative_path="specs/stage-requirement", with_frozen_requirement=False
+    )
+    _payload(_cli(
+        root, "loop", "design-contract", "check", "--wi",
+        work_item.relative_to(root).as_posix(), "--requirement-loop-id", LOOP,
+        "--loop-id", LOOP, "--decision-mode", "adaptive-quantified",
+        "--decision-capability", CAPABILITY, "--json",
+    ))
+    stage_selected(root, "design-contract", start=False)
+    stage_apply(root, "design-contract", {
+        "operation": "seal-for-review", "request_id": "seal",
+    })
+    reviewed = _payload(_cli(
+        root, "loop", "review", "--type", "design-contract",
+        "--loop-id", LOOP, "--json",
+    ))
+    assert actual_record(root, "design-contract", reviewed)["status"] == "passed"
+    _payload(_cli(
+        root, "loop", "design-contract", "close", "--loop-id", LOOP,
+        "--expect-review-digest", reviewed["input_digest"], "--yes", "--json",
+    ))
+    start = [
+        "loop", "implementation", "start", "--wi", "specs/stage-requirement",
+        "--design-contract-loop-id", LOOP, "--loop-id", "dependent-implementation",
+        "--decision-mode", "adaptive-quantified", "--decision-capability",
+        CAPABILITY, "--json",
+    ]
+    # 完整补录依赖允许真实启动；后续量化消费者共用保存的 Design 绑定。
+    assert _payload(_cli(root, *start))["status"] == "ready"
+    impl_input = ImplementationInput.model_validate_json((
+        root / ".ai-sdlc/loops/implementation/dependent-implementation"
+        / "implementation-input.json"
+    ).read_bytes())
+    validate_implementation_upstream(root, impl_input)
+    design_dir = root / ".ai-sdlc/loops/design-contract" / LOOP
+    originals = {
+        path.relative_to(root): path.read_bytes()
+        for directory in (requirement_dir, design_dir)
+        for path in directory.iterdir() if path.is_file()
+    }
+    results = {}
+    for damage in (
+        "supplement-deleted", "supplement-changed", "basis-deleted", "basis-changed",
+    ):
+        case = root.parent / damage
+        # 每个反例从同一原生关闭候选开始，启动失败不受已有 Implementation 干扰。
+        shutil.copytree(root, case, ignore=lambda directory, names: (
+            ["implementation"]
+            if Path(directory) == root / ".ai-sdlc/loops" else []
+        ))
+        target = case / (
+            (requirement_dir / "repair-readiness-supplement.json").relative_to(root)
+            if damage.startswith("supplement") else basis.relative_to(root)
+        )
+        if damage.endswith("deleted"):
+            target.unlink()
+        else:
+            target.write_bytes(target.read_bytes() + b" ")
+        result = _cli(case, *start)
+        payload = json.loads(result.stdout)
+        upstream_error = ""
+        try:
+            validate_implementation_upstream(case, impl_input)
+        except DecisionPreparationError as exc:
+            upstream_error = str(exc)
+        replay = _cli(
+            case, "loop", "review", "--type", "design-contract",
+            "--loop-id", LOOP, "--json",
+        )
+        results[damage] = {
+            "start_blocked": result.returncode == 1 and payload["status"] == "blocked",
+            "upstream_reason": "repair-readiness" in payload.get("blocker", ""),
+            "same_requirement_next": f"--loop-id {LOOP}" in payload.get("next_action", ""),
+            "shared_consumer_blocked": "repair-readiness" in upstream_error,
+            "closed_design_replay_blocked": replay.returncode == 1,
+            "no_implementation_created": not (case / ".ai-sdlc/loops/implementation").exists(),
+        }
+        for relative, content in originals.items():
+            if case / relative != target:
+                assert (case / relative).read_bytes() == content
+    assert all(all(checks.values()) for checks in results.values()), results
+    for relative, content in originals.items():
+        assert (root / relative).read_bytes() == content
+
+
 def test_closed_requirement_rejects_mixed_supplement_captures(
     initialized_project_dir, monkeypatch
 ):

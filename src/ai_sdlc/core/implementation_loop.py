@@ -119,6 +119,11 @@ _TASK_ID = re.compile(r"\bT\d{2,}\b")
 _TASK_SECTION = re.compile(r"(?m)^###\s+(?:Task|任务)\b.*$")
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _PRIORITY = re.compile(r"(?:优先级|priority)[^\n]*(P[0-9])\b", re.IGNORECASE)
+_REQUIRED = re.compile(
+    r"^\s*(?:[-*]\s+)?(?:required|\*\*required\*\*)\s*[:：]\s*(.*?)\s*$",
+    re.IGNORECASE,
+)
+_REQUIRED_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _CANONICAL_SCOPE = re.compile(r"^\s*-\s*scope\s*:\s*(.*)$", re.IGNORECASE)
 _INDENTED_LIST_ITEM = re.compile(r"^\s{2,}-\s+(.+?)\s*$")
 _FRONTEND_SIGNAL = re.compile(
@@ -1343,12 +1348,15 @@ def _parse_tasks_file(
         if not task_id:
             continue
         priority = _task_priority(section)
+        required, blocker = _task_required(section, priority)
+        if blocker:
+            return [], f"{task_id}: {blocker}"
         items.append(
             ImplementationTaskItem(
                 task_id=task_id,
                 title=_task_title(section),
                 priority=priority,
-                required=priority in {"P0", "P1"},
+                required=required,
                 files=_task_files(section),
                 acceptance=_task_list_after_label(section, "验收标准", "acceptance"),
                 verification_hints=_task_list_after_label(
@@ -1360,7 +1368,10 @@ def _parse_tasks_file(
     if not items:
         return [], "tasks.md does not define executable task ids."
     if not any(item.required for item in items):
-        return [], "tasks.md must include at least one P0/P1 implementation task."
+        return [], (
+            "tasks.md must include at least one required implementation task "
+            "(required: true or P0/P1 priority)."
+        )
     return items, ""
 
 
@@ -1391,6 +1402,41 @@ def _task_title(section: str) -> str:
 def _task_priority(section: str) -> str:
     match = _PRIORITY.search(section)
     return match.group(1).upper() if match else ""
+
+
+def _task_required(section: str, priority: str) -> tuple[bool, str]:
+    """显式必做与优先级分开保留，缺省兼容旧规则且不允许降级高优先级任务。"""
+    values: list[str] = []
+    fence = ""
+    for line in section.splitlines():
+        # 代码示例不能声明字段；围栏只由相同字符且足够长的空尾标记结束。
+        if line.expandtabs(4).startswith("    "):
+            continue
+        marker = _REQUIRED_FENCE.fullmatch(line)
+        if fence:
+            if (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+                and not marker.group(2).strip()
+            ):
+                fence = ""
+            continue
+        if marker and (marker.group(1)[0] != "`" or "`" not in marker.group(2)):
+            fence = marker.group(1)
+            continue
+        if match := _REQUIRED.fullmatch(line):
+            values.append(match.group(1).casefold())
+    if len(values) > 1:
+        return False, "required must be declared at most once."
+    if not values:
+        return priority in {"P0", "P1"}, ""
+    value = values[0]
+    if value not in {"true", "false"}:
+        return False, "required must be true or false."
+    if value == "false" and priority in {"P0", "P1"}:
+        return False, f"required: false conflicts with {priority} priority."
+    return value == "true", ""
 
 
 def _task_files(section: str) -> list[str]:

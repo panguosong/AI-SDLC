@@ -44,6 +44,8 @@ AI-SDLC 是面向 AI 代理与工程团队的本地研发治理框架。它负�
 - Frontend Evidence Loop：页面契约、浏览器证据、视觉与可访问性；
 - Local PR Review：提交前由独立本地只读代理执行跨阶段审查。
 
+Implementation 按每项任务的完整 `required` 字段确定是否必做，忽略 Markdown 围栏及缩进代码中的示例字段：显式 `true` 即使没有优先级也必须完成，并保留原优先级不变；显式 `false` 仅允许非 P0/P1 任务。未提供该字段时沿用 P0/P1 必做的旧规则；重复字段、非 `true`/`false` 的值以及 `false` 与 P0/P1 的矛盾均阻断。至少保留一项必做任务，报告和 Close 仍须检查所有必做项的当前验证证据；任务、范围及反例合同绑定不变。
+
 五个 Loop 的实质结果均由 CLI 按内容选择最多两种专家角色，再由 Codex、Claude Code、Cursor 或 VS Code 中的当前宿主 Agent 按协议为每个角色启动一个全新只读上下文；CLI 自身不调度模型。专家只读取与 `input_digest` 同次获取的内联 `review_snapshot`，不得在复核期间重新打开可变工件路径。宿主 Agent 用 `loop review-record` 汇总当前轮结果；有重要发现或必达缺口时由原实现代理按当前准入修复，并只允许一次复审；通过后调用既有 close。专家执行失败保留真实失败与未关闭状态，不得解释为通过或要求用户手动触发专家。
 
 框架只在原 Loop 目录保存固定的 `review-outcome-round-1.json`，修复后至多再保存 `review-outcome-round-2.json`，用于防止缺失结果、角色不完整和摘要漂移。它不保存专家上下文或长期身份，也不创建 session、ledger、certificate、attestation、authority/store 或第三轮结果。

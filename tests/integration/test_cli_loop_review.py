@@ -3163,6 +3163,10 @@ def _write_legacy_implementation_input(loop_dir: Path, payload: dict) -> None:
             "spec_path": "specs/demo/spec.md",
             "plan_path": "specs/demo/plan.md",
             "tasks_path": "specs/demo/tasks.md",
+            "design_contract_report_path": (
+                f".ai-sdlc/loops/design-contract/{payload.get('design_contract_loop_id', '')}"
+                "/design-contract-report.json"
+            ),
             **payload,
         }
     )
@@ -3180,7 +3184,14 @@ def _write_legacy_implementation_input(loop_dir: Path, payload: dict) -> None:
         work_item_id=value.work_item_id,
         input_digest=implementation_input_digest(value),
         rounds=[
-            LoopRound(round_number=number).model_dump(mode="json")
+            # 与原生 start 一样保留执行来源，不能把待审夹具伪装成无来源旧凭据。
+            LoopRound(
+                round_number=number,
+                input_artifacts=[
+                    value.spec_path, value.plan_path, value.tasks_path,
+                    value.design_contract_report_path,
+                ],
+            ).model_dump(mode="json")
             for number in range(1, run_payload["current_round"] + 1)
         ],
     )

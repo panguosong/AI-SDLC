@@ -225,7 +225,25 @@ def test_pr_review_provider_timeout_limits_start_subprocess(
             return json.dumps(details, ensure_ascii=False, indent=2)
 
         assert start.exit_code == 1, original_diagnostics()
-        assert "timed out" in json.loads(start.output)["blocker"], original_diagnostics()
+        details = json.loads(original_diagnostics())
+        assert "diagnostic_error" not in details, details
+        payload = json.loads(start.output)
+        assert payload["status"] == payload["provider_status"] == "blocked", details
+        assert payload["verdict"] is None, details
+        raw, cleanup = details["verified_raw"], details["verified_cleanup"]
+        assert raw["launch_status"] == "started" and raw["timed_out"] is True, details
+        assert raw["exit_code"] != 0 and not raw["launch_error"], details
+        if cleanup["status"] == "complete":
+            assert "timed out" in payload["blocker"], details
+        else:
+            # 超时事实不等于清理完成；未知外来进程仍须保留原件并严格阻断。
+            assert cleanup["status"] == "incomplete", details
+            assert "provider-owned-process-cleanup-incomplete" in payload["blocker"], details
+            assert details.get("retained_directory"), details
+            assert all(
+                item.get("matches_bound_original") is True
+                for item in details["retained_files"].values()
+            ), details
 
 
 def test_pr_review_provider_timeout_reaches_rerun_service(tmp_path: Path) -> None:

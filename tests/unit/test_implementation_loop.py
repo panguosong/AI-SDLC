@@ -1434,6 +1434,10 @@ def test_implementation_uses_only_the_saved_requirement_binding(
         loop_id="impl-saved-binding",
     ))
     assert result.status == "ready", result.blocker
+    recorded = record_implementation_progress(ImplementationRecordOptions(
+        root=tmp_path, loop_id="impl-saved-binding", task_id="T11", status="in_progress",
+    ))
+    assert recorded.status == "ready", recorded.blocker
     for path, content in before.items():
         assert path.read_bytes() == content
 

@@ -334,23 +334,14 @@ def test_requirement_repair_supplement_preserves_r1_and_freezes_after_r2(
     _frozen_supplemented_requirement(initialized_project_dir)
 
 
-def test_implementation_replays_requirement_dependency_after_design_close(
-    initialized_project_dir,
-):
-    import shutil
-
-    from ai_sdlc.core.implementation_models import ImplementationInput
-    from ai_sdlc.core.loop_decision_service import (
-        DecisionPreparationError,
-        validate_implementation_upstream,
-    )
+def _closed_design_with_supplemented_requirement(root, *, frontend=False):
     from tests.integration.test_stage_quantified_pipeline import actual_record
     from tests.unit.test_design_contract_loop import _write_work_item
 
-    root = initialized_project_dir
     requirement_dir, basis = _frozen_supplemented_requirement(root)
     work_item = _write_work_item(
-        root, relative_path="specs/stage-requirement", with_frozen_requirement=False
+        root, relative_path="specs/stage-requirement", with_frozen_requirement=False,
+        spec_intro_extra="前端页面和浏览器证据。" if frontend else "",
     )
     _payload(_cli(
         root, "loop", "design-contract", "check", "--wi",
@@ -371,6 +362,22 @@ def test_implementation_replays_requirement_dependency_after_design_close(
         root, "loop", "design-contract", "close", "--loop-id", LOOP,
         "--expect-review-digest", reviewed["input_digest"], "--yes", "--json",
     ))
+    return requirement_dir, basis
+
+
+def test_implementation_replays_requirement_dependency_after_design_close(
+    initialized_project_dir,
+):
+    import shutil
+
+    from ai_sdlc.core.implementation_models import ImplementationInput
+    from ai_sdlc.core.loop_decision_service import (
+        DecisionPreparationError,
+        validate_implementation_upstream,
+    )
+
+    root = initialized_project_dir
+    requirement_dir, basis = _closed_design_with_supplemented_requirement(root)
     start = [
         "loop", "implementation", "start", "--wi", "specs/stage-requirement",
         "--design-contract-loop-id", LOOP, "--loop-id", "dependent-implementation",
@@ -433,6 +440,124 @@ def test_implementation_replays_requirement_dependency_after_design_close(
     assert all(all(checks.values()) for checks in results.values()), results
     for relative, content in originals.items():
         assert (root / relative).read_bytes() == content
+
+
+def test_legacy_implementation_and_frontend_revalidate_bound_requirement(
+    initialized_project_dir,
+):
+    import shutil
+    import sys
+
+    from ai_sdlc.core.frontend_evidence_loop import _implementation_gate
+    from ai_sdlc.core.implementation_loop import (
+        ImplementationCloseOptions,
+        close_implementation_loop,
+    )
+    from tests.integration.test_cli_loop_review import _write_cli_expert_results
+    from tests.unit.test_implementation_loop import _record_successful_quality_result
+
+    root = initialized_project_dir
+    requirement_dir, basis = _closed_design_with_supplemented_requirement(root, frontend=True)
+    implementation = "legacy-with-bound-requirement"
+    _payload(_cli(
+        root, "loop", "implementation", "start", "--wi", "specs/stage-requirement",
+        "--design-contract-loop-id", LOOP, "--loop-id", implementation, "--json",
+    ))
+    _payload(_cli(
+        root, "loop", "implementation", "record", "--loop-id", implementation,
+        "--task-id", "T11", "--status", "done", "--verification", "python -c pass",
+        "--json",
+    ))
+    assert _record_successful_quality_result(root, implementation, "T11").status == "ready"
+    reviewed = _payload(_cli(
+        root, "loop", "review", "--type", "implementation",
+        "--loop-id", implementation, "--json",
+    ))
+    result_args = []
+    for path in _write_cli_expert_results(
+        root / ".ai-sdlc/loops/implementation" / implementation, reviewed
+    ):
+        result_args += ["--result", str(path)]
+    _payload(_cli(
+        root, "loop", "review-record", "--type", "implementation",
+        "--loop-id", implementation, "--expect-digest", reviewed["input_digest"],
+        *result_args, "--json",
+    ))
+    open_project = root.parent / "open-legacy-baseline"
+    shutil.copytree(root, open_project)
+    closed = _payload(_cli(
+        root, "loop", "implementation", "close", "--loop-id", implementation,
+        "--expect-review-digest", reviewed["input_digest"], "--yes", "--json",
+    ))
+    assert closed["closed"] is True
+    assert _implementation_gate(root, implementation, work_item_id="stage-requirement")[2] == ""
+
+    def loop_bytes(project):
+        return {
+            path.relative_to(project): path.read_bytes()
+            for path in (project / ".ai-sdlc/loops").rglob("*") if path.is_file()
+        }
+
+    originals = loop_bytes(root)
+    results = {}
+    for damage in (
+        "supplement-deleted", "supplement-changed", "basis-deleted", "basis-changed",
+    ):
+        for entry in ("record", "verify", "close", "frontend-consume"):
+            case = root.parent / f"legacy-{damage}-{entry}"
+            shutil.copytree(root if entry == "frontend-consume" else open_project, case)
+            target = case / (
+                (requirement_dir / "repair-readiness-supplement.json").relative_to(root)
+                if damage.startswith("supplement") else basis.relative_to(root)
+            )
+            if damage.endswith("deleted"):
+                target.unlink()
+            else:
+                target.write_bytes(target.read_bytes() + b" ")
+            before = loop_bytes(case)
+            if entry == "frontend-consume":
+                blocker = _implementation_gate(
+                    case, implementation, work_item_id="stage-requirement"
+                )[2]
+                blocked = bool(blocker)
+            elif entry == "close":
+                outcome = close_implementation_loop(ImplementationCloseOptions(
+                    root=case, loop_id=implementation, yes=True,
+                ))
+                blocker = outcome.blocker
+                blocked = outcome.status == "blocked" and not outcome.closed
+            else:
+                command = ["loop", "implementation", entry, "--loop-id", implementation]
+                if entry == "record":
+                    command += ["--task-id", "T11", "--status", "in_progress", "--json"]
+                elif entry == "verify":
+                    command += [
+                        "--task-id", "T11", "--json", "--", sys.executable, "-c",
+                        "from pathlib import Path; Path('unexpected-execution').write_text('ran')",
+                    ]
+                else:
+                    command += ["--yes", "--json"]
+                outcome = _cli(case, *command)
+                payload = json.loads(outcome.stdout)
+                blocker = payload.get("blocker", "")
+                blocked = outcome.returncode == 1 and payload["status"] == "blocked"
+            results[f"{damage}/{entry}"] = {
+                "blocked": blocked,
+                "upstream_reason": "repair-readiness" in blocker,
+                "no_loop_changes": loop_bytes(case) == before,
+                "no_verification_execution": not (case / "unexpected-execution").exists(),
+            }
+    # 原生 run 已保存 input_digest；删除 ImplementationInput 不能伪装成无绑定历史凭据。
+    erased = root.parent / "legacy-closed-input-erased"
+    shutil.copytree(root, erased)
+    (erased / ".ai-sdlc/loops/implementation" / implementation / "implementation-input.json").unlink()
+    results["implementation-input-deleted"] = {
+        "blocked": bool(_implementation_gate(
+            erased, implementation, work_item_id="stage-requirement"
+        )[2]),
+    }
+    assert all(all(checks.values()) for checks in results.values()), results
+    assert loop_bytes(root) == originals
 
 
 def test_closed_requirement_rejects_mixed_supplement_captures(

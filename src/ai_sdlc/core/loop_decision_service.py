@@ -425,6 +425,7 @@ def validate_implementation_context(
         )
         if _optional_bytes(root, path) is not None:
             raise DecisionPreparationError("decision-context-conflicts-with-legacy")
+        validate_implementation_requirement(root, impl_input)
         return None
     _check_identity(run, impl_input, run.loop_id)
     validate_implementation_upstream(root, impl_input)
@@ -681,6 +682,46 @@ def _check_sources(root: Path, loop_dir: Path, request: DecisionPrepareInput) ->
             raise DecisionPreparationError("decision-source-self-reference")
         if hashlib.sha256(read_stable_bytes(root, path)).hexdigest() != source.sha256:
             raise DecisionPreparationError("decision-source-digest-mismatch")
+
+
+def validate_implementation_requirement(
+    root: Path, impl_input: ImplementationInput,
+) -> None:
+    """legacy 也须保留显式 Requirement 依据，但不重新冻结当前设计文档。"""
+    from ai_sdlc.core.design_contract_store import (
+        design_contract_artifacts,
+        require_design_check_published,
+    )
+    from ai_sdlc.core.design_contract_store import (
+        validate_explicit_loop_id as validate_design_id,
+    )
+    from ai_sdlc.core.implementation_loop import (
+        _bound_design_input,
+        _design_requirement_issue,
+    )
+
+    design_id = impl_input.design_contract_loop_id.strip()
+    if not design_id:
+        return
+    try:
+        artifacts = design_contract_artifacts(root, validate_design_id(design_id))
+        require_design_check_published(artifacts.input_path.parent)
+        captured = {
+            path: read_stable_bytes(root, path)
+            for path in (artifacts.loop_run_path, artifacts.input_path)
+        }
+        contract_input = _bound_design_input(
+            LoopRun.model_validate_json(captured[artifacts.loop_run_path]),
+            captured[artifacts.input_path], design_id, impl_input.work_item_id,
+        )
+        blocker, _ = _design_requirement_issue(root, contract_input)
+        if blocker:
+            raise ValueError(blocker)
+        require_design_check_published(artifacts.input_path.parent)
+        if any(read_stable_bytes(root, path) != content for path, content in captured.items()):
+            raise ValueError("design-contract bound input changed during verification")
+    except (OSError, ValueError) as exc:
+        raise DecisionPreparationError(f"decision-upstream-changed: {exc}") from exc
 
 
 def validate_implementation_upstream(

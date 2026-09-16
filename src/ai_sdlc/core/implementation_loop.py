@@ -1265,35 +1265,12 @@ def _design_close_input_issue(
     work_item_id: str,
 ) -> tuple[str, str]:
     try:
-        payload = LoopArtifactStore(root).read_json_artifact(artifacts.input_path)
-        contract_input = DesignContractInput.model_validate(payload)
-        if contract_input.loop_id != expected_loop_id:
-            raise ValueError("design-contract input loop id changed")
-        if contract_input.work_item_id != work_item_id:
-            raise ValueError("design-contract input work item changed")
-        if design_contract_input_digest(contract_input) != loop_run.input_digest:
-            raise ValueError("design-contract input changed after check")
+        contract_input = _bound_design_input(
+            loop_run, read_stable_bytes(root, artifacts.input_path),
+            expected_loop_id, work_item_id,
+        )
         _verify_design_document_snapshot(root, contract_input)
-        # 只消费原 Design 显式绑定的上游，不把当前 pointer 追加成历史实例的新前置。
-        if contract_input.requirement_loop_id.strip():
-            from ai_sdlc.core.design_contract_loop import _requirement_loop_gate
-
-            blocker, next_action, prerequisite = _requirement_loop_gate(
-                root,
-                contract_input.requirement_loop_id,
-                work_item_id=contract_input.work_item_id,
-            )
-            if blocker:
-                return blocker, next_action
-            if (
-                contract_input.authorized_scope_families
-                != prerequisite["authorized_scope_families"]
-            ):
-                return (
-                    "Frozen requirement scope changed after design-contract check.",
-                    "Run ai-sdlc loop review --type requirement "
-                    f"--loop-id {contract_input.requirement_loop_id}.",
-                )
+        return _design_requirement_issue(root, contract_input)
     except (
         OSError,
         UnicodeError,
@@ -1303,6 +1280,48 @@ def _design_close_input_issue(
         return (
             f"Design close input verification failed: {exc}",
             "Rerun ai-sdlc loop design-contract check with a new loop id.",
+        )
+
+
+def _bound_design_input(
+    loop_run: LoopRun, content: bytes, expected_loop_id: str, work_item_id: str,
+) -> DesignContractInput:
+    contract_input = DesignContractInput.model_validate_json(content)
+    if (
+        loop_run.loop_id != expected_loop_id
+        or loop_run.loop_type != LoopType.DESIGN_CONTRACT
+        or loop_run.work_item_id != work_item_id
+        or loop_run.status != LoopStatus.CLOSED
+    ):
+        raise ValueError("design-contract closed identity changed")
+    if contract_input.loop_id != expected_loop_id:
+        raise ValueError("design-contract input loop id changed")
+    if contract_input.work_item_id != work_item_id:
+        raise ValueError("design-contract input work item changed")
+    if design_contract_input_digest(contract_input) != loop_run.input_digest:
+        raise ValueError("design-contract input changed after check")
+    return contract_input
+
+
+def _design_requirement_issue(
+    root: Path, contract_input: DesignContractInput,
+) -> tuple[str, str]:
+    # 只消费原 Design 显式绑定的上游，不把当前 pointer 追加成历史实例的新前置。
+    if not contract_input.requirement_loop_id.strip():
+        return "", ""
+    from ai_sdlc.core.design_contract_loop import _requirement_loop_gate
+
+    blocker, next_action, prerequisite = _requirement_loop_gate(
+        root, contract_input.requirement_loop_id,
+        work_item_id=contract_input.work_item_id,
+    )
+    if blocker:
+        return blocker, next_action
+    if contract_input.authorized_scope_families != prerequisite["authorized_scope_families"]:
+        return (
+            "Frozen requirement scope changed after design-contract check.",
+            "Run ai-sdlc loop review --type requirement "
+            f"--loop-id {contract_input.requirement_loop_id}.",
         )
     return "", ""
 

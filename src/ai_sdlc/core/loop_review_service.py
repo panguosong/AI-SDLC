@@ -188,9 +188,13 @@ def read_verified_implementation_close(
     """读取可消费的关闭凭据；量化结果仍须绑定当前完整审查输入。"""
     from ai_sdlc.core.implementation_models import (
         ImplementationClose,
+        ImplementationInput,
         ImplementationReport,
     )
-    from ai_sdlc.core.implementation_store import implementation_artifacts
+    from ai_sdlc.core.implementation_store import (
+        implementation_artifacts,
+        implementation_input_digest,
+    )
     from ai_sdlc.core.loop_models import LoopRun, LoopStatus
 
     if not _SAFE_IDENTIFIER.fullmatch(loop_id):
@@ -233,6 +237,28 @@ def read_verified_implementation_close(
     # 保留旧凭据字段的只读解析，但已退休的续办凭据不能变成普通关闭凭据。
     if close.review_binding is not None:
         raise LoopReviewServiceError("implementation-continuation-retired")
+    if run.decision_mode == "legacy" and (
+        run.input_digest or _stable_regular_file_exists(root, artifacts.input_path)
+    ):
+        from ai_sdlc.core.loop_decision_service import (
+            validate_implementation_requirement,
+        )
+
+        # 原生输入的删除不能变成无绑定旧凭据；无输入/摘要的历史 legacy 仍沿用旧协议。
+        try:
+            captured[artifacts.input_path] = read_stable_bytes(root, artifacts.input_path)
+        except OSError as exc:
+            raise LoopReviewServiceError("implementation-input-unavailable") from exc
+        impl_input = ImplementationInput.model_validate_json(captured[artifacts.input_path])
+        if (
+            impl_input.loop_id != run.loop_id
+            or impl_input.work_item_id != run.work_item_id
+            or (impl_input.decision_mode, impl_input.decision_capability)
+            != (run.decision_mode, run.decision_capability)
+            or implementation_input_digest(impl_input) != run.input_digest
+        ):
+            raise LoopReviewServiceError("decision-identity-mismatch")
+        validate_implementation_requirement(root, impl_input)
     if run.decision_capability in {
         "implementation-simulation-v1",
         "stage-simulation-v1",

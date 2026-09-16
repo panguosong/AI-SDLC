@@ -181,8 +181,9 @@ def repair_readiness_can_prepare(
 def _evidence_bytes(root: Path, path: Path) -> bytes:
     relative = path.relative_to(root).as_posix()
     DecisionSource._canonical_relative_path(relative)
-    # 原生 PR 产物不能新增为修复授权；普通 reviews 下的用户原始文档仍可用。
-    if tuple(part.casefold() for part in path.relative_to(root).parts[:3]) == (
+    # 框架 Loop/PR 产物不能自证修复前提；目录外的用户原始材料仍可用。
+    parts = tuple(part.casefold() for part in path.relative_to(root).parts)
+    if parts[:2] == (".ai-sdlc", "loops") or parts[:3] == (
         ".ai-sdlc", "reviews", "pr"
     ):
         raise _error("repair-readiness-derived-evidence-forbidden")

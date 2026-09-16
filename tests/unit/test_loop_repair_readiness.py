@@ -378,6 +378,65 @@ def test_framework_pr_artifacts_cannot_supply_new_readiness(blocked, name):
     assert not (current.loop_dir / "review-outcome-round-2.json").exists()
 
 
+def test_framework_loop_report_cannot_unlock_repair_readiness(blocked):
+    root, current, context, outcome, _, kwargs = blocked
+    report = (
+        root
+        / ".ai-sdlc/loops/design-contract/previous-design/design-contract-report.json"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_text('{"result":"ready","blockers":[]}', encoding="utf-8")
+    originals = {
+        name: (current.loop_dir / name).read_bytes()
+        for name in (
+            "review-outcome-round-1.json",
+            "decision-context.json",
+            "loop-run.json",
+        )
+    }
+    derived_basis = (root, current, context, outcome, report, kwargs)
+    with pytest.raises(ValueError, match="repair-readiness-derived-evidence-forbidden"):
+        proposal = prepared(derived_basis)
+        record(derived_basis, proposal)
+    assert review(blocked).reason == "repair-unavailable"
+    for name, content in originals.items():
+        assert (current.loop_dir / name).read_bytes() == content
+    assert not (current.loop_dir / "repair-readiness-supplement.json").exists()
+    assert not (current.loop_dir / "review-outcome-round-2.json").exists()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".ai-sdlc/loops/implementation/previous/verification-report.json",
+        ".ai-sdlc/loops/future-stage/previous/future-provider-report.json",
+        ".ai-sdlc/loops/requirement/previous/copied-authorization.md",
+        ".AI-SDLC/LoOpS/design-contract/previous/design-contract-report.json",
+    ],
+)
+def test_framework_loop_namespace_cannot_supply_repair_evidence(tmp_path, relative):
+    report = tmp_path / relative
+    report.parent.mkdir(parents=True)
+    report.write_text('{"result":"ready"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="repair-readiness-derived-evidence-forbidden"):
+        api()._evidence_bytes(tmp_path, report)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "business/design-contract-report.json",
+        ".ai-sdlc/loops-archive/original-authorization.md",
+    ],
+)
+def test_user_material_outside_loop_namespace_remains_readable(tmp_path, relative):
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True)
+    original = "用户独立原始授权和具体修复验法。".encode()
+    source.write_bytes(original)
+    assert api()._evidence_bytes(tmp_path, source) == original
+
+
 @pytest.mark.parametrize(
     "name",
     [

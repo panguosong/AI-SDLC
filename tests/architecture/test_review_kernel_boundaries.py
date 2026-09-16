@@ -109,6 +109,9 @@ def test_only_normal_two_rounds_remain_and_continuation_is_retired() -> None:
         "src/ai_sdlc/core/loop_decision_service.py",
         "src/ai_sdlc/core/loop_stage_decision_service.py",
         "src/ai_sdlc/cli/loop_stage_cmd.py",
+        # 准备度补录与下游重放只读取原 R1/R2，不增加结果轮次或恢复旧续办器。
+        "src/ai_sdlc/core/loop_repair_readiness.py",
+        "src/ai_sdlc/core/requirement_repair_gate.py",
     }
 
     service = _OUTCOME_SERVICE.read_text(encoding="utf-8")

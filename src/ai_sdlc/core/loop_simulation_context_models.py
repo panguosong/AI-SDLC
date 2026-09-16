@@ -43,6 +43,7 @@ class SimulationPrepareRequest(DecisionValue):
         "seal-for-review",
         "begin-improvement",
         "correct-input",
+        "revise-time-plan",
     ]
     request_id: Identifier
     contracts: tuple[StageScoreContract, ...] = Field(default=(), max_length=2)
@@ -64,11 +65,18 @@ class SimulationPrepareRequest(DecisionValue):
             "seal-for-review": set(),
             "begin-improvement": {"improvement"},
             "correct-input": set(),
+            "revise-time-plan": {"contracts", "sources", "reason"},
         }[self.operation]
         if supplied - allowed:
             raise ValueError("simulation-operation-fields-invalid")
         if self.operation == "begin" and (not self.contracts or not self.sources):
             raise ValueError("simulation-begin-requires-profile-bundle-and-sources")
+        if self.operation == "revise-time-plan" and (
+            not self.contracts or not self.sources or not self.reason.strip()
+        ):
+            raise ValueError(
+                "simulation-time-revision-contracts-sources-reason-required"
+            )
         if self.operation == "begin-improvement" and self.improvement is None:
             raise ValueError("simulation-improvement-required")
         if self.operation == "freeze-comparison" and not self.candidates:
@@ -119,6 +127,25 @@ class InputCorrectionReceipt(DecisionValue):
     corrected_at_ms: int = Field(strict=True, ge=0)
     request_id: Identifier
     corrected_base_input_digest: Digest
+    old_contracts: tuple[StageScoreContract, ...] | None = Field(
+        default=None, min_length=1, max_length=2
+    )
+    revision_request: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def _revision_pair(self):
+        if (self.old_contracts is None) != (self.revision_request is None):
+            raise ValueError("simulation-time-revision-receipt-incomplete")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _preserve_original_receipt(self, handler):
+        payload = handler(self)
+        if self.old_contracts is None:
+            # 历史纠错原件不能因新增能力自动补字段而改变摘要。
+            payload.pop("old_contracts", None)
+            payload.pop("revision_request", None)
+        return payload
 
 
 class SimulationContext(DecisionValue):
@@ -167,6 +194,16 @@ class SimulationContext(DecisionValue):
         )
 
     def contract_for_batch(self, batch: SimulationBatch) -> StageScoreContract:
+        if (
+            batch.number == 1
+            and self.input_correction is not None
+            and self.input_correction.old_contracts is not None
+        ):
+            return next(
+                c
+                for c in self.input_correction.old_contracts
+                if c.profile_id == STAGE_PROFILES[self.loop_type][0]
+            )
         if (
             batch.decision_point == "before-improvement"
             and self.loop_type == "implementation"

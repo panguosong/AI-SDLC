@@ -3,6 +3,8 @@
 import json
 import time
 
+import pytest
+
 from ai_sdlc.core.requirement_loop import (
     RequirementStartOptions,
     start_requirement_loop,
@@ -73,6 +75,109 @@ def test_design_recheck_cannot_replace_frozen_spec_goal(tmp_path):
     result = check_design_contract_loop(options)
     assert result.status == "blocked"
     assert "identity" in result.blocker
+
+
+def test_design_schema_fix_without_ce_cannot_replace_frozen_spec(tmp_path):
+    from ai_sdlc.core.design_contract_loop import (
+        DesignContractCheckOptions,
+        check_design_contract_loop,
+    )
+    from tests.unit.test_design_contract_loop import _write_work_item
+
+    work_item = _write_work_item(tmp_path)
+    plan = work_item / "plan.md"
+    original_plan = plan.read_bytes()
+    plan.write_text("# 实施计划\n", encoding="utf-8")
+    options = DesignContractCheckOptions(
+        root=tmp_path,
+        work_item="specs/demo-contract",
+        loop_id="stage-design",
+        decision_mode="adaptive-quantified",
+        decision_capability="stage-simulation-v1",
+    )
+    assert check_design_contract_loop(options).status == "needs_fix"
+    directory = tmp_path / ".ai-sdlc/loops/design-contract/stage-design"
+    before = {
+        path.relative_to(directory): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+    plan.write_bytes(original_plan)
+    spec = work_item / "spec.md"
+    spec.write_text(spec.read_text() + "\n改变原目标。\n", encoding="utf-8")
+
+    result = check_design_contract_loop(options)
+
+    assert result.status == "blocked"
+    assert "identity" in result.blocker
+    assert {
+        path.relative_to(directory): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("initially_ready", [False, True])
+def test_design_without_ce_can_update_plan_and_tasks_with_same_spec(
+    tmp_path, initially_ready
+):
+    from ai_sdlc.core.design_contract_loop import (
+        DesignContractCheckOptions,
+        check_design_contract_loop,
+    )
+    from tests.unit.test_design_contract_loop import _write_work_item
+
+    work_item = _write_work_item(tmp_path)
+    spec = (work_item / "spec.md").read_bytes()
+    plan = work_item / "plan.md"
+    original_plan = plan.read_bytes()
+    if not initially_ready:
+        plan.write_text("# 实施计划\n", encoding="utf-8")
+    options = DesignContractCheckOptions(
+        root=tmp_path,
+        work_item="specs/demo-contract",
+        loop_id="stage-design",
+        decision_mode="adaptive-quantified",
+        decision_capability="stage-simulation-v1",
+    )
+    first = check_design_contract_loop(options)
+    assert first.status == ("ready" if initially_ready else "needs_fix")
+    directory = tmp_path / ".ai-sdlc/loops/design-contract/stage-design"
+    before = json.loads((directory / "loop-run.json").read_bytes())
+    assert before.get("decision_started_at_ms") is None
+    plan.write_bytes(original_plan + "\n实施说明补齐。\n".encode())
+    tasks = work_item / "tasks.md"
+    tasks.write_text(tasks.read_text() + "\n任务实施说明补齐。\n", encoding="utf-8")
+
+    result = check_design_contract_loop(options)
+
+    assert result.status == "ready", result
+    after = json.loads((directory / "loop-run.json").read_bytes())
+    assert (work_item / "spec.md").read_bytes() == spec
+    assert after["created_at"] == before["created_at"]
+    assert after["current_round"] == before["current_round"] == 1
+    assert len(after["rounds"]) == len(before["rounds"]) == 1
+    assert after.get("decision_started_at_ms") is None
+    assert not (directory / "decision-context.json").exists()
+    assert not list(directory.glob("review-outcome-*.json"))
+
+
+def test_legacy_design_recheck_keeps_existing_spec_edit_behavior(tmp_path):
+    from ai_sdlc.core.design_contract_loop import (
+        DesignContractCheckOptions,
+        check_design_contract_loop,
+    )
+    from tests.unit.test_design_contract_loop import _write_work_item
+
+    work_item = _write_work_item(tmp_path)
+    options = DesignContractCheckOptions(
+        root=tmp_path, work_item="specs/demo-contract", loop_id="legacy-design"
+    )
+    assert check_design_contract_loop(options).status == "ready"
+    spec = work_item / "spec.md"
+    spec.write_text(spec.read_text() + "\n补充原有合同说明。\n", encoding="utf-8")
+
+    assert check_design_contract_loop(options).status == "ready"
 
 
 def bind_requirement_context(root, *, selected=False, sealed=False):

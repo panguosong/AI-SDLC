@@ -146,7 +146,8 @@ def _unstarted_design_correction(
     )
     from ai_sdlc.core.stable_file_read import _stable_regular_file_exists
 
-    if stage != "design-contract":
+    # 没有已绑定的反例合同可复验语义时，原 spec 摘要仍是目标身份，不开放修正豁免。
+    if stage != "design-contract" or not previous.verification_contract_ref:
         return False
     mutable = {
         "created_at", "spec_digest", "plan_digest", "tasks_digest",

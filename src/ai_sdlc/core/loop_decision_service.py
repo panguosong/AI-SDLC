@@ -407,7 +407,8 @@ def prepare_implementation_decision(
 
 
 def validate_implementation_context(
-    root: Path, run: LoopRun, impl_input: ImplementationInput, *, purpose: str = "read"
+    root: Path, run: LoopRun, impl_input: ImplementationInput, *, purpose: str = "read",
+    reviewed_input: ReviewInput | None = None,
 ) -> DecisionContext | SimulationContext | None:
     run = LoopRun.model_validate(run.model_dump())
     impl_input = ImplementationInput.model_validate(impl_input.model_dump())
@@ -427,6 +428,7 @@ def validate_implementation_context(
             raise DecisionPreparationError("decision-context-conflicts-with-legacy")
         validate_legacy_implementation_identity(
             root, run, impl_input, preparing_review=purpose == "review",
+            reviewed_input=reviewed_input,
         )
         validate_implementation_requirement(root, impl_input)
         return None
@@ -774,6 +776,23 @@ def validate_legacy_implementation_identity(
                     root, loop_type="implementation", loop_id=run.loop_id,
                     expected_digest=final.input_digest,
                 )
+            elif reviewed_input is None and not preparing_review:
+                from ai_sdlc.cli.loop_review_cmd import (
+                    resolve_review_input,
+                    validate_review_input_for_close,
+                )
+
+                # 构造快照时沿 purpose=review 返回，外层再核原摘要；闭后仍须通过质量门禁。
+                if run.status == LoopStatus.CLOSED:
+                    reviewed_input = validate_review_input_for_close(
+                        root, loop_type="implementation", loop_id=run.loop_id,
+                        expected_digest=final.input_digest,
+                    )
+                else:
+                    reviewed_input = resolve_review_input(
+                        root, loop_type="implementation", loop_id=run.loop_id,
+                        review_round_number=final.round_number,
+                    )
             if reviewed_input is not None:
                 if not isinstance(reviewed_input, ReviewInput) or (
                     reviewed_input.loop_id, reviewed_input.loop_type,

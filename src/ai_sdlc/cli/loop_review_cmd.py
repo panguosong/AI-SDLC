@@ -9,7 +9,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterator, MutableMapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
@@ -903,10 +903,14 @@ def _resolve_review_input(
         ]
         capture_only_paths = [run_path]
     capture_only_paths = _unique_paths([*capture_only_paths, *authority_only_paths])
-    # 量化模式以生成摘要的同次读取校验身份；不在读取后另开文件拼证据。
+    # 阶段身份使用生成摘要的同次读取；内核只捕获原件，不依赖业务模型。
+    identity_capture_paths = (
+        [loop_dir / "implementation-input.json"] if loop_type == "implementation" else []
+    )
     target_captures = captured_artifacts
     if (
-        b1_context is not None
+        bool(identity_capture_paths)
+        or b1_context is not None
         or (recovery_originals is not None and recovery_originals.originals)
         or (capture_paths is not None and captured_artifacts is not None)
     ):
@@ -924,7 +928,7 @@ def _resolve_review_input(
         capture_artifact_paths=(
             [*artifacts, *upstream_context, *capture_artifact_paths]
             if b1_context is not None or (recovery_originals is not None and recovery_originals.originals)
-            else capture_artifact_paths
+            else [*capture_artifact_paths, *identity_capture_paths]
         ),
         capture_only_paths=(
             _unique_paths([run_path, *capture_only_paths])
@@ -933,6 +937,9 @@ def _resolve_review_input(
         ),
         captured_artifacts=target_captures,
     )
+    if identity_capture_paths:
+        assert target_captures is not None
+        reviewed = _bind_implementation_review_identity(reviewed, target_captures)
     if recovery_originals is not None and recovery_originals.originals:
         assert target_captures is not None
         material_run = ReviewRun.model_validate_json(target_captures[run_path.relative_to(root).as_posix()])
@@ -990,6 +997,24 @@ def _resolve_review_input(
             )
             captured_artifacts[relative] = target_captures[relative]
     return reviewed
+
+
+def _bind_implementation_review_identity(
+    reviewed: ReviewInput, captured: Mapping[str, bytes],
+) -> ReviewInput:
+    """窄身份从整体摘要已捕获的原件派生，不重新读取可变输入。"""
+    from ai_sdlc.core.implementation_models import ImplementationInput
+    from ai_sdlc.core.implementation_store import implementation_input_digest
+
+    input_key = (
+        f".ai-sdlc/loops/implementation/{reviewed.loop_id}/implementation-input.json"
+    )
+    impl_input = ImplementationInput.model_validate_json(captured[input_key])
+    identity = (
+        implementation_input_digest(impl_input)
+        if impl_input.decision_mode == "legacy" else None
+    )
+    return reviewed.model_copy(update={"implementation_input_digest": identity})
 
 
 def resolve_b1_review_snapshot(

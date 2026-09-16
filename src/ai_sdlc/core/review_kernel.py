@@ -195,18 +195,6 @@ def build_review_input(
     }
     if capture_paths and captured_artifacts is None:
         raise ValueError("captured_artifacts is required when capture paths are set")
-    implementation_input_path = (
-        f".ai-sdlc/loops/implementation/{loop_id}/implementation-input.json"
-    )
-    capture_implementation_identity = loop_type == "implementation" and any(
-        _review_relative_path(resolved_root, path) == implementation_input_path
-        for path in artifact_paths
-    )
-    if capture_implementation_identity:
-        # 窄身份与整体评审摘要使用同次读取，不能另读可变文件补一个身份声明。
-        capture_paths.add(implementation_input_path)
-        if captured_artifacts is None:
-            captured_artifacts = {}
     artifacts = _read_paths(
         resolved_root,
         artifact_paths,
@@ -263,23 +251,11 @@ def build_review_input(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    implementation_identity = None
-    if capture_implementation_identity:
-        from ai_sdlc.core.implementation_models import ImplementationInput
-        from ai_sdlc.core.implementation_store import implementation_input_digest
-
-        assert captured_artifacts is not None
-        impl_input = ImplementationInput.model_validate_json(
-            captured_artifacts[implementation_input_path]
-        )
-        if impl_input.decision_mode == "legacy":
-            implementation_identity = implementation_input_digest(impl_input)
     return ReviewInput(
         loop_id=loop_id,
         loop_type=loop_type,
         round_number=round_number,
         input_digest=hashlib.sha256(encoded).hexdigest(),
-        implementation_input_digest=implementation_identity,
         artifact_paths=[path for path, _, _, _ in artifacts],
         upstream_context_paths=[path for path, _, _, _ in upstream],
         risk_signals=normalized_signals,

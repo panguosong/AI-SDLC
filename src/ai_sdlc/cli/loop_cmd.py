@@ -111,6 +111,7 @@ from ai_sdlc.core.requirement_loop import (
     freeze_requirement_loop,
     start_requirement_loop,
 )
+from ai_sdlc.core.review_kernel import ReviewInput
 from ai_sdlc.core.stable_file_read import read_stable_bytes
 from ai_sdlc.utils.helpers import find_project_root
 
@@ -890,7 +891,7 @@ def implementation_close(
     _run_project_writer_adapter(json_output=json_output)
     root = _project_root_or_exit(json_output=json_output)
     reviewed_artifacts: dict[str, bytes] = {}
-    _require_review_close_guard(
+    reviewed_input = _require_review_close_guard(
         root,
         loop_type="implementation",
         loop_id=loop_id,
@@ -909,6 +910,7 @@ def implementation_close(
             ),
             review_input_validator=validate_review_input_for_close,
             reviewed_artifacts=reviewed_artifacts,
+            reviewed_input=reviewed_input,
         ),
         json_output=json_output,
     )
@@ -1246,9 +1248,9 @@ def _require_review_close_guard(
     expected_digest: str,
     json_output: bool,
     captured_artifacts: MutableMapping[str, bytes] | None = None,
-) -> None:
+) -> ReviewInput:
     try:
-        validate_review_input_for_close(
+        return validate_review_input_for_close(
             root,
             loop_type=loop_type,
             loop_id=loop_id,

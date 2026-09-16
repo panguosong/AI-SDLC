@@ -106,6 +106,7 @@ from ai_sdlc.core.quality_command import (
     run_quality_command,
 )
 from ai_sdlc.core.review_kernel import (
+    ReviewInput,
     ReviewInputValidator,
     revalidate_review_input_at_transition,
 )
@@ -659,6 +660,7 @@ def close_implementation_loop(
     *,
     review_input_validator: ReviewInputValidator | None = None,
     reviewed_artifacts: Mapping[str, bytes] | None = None,
+    reviewed_input: ReviewInput | None = None,
 ) -> ImplementationCommandResult:
     """Close an implementation loop after required task evidence is complete."""
 
@@ -679,6 +681,7 @@ def close_implementation_loop(
                 replace(options, loop_id=loop_id),
                 review_input_validator=review_input_validator,
                 reviewed_artifacts=reviewed_artifacts,
+                reviewed_input=reviewed_input,
             )
     except _ImplementationWriteLockError as exc:
         return _blocked_result(str(exc), loop_id=options.loop_id.strip())
@@ -689,6 +692,7 @@ def _close_implementation_loop_locked(
     *,
     review_input_validator: ReviewInputValidator | None = None,
     reviewed_artifacts: Mapping[str, bytes] | None = None,
+    reviewed_input: ReviewInput | None = None,
 ) -> ImplementationCommandResult:
     root = options.root.resolve()
     expected_loop_id = options.loop_id.strip()
@@ -742,6 +746,7 @@ def _close_implementation_loop_locked(
         loop_id=loop_run.loop_id,
         input_digest=loop_run.input_digest,
         reviewed_artifacts=reviewed_artifacts,
+        reviewed_input=reviewed_input,
     )
     if isinstance(loaded, ImplementationCommandResult):
         return loaded
@@ -1007,6 +1012,7 @@ def _read_current_state(
     loop_id: str,
     input_digest: str = "",
     reviewed_artifacts: Mapping[str, bytes] | None = None,
+    reviewed_input: ReviewInput | None = None,
 ) -> (
     tuple[ImplementationInput, ImplementationTasks, ImplementationProgress]
     | ImplementationCommandResult
@@ -1090,7 +1096,8 @@ def _read_current_state(
             )
         else:
             validate_implementation_context(
-                root, read_loop_run(artifacts.loop_run_path), impl_input
+                root, read_loop_run(artifacts.loop_run_path), impl_input,
+                reviewed_input=reviewed_input,
             )
         from ai_sdlc.core.loop_review_service import (
             reject_retired_implementation_continuation,

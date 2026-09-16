@@ -180,6 +180,8 @@ jobs:
                          tests/architecture/test_removed_review_subsystems.py tests/unit/test_verify_constraints.py
                          tests/unit/test_loop_resource_lock.py tests/integration/test_cli_pr_review.py)
             fi
+            # 取消前仍保留具体用例与慢测试栈；只诊断，不终止测试或延长门禁。
+            test_args+=(-vv -o faulthandler_timeout=180)
           else
             while IFS= read -r node; do
               test_args+=("${node}")

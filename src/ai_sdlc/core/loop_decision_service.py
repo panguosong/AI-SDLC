@@ -692,13 +692,58 @@ def _check_sources(root: Path, loop_dir: Path, request: DecisionPrepareInput) ->
             raise DecisionPreparationError("decision-source-digest-mismatch")
 
 
+def _capture_opaque_implementation_receipt(
+    root: Path, run: LoopRun, impl_input: ImplementationInput | None,
+) -> dict[Path, bytes | None]:
+    """旧凭据须有明确完整的旧结构；擦除绑定本身不能证明历史身份。"""
+    from ai_sdlc.core.implementation_models import (
+        ImplementationClose,
+        ImplementationReport,
+    )
+
+    artifacts = implementation_artifacts(root, run.loop_id)
+    sidecars = (artifacts.tasks_path, artifacts.progress_path, artifacts.evidence_path)
+    captured = {
+        path: _optional_bytes(root, path)
+        for path in (artifacts.input_path, artifacts.report_json_path, artifacts.close_path, *sidecars)
+    }
+    report_bytes, close_bytes = captured[artifacts.report_json_path], captured[artifacts.close_path]
+    if run.status != LoopStatus.CLOSED or report_bytes is None or close_bytes is None:
+        raise DecisionPreparationError("decision-identity-mismatch")
+    report = ImplementationReport.model_validate_json(report_bytes)
+    close = ImplementationClose.model_validate_json(close_bytes)
+    if (
+        report.status != LoopStatus.PASSED
+        or report.loop_id != run.loop_id
+        or report.work_item_id != run.work_item_id
+        or close.loop_id != run.loop_id
+        or close.review_binding is not None
+    ):
+        raise DecisionPreparationError("decision-identity-mismatch")
+    input_bytes = captured[artifacts.input_path]
+    if impl_input is None:
+        # 最早的 receipt-only 格式没有输入和执行工件，不补造过去的绑定。
+        valid = input_bytes is None and all(captured[path] is None for path in sidecars)
+    else:
+        # 带输入的旧凭据保留三个空对象；缺件、非空或破损工件均不能冒充占位符。
+        valid = (
+            input_bytes is not None
+            and ImplementationInput.model_validate_json(input_bytes) == impl_input
+            and all(captured[path] is not None and json.loads(captured[path]) == {} for path in sidecars)
+        )
+    if not valid:
+        raise DecisionPreparationError("decision-identity-mismatch")
+    return captured
+
+
 def validate_legacy_implementation_identity(
     root: Path, run: LoopRun, impl_input: ImplementationInput | None,
     *, preparing_review: bool = False,
     reviewed_input: ReviewInput | None = None,
     review_input_validator: ReviewInputValidator | None = None,
+    captured_artifacts: dict[Path, bytes | None] | None = None,
 ) -> bool:
-    """只把没有原生绑定足迹的历史凭据视为 opaque；返回是否可沿用旧读取协议。"""
+    """仅完整匹配旧凭据时沿用 opaque 读取；原生绑定缺失不改变记录身份。"""
     artifacts = implementation_artifacts(root, run.loop_id)
     reviews = {
         path: _optional_bytes(root, path)
@@ -731,6 +776,18 @@ def validate_legacy_implementation_identity(
         or (bound and (impl_input is None or not run.input_digest))
     ):
         raise DecisionPreparationError("decision-identity-mismatch")
+    opaque_material = (
+        _capture_opaque_implementation_receipt(root, run, impl_input)
+        if not native_footprint else {}
+    )
+    if captured_artifacts is not None:
+        # 分类与最终消费者必须使用同份原件，不能拼接不同时间读到的合法片段。
+        if any(
+            path in captured_artifacts and captured_artifacts[path] != content
+            for path, content in opaque_material.items()
+        ):
+            raise DecisionPreparationError("decision-identity-mismatch")
+        captured_artifacts.update(opaque_material)
     if native_footprint and run.status == LoopStatus.CLOSED:
         from ai_sdlc.core.loop_review_service import has_actionable_findings
 
@@ -823,7 +880,10 @@ def validate_legacy_implementation_identity(
             elif not preparing_review:
                 # 仅允许只读构造完整旧快照；执行/写入仍须得到可核对的原摘要。
                 raise DecisionPreparationError("decision-legacy-review-binding-unavailable")
-    if any(_optional_bytes(root, path) != content for path, content in reviews.items()):
+    if any(
+        _optional_bytes(root, path) != content
+        for path, content in (reviews | opaque_material).items()
+    ):
         raise DecisionPreparationError("decision-identity-mismatch")
     return not bound
 

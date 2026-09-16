@@ -249,6 +249,7 @@ def read_verified_implementation_close(
         # 缺失摘要不是历史身份：执行路径或评审足迹仍须保留原生输入绑定。
         opaque = validate_legacy_implementation_identity(
             root, run, impl_input, review_input_validator=review_input_validator,
+            captured_artifacts=captured,
         )
         if impl_input is not None:
             validate_implementation_requirement(
@@ -266,7 +267,8 @@ def read_verified_implementation_close(
             raise LoopReviewServiceError("closed-loop-identity-mismatch")
         _verify_simulation_close_review(root, loop_id, review_input_validator)
     if any(
-        read_stable_bytes(root, path) != content for path, content in captured.items()
+        (read_stable_bytes(root, path) if _stable_regular_file_exists(root, path) else None)
+        != content for path, content in captured.items()
     ):
         raise LoopReviewServiceError("closed-loop-receipt-drift")
     return close

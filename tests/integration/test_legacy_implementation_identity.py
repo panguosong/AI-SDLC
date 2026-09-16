@@ -207,6 +207,32 @@ def test_true_opaque_historical_implementation_still_consumes_unbound_design(tmp
     assert _loop_bytes(tmp_path) == before
 
 
+def test_erasing_review_and_run_bindings_cannot_turn_native_close_into_opaque(
+    initialized_project_dir,
+):
+    root = initialized_project_dir
+    _, requirement = _native_closed_baseline(root, repair=True)
+    for digest in ("empty", "retained"):
+        case = root.parent / f"erased-native-provenance-{digest}"
+        shutil.copytree(root, case)
+        if digest == "empty":
+            _redirect_and_damage(case, requirement, "digest-empty", design_has_run=False)
+        directory = case / ".ai-sdlc/loops/implementation" / IMPLEMENTATION
+        for path in directory.glob("review-outcome-round-*.json"):
+            path.unlink()
+        run_path = directory / "loop-run.json"
+        run = json.loads(run_path.read_bytes())
+        for item in run["rounds"]:
+            item["input_artifacts"] = []
+            item["output_artifacts"] = []
+        run_path.write_text(json.dumps(run))
+        before = _loop_bytes(case)
+        with pytest.raises(ValueError):
+            read_verified_implementation_close(case, IMPLEMENTATION)
+        assert _implementation_gate(case, IMPLEMENTATION, work_item_id="stage-requirement")[2]
+        assert _loop_bytes(case) == before
+
+
 def test_reviewed_legacy_rejects_compound_upstream_identity_tamper(initialized_project_dir):
     root = initialized_project_dir
     opened, requirement = _native_closed_baseline(root)

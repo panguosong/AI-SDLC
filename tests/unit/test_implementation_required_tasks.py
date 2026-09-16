@@ -12,6 +12,7 @@ from ai_sdlc.core.implementation_loop import (
     ImplementationRecordOptions,
     ImplementationStartOptions,
     _task_required,
+    _task_sections,
     close_implementation_loop,
     record_implementation_progress,
     start_implementation_loop,
@@ -252,3 +253,59 @@ def test_required_field_ignores_markdown_code_examples(
     section: str, priority: str, required: bool
 ) -> None:
     assert _task_required(section, priority) == (required, "")
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "```markdown\n### Task T99 示例\n- required: true\n```",
+        "~~~markdown\n### Task T99 示例\n- required: true\n~~~",
+        "````markdown\n```\n### Task T99 示例\n- required: true\n````",
+        "~~~markdown\n```\n### Task T99 示例\n- required: true\n~~~",
+        "   ```markdown\n### Task T99 示例\n- required: true\n   ```",
+        "    ### Task T99 示例\n    - required: true",
+        "\t### Task T99 示例\n\t- required: true",
+    ],
+)
+def test_task_discovery_does_not_promote_code_example_headings(example: str) -> None:
+    text = (
+        "### Task T11 实际任务\n- required: true\n\n"
+        f"{example}\n\n"
+        "### Task T12 实际任务\n- required: true\n"
+    )
+    sections = _task_sections(text)
+    assert [section.splitlines()[0] for section in sections] == [
+        "### Task T11 实际任务", "### Task T12 实际任务"
+    ]
+    assert all(_task_required(section, "") == (True, "") for section in sections)
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_start_snapshot_excludes_fenced_tasks_and_metadata(
+    tmp_path: Path, fence: str
+) -> None:
+    work_item = _explicit_required_work_item(tmp_path)
+    tasks_path = work_item / "tasks.md"
+    text = tasks_path.read_text(encoding="utf-8")
+    example = (
+        f"{fence}markdown\n### Task T99 示例\n- required: true\n"
+        "- priority: P0\n- scope: src/example.py\n"
+        "- acceptance criteria: FR-IMPL-001 and SC-IMPL-001 are covered.\n"
+        "- verification: python check_example.py\n"
+        f"{fence}\n\n"
+    )
+    tasks_path.write_text(example + text, encoding="utf-8")
+    _close_design_contract_for_work_item(tmp_path, work_item)
+    result = start_implementation_loop(
+        ImplementationStartOptions(
+            root=tmp_path, work_item="specs/demo-implementation-loop",
+            loop_id="impl-code-example",
+        )
+    )
+    assert result.status == "ready", result.blocker
+    assert result.required_task_count == 4
+    path = tmp_path / ".ai-sdlc/loops/implementation/impl-code-example/implementation-tasks.json"
+    items = json.loads(path.read_text(encoding="utf-8"))["items"]
+    assert [item["task_id"] for item in items] == list(_TASK_IDS)
+    assert all(item["priority"] == "" for item in items)
+    assert all(item["files"] == [f"src/{item['task_id']}.py"] for item in items)

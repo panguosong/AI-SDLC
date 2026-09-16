@@ -123,7 +123,7 @@ _REQUIRED = re.compile(
     r"^\s*(?:[-*]\s+)?(?:required|\*\*required\*\*)\s*[:：]\s*(.*?)\s*$",
     re.IGNORECASE,
 )
-_REQUIRED_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_TASK_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _CANONICAL_SCOPE = re.compile(r"^\s*-\s*scope\s*:\s*(.*)$", re.IGNORECASE)
 _INDENTED_LIST_ITEM = re.compile(r"^\s{2,}-\s+(.+?)\s*$")
 _FRONTEND_SIGNAL = re.compile(
@@ -1376,6 +1376,8 @@ def _parse_tasks_file(
 
 
 def _task_sections(text: str) -> list[str]:
+    # 先去掉围栏示例，避免其中的任务标题截断真实任务并丢失围栏上下文。
+    text = _task_text_without_fenced_code(text)
     matches = list(_TASK_SECTION.finditer(text))
     sections: list[str] = []
     for index, match in enumerate(matches):
@@ -1404,15 +1406,12 @@ def _task_priority(section: str) -> str:
     return match.group(1).upper() if match else ""
 
 
-def _task_required(section: str, priority: str) -> tuple[bool, str]:
-    """显式必做与优先级分开保留，缺省兼容旧规则且不允许降级高优先级任务。"""
-    values: list[str] = []
+def _task_text_without_fenced_code(text: str) -> str:
+    lines: list[str] = []
     fence = ""
-    for line in section.splitlines():
-        # 代码示例不能声明字段；围栏只由相同字符且足够长的空尾标记结束。
-        if line.expandtabs(4).startswith("    "):
-            continue
-        marker = _REQUIRED_FENCE.fullmatch(line)
+    for line in text.splitlines(keepends=True):
+        marker = _TASK_FENCE.fullmatch(line.rstrip("\r\n"))
+        # 围栏只由相同字符且足够长的空尾标记结束；保留行边界和真实嵌套列表。
         if fence:
             if (
                 marker
@@ -1421,9 +1420,22 @@ def _task_required(section: str, priority: str) -> tuple[bool, str]:
                 and not marker.group(2).strip()
             ):
                 fence = ""
+            lines.append("\n")
             continue
         if marker and (marker.group(1)[0] != "`" or "`" not in marker.group(2)):
             fence = marker.group(1)
+            lines.append("\n")
+            continue
+        lines.append(line)
+    return "".join(lines)
+
+
+def _task_required(section: str, priority: str) -> tuple[bool, str]:
+    """显式必做与优先级分开保留，缺省兼容旧规则且不允许降级高优先级任务。"""
+    values: list[str] = []
+    for line in _task_text_without_fenced_code(section).splitlines():
+        # 缩进代码示例不能声明字段。
+        if line.expandtabs(4).startswith("    "):
             continue
         if match := _REQUIRED.fullmatch(line):
             values.append(match.group(1).casefold())
